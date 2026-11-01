@@ -91,7 +91,7 @@ class TestStatusWriterConfigCurrent(unittest.TestCase):
     """What the status writer hands WordPress as config-current.json."""
 
     def setUp(self):
-        from test_status_writer import FakeDocker
+        from test_status_writer import FakeDocker, StatusApp
         from onionpress.platform import OS, resolve_paths
         from onionpress import status_writer
         self.tmp = tempfile.mkdtemp(prefix="op-write-status-")
@@ -103,7 +103,7 @@ class TestStatusWriterConfigCurrent(unittest.TestCase):
         self.docker = FakeDocker({
             "ps -a --filter label=com.docker.compose.project":
                 "onionpress-tor\trunning\tdocker\nonionpress-wordpress\trunning\tdocker\n"})
-        self.app = status_writer.OneShotStatus(
+        self.app = StatusApp(
             resolve_paths(data_dir=self.data, app_bundle=""), docker=self.docker,
             health=mock.Mock(**{"check_tor_bootstrap.return_value": (False, 0)}),
             version="0.0.0-test", log=lambda m: None, os_name=OS.LINUX)

@@ -276,10 +276,9 @@ class TestStartStop(_Case):
                 self.request("restart")
                 result = ha.handle(self.host(os_name))
                 self.assertEqual(result["handled"], "restart")
-                want = [["apply-config"], ["restart"]]
-                if os_name == "linux":
-                    want.append(["write-status"])
-                self.assertEqual(self.argvs(), want)
+                # No write-status after it on either platform (#407): the
+                # daemon writes the status after every handled action.
+                self.assertEqual(self.argvs(), [["apply-config"], ["restart"]])
                 res = self.docker.result("service-result.json")
                 self.assertTrue(res["success"])
                 self.assertEqual(res["action"], "restart")
@@ -302,12 +301,13 @@ class TestStartStop(_Case):
         self.assertEqual(self.docker.result("service-result.json")["message"], "OnionPress stopped")
 
     def test_refresh_status(self):
-        self.request("refresh-status")
-        self.assertEqual(ha.handle(self.host("linux"))["handled"], "refresh-status")
-        self.assertEqual(self.argvs(), [["write-status"]])
-        self.request("refresh-status")
-        ha.handle(self.host("macos"))
-        self.assertEqual(self.argvs(), [["write-status"]])     # the menubar writes it
+        # Handled, and nothing run: the daemon writes status.json after
+        # every handled action on both platforms (#407).
+        for os_name in ("linux", "macos"):
+            with self.subTest(os_name=os_name):
+                self.request("refresh-status")
+                self.assertEqual(ha.handle(self.host(os_name))["handled"], "refresh-status")
+                self.assertEqual(self.argvs(), [])
 
 
 class TestReachability(_Case):
@@ -1203,7 +1203,7 @@ class TestThrottle(_Case):
         for _ in range(3):
             self.request("refresh-status")
             self.assertEqual(ha.handle(self.host("linux"))["handled"], "refresh-status")
-        self.assertEqual(self.argvs(), [["write-status"]] * 3)
+        self.assertEqual(self.argvs(), [])
 
 
 class TestLaunchers(unittest.TestCase):
@@ -1255,9 +1255,14 @@ class TestLaunchers(unittest.TestCase):
         self.assertEqual(found, ["src/onionpress/handle_action.py"])
         self.assertNotIn('umask 077; cat > "$1"', self._read("src/menubar.py"))
 
-    def test_the_watcher_unit_runs_it(self):
-        self.assertIn("ExecStart=/opt/onionpress/onionpress handle-action",
-                      self._read("linux/onionpress-watcher.service"))
+    def test_the_daemon_runs_it_on_linux_too(self):
+        # The daemon's status loop runs handle-action on both platforms
+        # (#407; until then onionpress-watcher.timer ran it every 10 s).
+        self.assertIn("ExecStart=/opt/onionpress/onionpress daemon",
+                      self._read("linux/onionpress-daemon.service"))
+        self.assertFalse(os.path.exists(os.path.join(PROJECT_ROOT, "linux", "onionpress-watcher.service")))
+        daemon = self._read("src/onionpress/daemon.py")
+        self.assertIn('rc, out = self.run_launcher(["handle-action", "--json", *args], timeout=None)', daemon)
 
     def test_the_mac_filename_pattern(self):
         """tests/test_backup_download.py's pattern must match what the

@@ -270,7 +270,7 @@ apt-get install -y -q {deb}
                 ("user-journal.log", ["sudo", "journalctl", f"_UID={uid}", "--no-pager", "-o", "short-iso"]),
                 ("onionpress-units.log", ["sudo", "journalctl", "--no-pager", "-o", "short-iso",
                                           f"_SYSTEMD_USER_UNIT=onionpress.service",
-                                          "+", f"_SYSTEMD_USER_UNIT=onionpress-heartbeat.service"]),
+                                          "+", f"_SYSTEMD_USER_UNIT=onionpress-daemon.service"]),
                 ("docker.log", ["sudo", "journalctl", "--no-pager", "-o", "short-iso", "-u", "docker"]),
                 ("user-units.txt", ["bash", os.path.join(self.share, "as-user.sh"), self.user or "root",
                                     "systemctl", "--user", "--no-pager", "--all", "list-units", "onionpress*"]),

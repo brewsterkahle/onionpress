@@ -396,7 +396,7 @@ class TestSideEffects(unittest.TestCase):
         self._write("START_ON_BOOT=no\n")
         out = self._apply(["START_ON_BOOT"], "linux")
         self.assertEqual(self.runs, [["systemctl", "--user", "disable",
-                                      "onionpress.service", "onionpress-heartbeat.service"]])
+                                      "onionpress.service", "onionpress-daemon.service"]])
         self.assertIn("Start on boot disabled.", out)
         self._write("START_ON_BOOT=yes\n")
         self._apply(["START_ON_BOOT"], "linux")

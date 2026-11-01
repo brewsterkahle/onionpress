@@ -28,11 +28,6 @@ log WordPress not installed -- run 'onionpress setup' or open the OnionPress tra
 docker port onionpress-wordpress 80/tcp
 log WordPress is not installed: keeping its port 8080 on 127.0.0.1 (was 0.0.0.0) until setup runs
 docker compose up -d wordpress [BIND=127.0.0.1]
-bin systemctl --user is-enabled onionpress-heartbeat.service
-bin systemctl --user mask --runtime onionpress-heartbeat.service
-log Heartbeat client held until WordPress is installed (no hub registration before setup)
-bin systemctl --user is-active onionpress-heartbeat.service
-bin systemctl --user stop onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
 docker compose up -d --no-deps tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp

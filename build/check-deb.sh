@@ -47,7 +47,6 @@ REQUIRED_EXECUTABLES=(
     ./opt/onionpress/onionpress-tray
     ./opt/onionpress/scripts/install_plugin.sh
     ./opt/onionpress/scripts/activate_plugin.sh
-    ./usr/lib/systemd/system-sleep/onionpress
     ./opt/onionpress/onionpress-wordpress-egress
     ./opt/onionpress/docker-rootless/dockerd-rootless.sh
     ./opt/onionpress/docker-rootless/dockerd-rootless-setuptool.sh
@@ -57,11 +56,8 @@ REQUIRED_FILES=(
     ./opt/onionpress/docker/docker-compose.yml
     ./opt/onionpress/lib/onionpress/__init__.py
     ./opt/onionpress/lib/onionpress/cli.py
-    ./opt/onionpress/scripts/onionpress-heartbeat.py
     ./usr/lib/systemd/user/onionpress.service
-    ./usr/lib/systemd/user/onionpress-heartbeat.service
-    ./usr/lib/systemd/user/onionpress-watcher.service
-    ./usr/lib/systemd/user/onionpress-watcher.timer
+    ./usr/lib/systemd/user/onionpress-daemon.service
     ./usr/lib/systemd/system/docker.service.d/onionpress-wordpress-egress.conf
     ./etc/xdg/autostart/onionpress-tray.desktop
     ./usr/share/applications/onionpress.desktop

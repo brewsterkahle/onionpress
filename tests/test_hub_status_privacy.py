@@ -379,7 +379,7 @@ class ConsumerCensusTest(unittest.TestCase):
         self.assertIn("STATUS_ENDPOINT", body)
         self.assertIn('"POST"', body)
         self.assertEqual(src.count('_hub_url("status/'), 1)
-        for rel in ("linux/onionpress-heartbeat.py", "linux/onionpress", "linux/onionpress-tray",
+        for rel in ("linux/onionpress", "linux/onionpress-tray",
                     "app/MacOS/onionpress", "app/Resources/plugins/onionpress-status.php",
                     "app/Resources/docker/tor/onionheaven-heartbeat.py",
                     "tests/stress/worker-server.py", "tests/stress/worker-bootstrap.py",

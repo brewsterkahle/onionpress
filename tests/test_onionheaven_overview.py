@@ -385,22 +385,15 @@ class TestWiring(unittest.TestCase):
         self.assertIn("{enable,disable,status,overview}", _read("src/onionpress/cli.py"))
 
     def test_linux_status_carries_the_overview(self):
-        # Linux's status is the same writer's, through `onionpress
-        # write-status` (#523): no second query of the registry in bash.
+        # Linux's status is the same writer's, the daemon's (#523, #407):
+        # no second query of the registry in bash.
         src = _read("linux/onionpress")
-        self.assertIn('op_py --data-dir "$DATA_DIR" write-status', src)
+        self.assertNotIn("write-status", src)
         self.assertNotIn("sqlite3 /var/lib/onionheaven", src)
         self.assertNotIn("onionheaven overview --json", src)
         block = onionheaven.status_block(onionheaven.overview(
             FakeApp(tempfile.mkdtemp(prefix="op-ov-")), hub=False))
         self.assertIn("generated_at", block)
-
-    def test_linux_heartbeat_keeps_the_timestamps(self):
-        src = _read("linux/onionpress-heartbeat.py")
-        body = src[src.index("def _record_registered("):]
-        body = body[:body.index("\ndef ", 10)]
-        self.assertIn('"last_heartbeat_at": now,', body)
-        self.assertIn('state["registered_at"] = now', body)
 
 
 

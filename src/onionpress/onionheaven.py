@@ -1038,6 +1038,9 @@ class OnionHeavenClient:
             "timestamp": timestamp,
             "signature": signature,
         }
+        # A node run as a hub says so with a signature of its own.
+        payload_dict.update(peer_claim_fields(self.app, secret_key_bytes, public_key_raw,
+                                              content_addr, hc_addr, timestamp))
 
         # Always include the key — every /online is both heartbeat and registration
         try:
@@ -1675,6 +1678,9 @@ class OnionHeavenClient:
             "timestamp": timestamp,
             "signature": signature,
         }
+        if endpoint == "online":
+            payload_dict.update(peer_claim_fields(self.app, secret_key_bytes, public_key_raw,
+                                                  content_addr, hc_addr, timestamp))
 
         # /online requires the arti key so OnionHeaven can do takeover if needed
         if endpoint == "online":
@@ -1872,6 +1878,42 @@ _ALWAYS_AWAKE_ADDRESSES = frozenset([
     _KNOWN_ONIONHEAVEN_ADDRESS,
     "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
 ])
+
+
+# Endpoint label the hub's web-server.py requires on the signature backing
+# an is_onionheaven claim (PEER_CLAIM_ENDPOINT there; a test keeps them
+# equal). The field sits outside the signed canonical string, so the hub
+# counts it only with this signature of its own.
+PEER_CLAIM_ENDPOINT = "onionheaven-peer"
+
+
+def is_onionheaven_server(app):
+    """Whether the operator runs this node as an OnionHeaven hub too:
+    ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes in the config, the switch that
+    makes the tor container accept registrations (never the activation
+    marker, a launcher hint). The claim earns the node the canonical hub's
+    30-min peer grace before a takeover (until #407 Linux's heartbeat
+    client made it; the daemon makes it on both platforms)."""
+    try:
+        value = app.read_config_value("ONIONHEAVEN_ACCEPT_REGISTRATIONS", "")
+    except Exception:
+        return False
+    return str(value or "").strip().lower() == "yes"
+
+
+def peer_claim_fields(app, secret_key_bytes, public_key_raw, content_addr, hc_addr, timestamp):
+    """The /online payload's peer claim: {"is_onionheaven": True,
+    "onionheaven_peer_signature": …} when this node is run as a hub
+    (is_onionheaven_server), else {}."""
+    if not is_onionheaven_server(app):
+        return {}
+    from onionpress import onion_auth  # deferred, as the other signers' (PyNaCl)
+    return {
+        "is_onionheaven": True,
+        "onionheaven_peer_signature": onion_auth.sign_payload(
+            secret_key_bytes, public_key_raw,
+            PEER_CLAIM_ENDPOINT, content_addr, hc_addr, timestamp),
+    }
 
 
 def is_onionheaven_instance(onion_address):

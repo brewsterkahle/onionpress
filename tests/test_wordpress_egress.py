@@ -1277,13 +1277,16 @@ class TestLaunchers(unittest.TestCase):
         self.assertIn('if "CLEARNET" in l', daemon)
 
     def test_linux_reapplies_when_rootless_docker_restarts(self):
-        text = _read(LINUX_LAUNCHER)
-        loop = _function_body(text, "_status_poll_loop")
-        self.assertIn("now=$(rootless_netns)", loop)
-        self.assertIn("block_wordpress_egress", loop)
-        netns = _function_body(text, "rootless_netns")
-        self.assertIn("dockerd-rootless/child_pid", netns)
-        self.assertIn('readlink "/proc/$pid/ns/net"', netns)
+        # The daemon's watch (issue #407; until then the launcher's bash
+        # status loop): tests/test_linux_daemon.py runs it.
+        daemon = _read(os.path.join(ROOT, "src", "onionpress", "daemon.py"))
+        watch = daemon[daemon.index("    def _watch_rootless_netns(self):"):]
+        watch = watch[:watch.index("\n    # --", 1)]
+        self.assertIn('"wordpress-egress", "--wp-port"', watch)
+        read = daemon[daemon.index("    def _read_rootless_netns(self):"):daemon.index("    def _watch_rootless_netns(self):")]
+        self.assertIn('"dockerd-rootless", "child_pid"', read)
+        self.assertIn('os.readlink(f"/proc/{pid}/ns/net")', read)
+        self.assertNotIn("_status_poll_loop", _read(LINUX_LAUNCHER))
 
     def test_the_deb_ships_the_script_and_a_docker_drop_in(self):
         """System Docker restarts the containers at boot before the user's

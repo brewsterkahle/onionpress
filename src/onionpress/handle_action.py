@@ -4,9 +4,9 @@ handled once for both platforms (issue #366, CLI-first phase 2).
 The page asks the host for something by writing files into the shared
 volume (/var/lib/onionpress/, www-data's): `requested-action` names one of
 ACTIONS, and `backup-password`, `restore-password`, `restore-upload.zip`
-and `import-key-data` carry what the action needs. On Linux
-onionpress-watcher.timer runs `onionpress handle-action` every 10 s; on
-the Mac the menubar's status loop runs it. Anything running in WordPress
+and `import-key-data` carry what the action needs. The daemon's status
+loop runs `onionpress handle-action` on both platforms (until issue #407
+Linux's onionpress-watcher.timer ran it every 10 s). Anything running in WordPress
 can write those files, so the verbs are fixed, every result goes back to
 the page scrubbed, and nothing here changes the site's onion address
 without the person at the host: on Linux a key import is refused and a
@@ -15,7 +15,7 @@ Mac the handler stops at the question and the menubar asks it in a native
 dialog (the check/confirm protocol, onionpress.confirm).
 
 What the actions do runs through the launcher (`Host.run_launcher`):
-start, restart, stop, apply-config, write-status (Linux), import-key,
+start, restart, stop, apply-config, import-key,
 settings-page-backup, settings-page-restore, update. The Linux launcher
 keeps its bash bodies behind those subcommands and the Mac launcher
 delegates them to onionpress.cli; this module is what both share.
@@ -82,8 +82,8 @@ READ_LIMITS = {REQUEST_FILE: 256, REQUEST_ID_FILE: 256,
 # Seconds between two runs of one action (issue #396): the last run's
 # time per action is kept in THROTTLE_FILE under the data dir, since on
 # Linux every run is a new process. A request inside the interval is
-# dropped with a result the page can show. refresh-status is free: it
-# only rewrites status.json, and the Linux watcher runs every 10 s.
+# dropped with a result the page can show. refresh-status is free: the
+# daemon rewrites status.json after every handled action anyway.
 MIN_INTERVAL = {"start": 60, "restart": 60, "stop": 60,
                 "create-backup": 60, "restore-backup": 60, "import-key-file": 60,
                 "update": 60, "check-reachability": 30, "refresh-status": 0}
@@ -511,13 +511,6 @@ def throttle(host, action, now=None):
 
 # -- start / restart / stop --
 
-def _write_status(host):
-    """status.json for the page: the Linux launcher writes it; on the Mac
-    the menubar does, after this run returns."""
-    if host.os_name == "linux":
-        host.run_launcher(["write-status"], timeout=300)
-
-
 def _start(host, action):
     # The page's Restart also applies its saved settings (Linux has always
     # done so; the config file is what the start reads).
@@ -529,7 +522,6 @@ def _start(host, action):
     host.log(f"Settings page: {action}ing OnionPress...")
     r = host.run_launcher([action])
     host.wait_running()
-    _write_status(host)
     verb = "Restarted" if action == "restart" else "Started"
     ok = r.returncode == 0
     host.write_result("service-result.json", {
@@ -550,7 +542,8 @@ def _stop(host):
 
 
 def _refresh_status(host):
-    _write_status(host)
+    """The page asked for a fresh status.json: the daemon writes it after
+    every handled action (and every tick); nothing to run here."""
 
 
 # -- reachability --
@@ -632,7 +625,6 @@ def _import_key(host, key, confirmed):
     # Restart to pick up the imported key
     host.run_launcher(["restart"])
     host.wait_running(120)
-    _write_status(host)
     addr = host.served_address() or ans.get("new", "")
     host.log(f"Settings page: key imported, address: {addr}")
     host.write_result("import-result.json", {
@@ -785,7 +777,6 @@ def _settings_page_restore(host, local_zip, password, confirmed, work):
         # Restart to pick up restored keys
         host.run_launcher(["restart"])
         host.wait_running(120)
-        _write_status(host)
         addr = host.served_address()
         host.write_result("restore-result.json", {
             "success": True, "address": addr, "restored_at": now_iso()})

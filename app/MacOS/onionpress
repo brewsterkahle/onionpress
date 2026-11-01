@@ -2489,7 +2489,7 @@ main() {
         handle-action)
             # The WordPress Settings page's requests, handled once for both
             # platforms (onionpress.handle_action, issue #366): the daemon
-            # runs this on its status loop (Linux: onionpress-watcher.timer).
+            # runs this on its status loop (on Linux too, issue #407).
             # The actions run through this launcher: start, restart, stop,
             # apply-config, import-key, settings-page-backup,
             # settings-page-restore, update. A key import or a restore of

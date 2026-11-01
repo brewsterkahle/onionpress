@@ -94,9 +94,10 @@ def run_detached_cli(argv: list[str], *, data_dir: str, log_file: str) -> None:
     """Start `onionpress --data-dir DATA_DIR ARGV` in the background, its
     output appended to *log_file*, so that it outlives this start and the
     launcher's EXIT trap (which kills its own jobs): a session of its own.
-    Started by the Linux Settings-page watcher (ONIONPRESS_IN_WATCHER),
-    it goes out of the watcher's cgroup through systemd-run, as the bash
-    run_detached did, or the watcher's stop would end it."""
+    Started under the Linux daemon's unit (ONIONPRESS_IN_WATCHER, set by
+    the launcher's handle-action case; until #407 the watcher timer's
+    oneshot), it goes out of that unit's cgroup through systemd-run, as
+    the bash run_detached did, or the unit's stop would end it."""
     from .derivatives import isolated_cli_argv
     command = isolated_cli_argv("--data-dir", data_dir, *argv)
     if os.environ.get("ONIONPRESS_IN_WATCHER") == "true" and shutil.which("systemd-run"):

@@ -32,12 +32,12 @@ MAC = "app/MacOS/onionpress"
 LINUX = "linux/onionpress"
 
 # (file, the launchers its verbs may name): a Mac-only caller's verb must
-# be the Mac launcher's; a shared caller branches on the platform
-# (handle_action's `write-status` is Linux's), so its verb must be some
-# launcher's. The Linux tray is held by
+# be the Mac launcher's; a shared caller branches on the platform (the
+# daemon's `start-tor` is behind its Mac branch, #407), so its verb must
+# be some launcher's. The Linux tray is held by
 # tests/test_launcher_dispatch_linux.py's TestTrayRunsOnlyLauncherVerbs.
 CALLERS = {
-    "src/onionpress/daemon.py": (MAC,),
+    "src/onionpress/daemon.py": (MAC, LINUX),
     "src/menubar.py": (MAC,),
     "src/onionpress/settings_ui.py": (MAC,),
     "src/onionpress/handle_action.py": (MAC, LINUX),

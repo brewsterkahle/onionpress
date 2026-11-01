@@ -634,8 +634,9 @@ class TestLinuxSettingsPageRestoreRefusesAnotherAddress(unittest.TestCase):
     the Mac's): a backup of another address than the one served is refused
     before anything is touched (ADDRESS_CHANGE_REFUSED_MSG, exit 3: no one
     at this host to ask), a backup of this address or without a key is
-    restored, and the heartbeat client unit is stopped before the hubs are
-    asked to let go of the old key and started again after."""
+    restored, with the hubs asked to let go of the old key before it is
+    written (no unit stopped around it since #407: the daemon's beats stay
+    off a released key)."""
 
     def setUp(self):
         mv._cheap_kdf(self)
@@ -655,11 +656,7 @@ class TestLinuxSettingsPageRestoreRefusesAnotherAddress(unittest.TestCase):
                 ("onionpress.cli._settings_page_log", {"return_value": self.logs.append}),
                 ("onionpress.cli.detect_os", {"return_value": OS.LINUX}),
                 ("onionpress.cli.release_onionheaven",
-                 {"side_effect": lambda *a, **k: self.heartbeat.append("release")}),
-                ("onionpress.heartbeat_unit.stop",
-                 {"side_effect": lambda log, run=None: self.heartbeat.append("stop")}),
-                ("onionpress.heartbeat_unit.start",
-                 {"side_effect": lambda log, run=None: self.heartbeat.append("start")})):
+                 {"side_effect": lambda *a, **k: self.heartbeat.append("release")})):
             p = mock.patch(target, **kw)
             p.start()
             self.addCleanup(p.stop)
@@ -682,16 +679,15 @@ class TestLinuxSettingsPageRestoreRefusesAnotherAddress(unittest.TestCase):
                 self.assertEqual(self.heartbeat, [])
                 self.assertTrue([m for m in self.logs if "refused (the Settings page's restore)" in m])
 
-    def test_this_address_is_restored_with_the_heartbeat_paused(self):
+    def test_this_address_is_restored_after_the_hubs_are_asked(self):
         self.served = ADDR
         with mock.patch.object(backup, "restore_container_artifacts"), \
                 mock.patch.object(backup, "apply_config_overrides"):
             rc, answer = self._restore(_keyed_backup(self.tmp, "same.zip"))
         # write_private_key raises _KeyWritten (the stub): the error path,
-        # after the heartbeat was stopped and the hubs asked, and the
-        # heartbeat is started again all the same.
+        # after the hubs were asked; no unit stopped or started around it.
         self.assertEqual(rc, 1)
-        self.assertEqual(self.heartbeat, ["stop", "release", "start"])
+        self.assertEqual(self.heartbeat, ["release"])
 
     def test_a_backup_without_a_key_keeps_it_and_asks_nothing(self):
         with mock.patch.object(backup, "restore_container_artifacts"), \

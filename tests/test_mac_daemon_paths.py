@@ -264,13 +264,12 @@ class TestRun(_PathsCase):
         self.assertLess(time.monotonic() - t, 1)
 
     def test_main_loop_once_runs_the_cfrunloop(self):
-        fake = types.SimpleNamespace(run_loop_once=mock.Mock(return_value=True))
-        self.d._power = object()
+        # The handler turns the run loop (MacPowerHandler.run_loop_once);
+        # True means the turn was taken and the daemon does not wait.
+        self.d._power = types.SimpleNamespace(run_loop_once=mock.Mock(return_value=True))
         self.d._stop.wait = mock.Mock()
-        with mock.patch.dict(sys.modules, {"onionpress.mac_power": fake}), \
-                mock.patch.object(onionpress, "mac_power", fake, create=True):
-            self.d._main_loop_once(1.0)
-        fake.run_loop_once.assert_called_once_with(1.0)
+        self.d._main_loop_once(1.0)
+        self.d._power.run_loop_once.assert_called_once_with(1.0)
         self.d._stop.wait.assert_not_called()
 
     def power(self, register):
@@ -282,17 +281,22 @@ class TestRun(_PathsCase):
                 if isinstance(register, Exception):
                     raise register
                 return register
-        fake = types.SimpleNamespace(MacPowerHandler=Handler)
         self.d._power = None
-        with mock.patch.dict(sys.modules, {"onionpress.mac_power": fake}), \
-                mock.patch.object(onionpress, "mac_power", fake, create=True):
+        with mock.patch.object(self.d, "_power_handler_class", return_value=Handler):
             self.d._register_power_events()
         return Handler
+
+    def test_the_handler_is_the_platforms(self):
+        from onionpress.mac_power import MacPowerHandler
+        from onionpress.power import LogindPowerHandler
+        self.assertIs(self.d._power_handler_class(), MacPowerHandler)
+        self.d.os_name = op_daemon.OS.LINUX
+        self.assertIs(self.d._power_handler_class(), LogindPowerHandler)
 
     def test_power_events_registered(self):
         H = self.power(True)
         self.assertIsNotNone(self.d._power)
-        self.assertTrue(self.saw("IORegisterForSystemPower"))
+        self.assertTrue(self.saw("Registered for sleep and wake events (Handler)"))
         # the hooks do nothing while quitting
         self.d.handle_sleep = mock.Mock()
         self.d.handle_wake = mock.Mock()
@@ -311,7 +315,7 @@ class TestRun(_PathsCase):
         self.assertIsNone(self.d._power)
         self.assertTrue(self.saw("clock gap only"))
         self.power(RuntimeError("no IOKit"))
-        self.assertTrue(self.saw("MacPowerHandler init failed: no IOKit"))
+        self.assertTrue(self.saw("power handler init failed: no IOKit"))
 
     def test_shutdown_sends_offline_only_when_quitting(self):
         d = self.d

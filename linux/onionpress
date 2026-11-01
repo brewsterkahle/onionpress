@@ -536,8 +536,10 @@ wp_is_installed() {
 #   yes, removed when it said no) and moves the port once the verdict is
 #   in (bind_wordpress_port_for_install_state: a recreate of the one
 #   container, once per install, right after setup).
-# - The heartbeat client, which would register the address with the
-#   OnionHeaven hub, is held (a runtime mask of its user unit) until then.
+# - The daemon (onionpress.daemon, the onionpress-daemon.service user
+#   unit) registers the address with the OnionHeaven hub only once it has
+#   seen WordPress installed (Daemon.hub_registration_allowed; until #407 a
+#   runtime mask of the heartbeat client's unit, held here).
 # - The image denies install.php and setup-config.php to every source but
 #   the owner's (loopback and the network's gateway), so Tor visitors never
 #   see them (onionpress-install-page.conf in the WordPress image).
@@ -545,7 +547,6 @@ wp_is_installed() {
 # installed it (setup_logic's .wordpress-installed-by-onionpress marker).
 WP_INSTALLED_MARKER=".wordpress-installed"
 WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"
-HEARTBEAT_UNIT=onionpress-heartbeat.service
 
 # The bind host for this start's `compose up`: the configured one once a
 # start has seen WordPress installed, else 127.0.0.1.
@@ -587,40 +588,11 @@ bind_wordpress_port_for_install_state() {
         || log "WARNING: could not move WordPress's port to $wanted (see $LOG_FILE)"
 }
 
-# Whether the heartbeat client's user unit is held (masked at runtime).
-heartbeat_client_held() {
-    case "$(systemctl --user is-enabled "$HEARTBEAT_UNIT" 2>/dev/null)" in
-        masked*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# Hold the heartbeat client while WordPress is not installed: nothing
-# registers an address whose site does not exist yet with the hub. The
-# runtime mask fails the start job systemd queues after this unit's
-# READY and does not survive a reboot (the next start decides again).
-hold_heartbeat_client_until_installed() {
-    if ! heartbeat_client_held; then
-        systemctl --user mask --runtime "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || return 0
-        log "Heartbeat client held until WordPress is installed (no hub registration before setup)"
-    fi
-    if systemctl --user is-active "$HEARTBEAT_UNIT" >/dev/null 2>&1; then
-        systemctl --user stop "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || true
-    fi
-}
-
-release_heartbeat_client_hold() {
-    heartbeat_client_held || return 0
-    systemctl --user unmask --runtime "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || true
-    log "WordPress is installed: heartbeat client released"
-    start_heartbeat_client
-}
-
 # What every setup path ends with once WordPress is installed: the port
-# where the config says, the heartbeat client running.
+# where the config says (the daemon sees the install on its next pass and
+# opens its hub gate itself).
 after_wordpress_installed() {
     bind_wordpress_port_for_install_state true
-    release_heartbeat_client_hold
 }
 
 # Verify a WP admin password without making a backup. Used by scrub/
@@ -872,8 +844,7 @@ HELPEOF
     fi
 
     # Keep a copy of the current key, ask the OnionHeaven hubs that may hold
-    # it to delete theirs (this stops the heartbeat client, which holds the
-    # old key; the next start of OnionPress brings it back with the new one),
+    # it to delete theirs (the daemon's beats stay off a released key),
     # stop OnionPress and put the new key in place.
     local rc=0
     replace_onion_key "$key_b32" || rc=$?
@@ -886,7 +857,6 @@ HELPEOF
         if [ "$REPLACE_KEY_STOPPED" = "yes" ]; then
             echo "OnionPress was stopped; start it again with 'onionpress restart'." >&2
         fi
-        start_heartbeat_client
         return 1
     fi
 
@@ -897,10 +867,7 @@ HELPEOF
         printf '%s\n' "$REPLACE_KEY_KEPT" | sed 's/^/  /'
     fi
     echo ""
-    echo "Run 'onionpress restart' to use this address (it starts the heartbeat client again)."
-    # Not started here: the unit Wants= onionpress.service, so starting it
-    # would start the whole stack the line above says to restart (#507);
-    # the restart's end starts it, where it is enabled.
+    echo "Run 'onionpress restart' to use this address (the daemon registers it with the hub)."
     return 0
 }
 
@@ -1141,8 +1108,8 @@ print(json.dumps({"reset": True, **reset_onionheaven()}))
 # the SOCKS port check, the Cloudflare tunnel (only once WordPress is
 # installed; removed when the token goes), the pinned plugins, the
 # provisioning steps, the plugins' setup and the image rebuild (detached:
-# out of this script's job table, and out of the settings watcher's
-# cgroup through systemd-run). Best effort: it never stops the start.
+# out of this script's job table, and out of the daemon unit's cgroup
+# through systemd-run). Best effort: it never stops the start.
 # $1: whether WordPress is installed.
 start_post_up() {
     op_py --data-dir "$DATA_DIR" start-post-up \
@@ -1256,14 +1223,9 @@ block_wordpress_egress() {
     return 0
 }
 
-# Rootless Docker's network namespace, as /proc names it ("" under system
-# Docker). It is new, and holds none of the rules above, each time the
-# rootless daemon starts; the status loop re-applies them when it changes.
-rootless_netns() {
-    local pid
-    pid=$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dockerd-rootless/child_pid" 2>/dev/null) || return 0
-    readlink "/proc/$pid/ns/net" 2>/dev/null || true
-}
+# Rootless Docker's network namespace is new, and holds none of the rules
+# above, each time the rootless daemon starts; the daemon re-applies them
+# when it changes (Daemon._watch_rootless_netns).
 
 start_containers() {
     log "Starting OnionPress containers..."
@@ -1310,7 +1272,6 @@ start_containers() {
     else
         log "WordPress not installed -- run 'onionpress setup' or open the OnionPress tray's Setup dialog to configure"
         bind_wordpress_port_for_install_state false
-        hold_heartbeat_client_until_installed
     fi
     note_if_lan_looks_local
     # Tor, the SOCKS port check, the plugins,
@@ -1352,7 +1313,6 @@ start_cloudflare_tunnel() {
 
 stop_containers() {
     log "Stopping OnionPress containers..."
-    stop_container_log_capture
     stop_onionheaven_farm
     # Capture the offset BEFORE compose-down so the next start can wait
     # for the TIME_WAIT sockets to clear and reuse the same offset.
@@ -1368,16 +1328,11 @@ stop_containers() {
     [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
     if [ "$down_rc" -ne 0 ]; then
         log "ERROR: stopping the containers failed (compose down exited $down_rc)"
-        write_status 2>/dev/null || true
         return "$down_rc"
     fi
     log "Containers stopped"
-    # Write a final stopped status.json so any surviving tray process
-    # (the tray runs as its own user process, not under our service)
-    # flips its icon to gray instead of holding the previous "running"
-    # snapshot indefinitely. write_status's `docker compose ps` will
-    # return empty here, which the state derivation maps to "stopped".
-    write_status 2>/dev/null || true
+    # The daemon's next pass (within 10 s) writes the stopped status the
+    # tray and the pages read.
 }
 
 # ─── Status queries ──────────────────────────────────────────────────
@@ -1389,56 +1344,22 @@ get_status() {
 
 # ─── OnionHeaven on/off ─────────────────────────────────────────────
 
-# The heartbeat client (onionpress-heartbeat.py) holds the onion service key
-# it loaded at start and sends it with every /online. Before that key goes
-# or is replaced it is stopped, or its next beat would put the key back on
-# the hub after the /unregister. Current installs run it as a user unit,
-# old ones as a system unit: both are stopped (by stop, restart and update
-# too).
-stop_heartbeat_client() {
-    if systemctl --user is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-        log "Stopping heartbeat client..."
-        systemctl --user stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-    fi
-    if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-        log "Stopping heartbeat client (system unit)..."
-        sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-    fi
-}
-
-# Start it again (it then loads the key Tor serves now) where its unit is
-# enabled.
-start_heartbeat_client() {
-    if heartbeat_client_held; then
-        log "Heartbeat client stays held: WordPress is not installed yet"
-        return 0
-    fi
-    if systemctl --user is-enabled onionpress-heartbeat.service >/dev/null 2>&1; then
-        systemctl --user start onionpress-heartbeat 2>>"$LOG_FILE" \
-            || log "WARNING: Failed to start heartbeat client"
-    elif systemctl is-enabled onionpress-heartbeat.service >/dev/null 2>&1; then
-        sudo systemctl start onionpress-heartbeat 2>>"$LOG_FILE" \
-            || log "WARNING: Failed to start heartbeat client"
-    fi
-}
-
 # Before this install forgets its onion service key (reset, key import, a
 # restore to another address, uninstall): ask every OnionHeaven hub that
 # may hold a copy to delete it, while the key is still here to sign the
-# request. Stops the heartbeat client first (above), then onionpress.cli
-# onionheaven-unregister sends the signed /unregister for the whole address
-# to the hub the registration record names, through the tor container
-# (which must be running), and says what it did; with nothing registered it
-# does and prints nothing. Usage: onionheaven_release <reason> [<address
-# whose key stays>]. Sets ONIONHEAVEN_RELEASE_RC (0 nothing left on a hub,
-# 1 something the user could still take back, 3 something nothing here can
-# take back, other: the command failed) and returns 1 only when the user
-# chose to stop at the question
-# (the heartbeat client is started again then).
+# request. onionpress.cli onionheaven-unregister sends the signed
+# /unregister for the whole address to the hub the registration record
+# names, through the tor container (which must be running), and says what
+# it did; with nothing registered it does and prints nothing (the daemon's
+# own beats are held off a released key by the record, as on the Mac).
+# Usage: onionheaven_release <reason> [<address whose key stays>]. Sets
+# ONIONHEAVEN_RELEASE_RC (0 nothing left on a hub, 1 something the user
+# could still take back, 3 something nothing here can take back, other:
+# the command failed) and returns 1 only when the user chose to stop at
+# the question. Kept identical to the Mac launcher's.
 onionheaven_release() {
     local answer=""
     ONIONHEAVEN_RELEASE_RC=0
-    stop_heartbeat_client
     op_py onionheaven-unregister --reason "$1" \
         ${2:+--keep-address "$2"} || ONIONHEAVEN_RELEASE_RC=$?
     # 0 and 3: nothing the user could still do. Anything else (1, or a
@@ -1447,18 +1368,14 @@ onionheaven_release() {
     [ "$ONIONPRESS_YES" = "true" ] && return 0
     printf "Continue anyway? The hub keeps the key listed above. [y/N] "
     read -r answer || true
-    if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
-        return 0
-    fi
-    start_heartbeat_client
-    return 1
+    [ "$answer" = "y" ] || [ "$answer" = "Y" ]
 }
 
 # `onionpress onionheaven enable|disable|status [--json]`: one
 # implementation for both platforms in src/onionpress/onionheaven.py
 # (issue #365). It writes REGISTER_WITH_ONIONHEAVEN through the config
-# CLI's checked path; the heartbeat daemon re-reads the choice every
-# cycle, so it takes effect without a restart.
+# CLI's checked path; the daemon re-reads the choice every cycle, so it
+# takes effect without a restart.
 onionheaven_cmd() {
     op_py --data-dir "$DATA_DIR" onionheaven "$@"
 }
@@ -1474,65 +1391,6 @@ get_healthcheck_address() {
         return 0
     fi
     return 1
-}
-
-# ─── Container log capture ───────────────────────────────────────────
-# Capture stdout/stderr from key containers to rotating log files.
-# Runs as background processes; PIDs saved for cleanup on stop.
-
-CONTAINER_LOG_DIR="$DATA_DIR/logs"
-CONTAINER_LOG_PIDS=""
-
-_status_poll_loop() {
-    # Transient failures (docker hiccup, network blip) must not kill this loop.
-    set +e
-    # A rootless daemon that restarts behind our back (crash, a manual
-    # `systemctl --user restart docker`) brings the containers back in a new
-    # namespace without the WordPress network's rules: put them back. One
-    # attempt per namespace, so a lasting failure logs once.
-    local netns now
-    netns=$(rootless_netns)
-    while true; do
-        sleep 30
-        write_status
-        now=$(rootless_netns)
-        if [ -n "$now" ] && [ "$now" != "$netns" ]; then
-            log "Rootless Docker's network namespace changed (daemon restarted); re-applying the WordPress network's egress block"
-            block_wordpress_egress
-            netns=$now
-        fi
-    done
-}
-
-start_container_log_capture() {
-    mkdir -p "$CONTAINER_LOG_DIR"
-    # onionpress-wordpress too (container-wordpress.log): its stderr carries
-    # every PHP error_log line, the `[OnionPress Wayback]` state transitions
-    # among them, which the analytics upload ships; it was left out through
-    # 2.5.6 while the Mac daemon captured it (issue #203). The tailers end
-    # with their containers (`docker logs -f` exits when the container is
-    # removed by `compose down`), which is what keeps a restart from running
-    # two per container; this process's own are killed in stop_containers.
-    for container in onionpress-tor onionheaven onionpress-wordpress; do
-        local logfile="$CONTAINER_LOG_DIR/container-${container#onionpress-}.log"
-        # Rotate container log if over 5MB
-        if [ -f "$logfile" ]; then
-            local sz
-            sz=$(stat -c%s "$logfile" 2>/dev/null || echo 0)
-            if [ "$sz" -ge "$LOG_MAX_SIZE" ]; then
-                mv -f "$logfile" "${logfile}.1"
-            fi
-        fi
-        docker logs -f --tail 200 "$container" >> "$logfile" 2>&1 &
-        CONTAINER_LOG_PIDS="$CONTAINER_LOG_PIDS $!"
-    done
-}
-
-stop_container_log_capture() {
-    for pid in $CONTAINER_LOG_PIDS; do
-        kill "$pid" 2>/dev/null || true
-    done
-    CONTAINER_LOG_PIDS=""
 }
 
 # Copy the tor hostname into the shared volume so WP code (theme,
@@ -1634,17 +1492,29 @@ wait_for_services() {
 # onionpress backup (cli.cmd_backup → backup.create_backup), restore
 # (cmd_restore, install-from-backup), settings-page-backup and
 # settings-page-restore (cmd_settings_page_backup / _restore). The
-# cases below delegate; the heartbeat client is stopped and started
-# around a restore by the CLI (onionpress.heartbeat_unit).
+# cases below delegate.
 
-# ─── Write status (on-demand) ────────────────────────────────────────
+# ─── The daemon ───────────────────────────────────────────────────────
 
-write_status() {
-    # One status writer for both platforms (onionpress.status_writer,
-    # issue #523): the daemon's two documents from one pass over the
-    # stack. Its lines reach the log and the terminal as log's did;
-    # a failure is in the log, never a stopped caller.
-    op_py --data-dir "$DATA_DIR" write-status 2>&1 | tee -a "$LOG_FILE"
+# `onionpress daemon` (onionpress.daemon, issue #407) is the long-running
+# process: the status loop and the two documents the tray and the pages
+# read, the dual probe and the republish trigger, the OnionHeaven
+# heartbeat, the Settings page's requests (handle-action), the container
+# log capture, sleep and wake. It runs as the onionpress-daemon.service
+# user unit, ordered before onionpress.service; `daemon start` here is
+# for a site started from a terminal (idempotent, --no-block), and a
+# failure is a warning: the stack serves without it.
+start_daemon() {
+    if ! op_py --data-dir "$DATA_DIR" daemon start --launcher "$INSTALL_DIR/onionpress" >> "$LOG_FILE" 2>&1; then
+        log "WARNING: the OnionPress daemon could not be started (systemctl --user status onionpress-daemon)"
+    fi
+}
+
+# Before the containers go down: the daemon tells the hub /offline while
+# the tor container is still up (`daemon offline` waits for its
+# acknowledgement; no daemon, no wait).
+daemon_offline() {
+    op_py --data-dir "$DATA_DIR" daemon offline >/dev/null 2>&1 || true
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -1877,7 +1747,7 @@ update_from_checkout() {
 
 # After an update installed new files (a release's package or a checkout):
 # the new plugins into the running WordPress, the images pulled, and
-# OnionPress restarted, the heartbeat client too.
+# OnionPress restarted, the daemon too (its code was replaced).
 update_finish() {
     local new_version plugin
     new_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
@@ -1905,23 +1775,24 @@ update_finish() {
         docker compose "${CF_COMPOSE[@]}" pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
     fi
 
-    # Restart, the heartbeat client too (its script was replaced):
-    # stopped first, so it sends /offline while the site goes down.
+    # Restart: the hub hears /offline while the site goes down; the daemon
+    # is stopped without a second /offline (it comes right back on the
+    # new code) and started again with the stack.
     log "Restarting OnionPress..."
     echo "  Restarting OnionPress..."
-    stop_heartbeat_client
+    daemon_offline
+    op_py --data-dir "$DATA_DIR" daemon stop --no-offline >> "$LOG_FILE" 2>&1 || true
     stop_containers || log "WARNING: update: the stop failed; starting the containers anyway"
     start_containers
     wait_for_services
-    write_status
-    start_heartbeat_client
+    start_daemon
 
     log "Update complete: $new_version"
     echo "  Update complete! Now running OnionPress $new_version."
 }
 
 usage() {
-    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|check-docker|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|check-docker|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
     echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
     echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME;"
     echo "  onionheaven enable|disable|status|overview [--json]; config get|set|unset|list"
@@ -1964,10 +1835,9 @@ main() {
             setup_db_passwords
             start_containers
             wait_for_services
-            start_container_log_capture
-
-            # Write initial status
-            write_status
+            # The daemon (status, probe, heartbeat, the page's requests,
+            # log capture): the user unit, where there is one.
+            start_daemon
 
             log "OnionPress is running!"
             log "$(onion_address_line)"
@@ -1979,42 +1849,28 @@ main() {
             echo "  Local access:  $(wp_access_url)"
             echo "  Status page:   $(wp_access_url)/onionpress-status"
             echo "  Logs:          $LOG_FILE"
-
-            # Keep main process alive so systemd (KillMode=control-group)
-            # doesn't kill our background monitors (farm, activation watcher).
-            # Signal readiness to systemd, then poll status every 30s so the
-            # tray icon and reachability state stay current.
-            if [ "${NOTIFY_SOCKET:-}" ]; then
-                systemd-notify --ready 2>/dev/null || true
-            fi
-            _status_poll_loop &
-            wait
+            # Done: onionpress.service is a oneshot that stays active
+            # (RemainAfterExit); the daemon unit carries on (issue #407:
+            # until then this process stayed in a 30 s status loop).
             ;;
 
         stop)
             setup_db_passwords
-            # Stop heartbeat client first (sends /offline before containers
-            # go down): the user unit current installs run, or an old
-            # install's system unit (stop_heartbeat_client). This used to
-            # stop the system unit only, so a user unit kept beating.
-            stop_heartbeat_client
+            # The hub hears /offline before the containers go down (the
+            # daemon's, while the tor container is still up).
+            daemon_offline
             stop_containers
             ;;
 
         restart)
             setup_db_passwords
-            # Stop heartbeat client first (sends /offline before containers go down)
-            stop_heartbeat_client
+            daemon_offline
             stop_containers || log "WARNING: restart: the stop failed; starting the containers anyway"
             start_containers
             wait_for_services
-            # The `start` process's tailers ended with the old containers
-            # (and stop_containers above kills only this process's), so
-            # without this a restart left no container log capture (#203).
-            start_container_log_capture
-            write_status
-            # Start it again where its unit is enabled
-            start_heartbeat_client
+            # The daemon sees the stack come back and registers again; a
+            # terminal's restart with no daemon running starts one.
+            start_daemon
             ;;
 
         status)
@@ -2073,11 +1929,9 @@ main() {
                     stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
                     start_containers
                     wait_for_services
-                    start_heartbeat_client
                     ;;
                 *) exit 1 ;;
             esac
-            write_status
             echo ""
             echo "  Setup complete! Your site is now running."
             echo "  Admin panel: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/wp-admin"
@@ -2126,7 +1980,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                 --plugins-dir "$PLUGINS_DIR"
             # Every setup ends here (setup_logic.install_fresh_wordpress
             # runs this subcommand): WordPress's port goes where the config
-            # says and the heartbeat client is released (issue #464).
+            # says (issue #464; the daemon's hub gate opens on its own).
             # The tunnel too, when there is a token (start_cloudflare_tunnel).
             if wp_is_installed; then
                 after_wordpress_installed
@@ -2147,25 +2001,6 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # warns about every missing one (issue #507).
             setup_db_passwords
             import_key "${@:2}"
-            ;;
-
-        sleep-pre|sleep-post)
-            # Called by /usr/lib/systemd/system-sleep/onionpress around
-            # suspend. As of v2.4.99, all real work happens in the heartbeat
-            # daemon's DBus delay-inhibitor (see SleepInhibitor in
-            # onionpress-heartbeat.py): /offline POST on suspend and
-            # DEL_ONION / ADD_ONION watchdog signals on both sides, all
-            # while the inhibitor lock is still held — when docker is
-            # still responsive (not throttled by NM teardown).
-            #
-            # This hook is kept as a no-op fallback so the system-sleep
-            # contract still has something to call, and so its presence
-            # in the journal proves the OnionPress install is wired in.
-            # If the heartbeat daemon isn't running for some reason,
-            # there's nothing useful we can do from here anyway —
-            # docker exec is too slow at this point in the suspend flow.
-            phase="${1#sleep-}"
-            log "system-sleep $phase: hook called (no-op; daemon does the work)"
             ;;
 
         # ── Vanity + admin-password — thin wrappers around the Python CLI
@@ -2280,11 +2115,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # .import-key-pending, no manual stop/start).
             # The exit status is the caller's only sign of a refused or
             # failed restore (the tray and the menubar check it).
-            # The heartbeat client holds the current key: the CLI stops it
-            # before the restore asks the OnionHeaven hubs to delete their
-            # copy (a backup of another address replaces the key), and
-            # starts it again after, with the restored one
-            # (onionpress.heartbeat_unit, issue #406).
+            # The restore asks the OnionHeaven hubs to delete their copy of
+            # a key a backup of another address replaces; the daemon sees
+            # the stack come back and registers the restored one.
             if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
@@ -2328,11 +2161,6 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             update_from_checkout
             ;;
 
-        write-status)
-            setup_db_passwords
-            write_status
-            ;;
-
         apply-config)
             # The Settings page's config-updates.json, through the allowlist
             # (config.SETTINGS_PAGE_KEYS) and config.apply_side_effects
@@ -2357,13 +2185,16 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
         handle-action)
             # The WordPress Settings page's requests, handled once for both
-            # platforms (onionpress.handle_action, issue #366). Its actions
-            # run through this launcher: start, restart, stop, apply-config,
-            # write-status, settings-page-backup, settings-page-restore (the
-            # bash bodies below), update --check --json (onionpress.cli). This runs
-            # as onionpress-watcher.service, a oneshot: whatever must
-            # outlive it goes through run_detached, which ONIONPRESS_IN_WATCHER
-            # tells (inherited by the launcher runs under the handler).
+            # platforms (onionpress.handle_action, issue #366): the daemon
+            # runs this on its status loop. Its actions run through this
+            # launcher: start, restart, stop, apply-config,
+            # settings-page-backup, settings-page-restore (the bash bodies
+            # below), update --check --json (onionpress.cli). The daemon's
+            # unit cgroup ends with the daemon (an update restarts it):
+            # whatever must outlive this run goes through a transient unit
+            # (start.run_detached_cli's systemd-run), which
+            # ONIONPRESS_IN_WATCHER tells (inherited by the launcher runs
+            # under the handler).
             ONIONPRESS_IN_WATCHER=true op_py --data-dir "$DATA_DIR" handle-action --launcher "$INSTALL_DIR/onionpress" "${@:2}"
             ;;
 
@@ -2392,8 +2223,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # never written, and on Linux a backup of another address is
             # refused (no one at this host to ask; the Mac asks). Exit 3
             # with the reason in the answer; the handler restarts OnionPress
-            # after a success. The heartbeat client is stopped and started
-            # around the key change by the CLI (onionpress.heartbeat_unit).
+            # after a success.
             setup_db_passwords
             op_py --data-dir "$DATA_DIR" settings-page-restore "${@:2}"
             ;;
@@ -2414,8 +2244,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
             # The onion service key goes with the reset: OnionHeaven hubs
             # that may hold a copy are asked to delete it first, while it
-            # can still sign the request (this also stops the heartbeat
-            # client, which holds the key).
+            # can still sign the request.
             if ! onionheaven_release reset; then
                 echo "Cancelled."
                 exit 1
@@ -2425,7 +2254,6 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
             # Stop everything
             setup_db_passwords 2>/dev/null || true
-            stop_heartbeat_client
             stop_containers 2>/dev/null || true
 
             # Remove all Docker volumes
@@ -2455,15 +2283,14 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             setup_db_passwords
             start_containers
             wait_for_services
-            write_status
 
             # Clean OnionHeaven state in the shared persistent volume
             if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
                 log "Resetting OnionHeaven..."
                 reset_onionheaven_in_container >> "$LOG_FILE" || true
             fi
-            # With the new key (and a fresh config, which says yes).
-            start_heartbeat_client
+            # The daemon registers the new key (a fresh config says yes).
+            start_daemon
 
             log "OnionPress reset and restarted"
             echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
@@ -2477,9 +2304,8 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Upload the diagnostic logs to OnionHome now (Share Now from
             # the command line): one implementation for both platforms,
             # onionpress.analytics_sharing.request_upload (issue #351). It
-            # refuses while sharing is off or the heartbeat client is not
-            # running, else leaves the marker the client takes in its next
-            # cycle.
+            # refuses while sharing is off or the daemon is not running,
+            # else leaves the marker the daemon takes in its next cycle.
             op_py --data-dir "$DATA_DIR" upload-analytics
             ;;
 
@@ -2569,9 +2395,10 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
             # OnionHeaven hubs that may hold a copy of the onion service key
             # are asked to delete it before anything is removed: the key in
-            # the tor container signs the request. onionheaven_release
-            # stops the heartbeat client first, so no /online follows the
-            # /unregister, and says what happened.
+            # the tor container signs the request; onionheaven_release says
+            # what happened. The daemon is stopped first (no /offline: the
+            # /unregister is what the hub must hear), so no /online follows.
+            op_py --data-dir "$DATA_DIR" daemon stop --no-offline >/dev/null 2>&1 || true
             if ! onionheaven_release uninstall; then
                 echo "Cancelled — install untouched."
                 exit 1
@@ -2584,7 +2411,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
             echo "Stopping user services..."
             # Current installs use user-level systemd; legacy installs used
-            # system-level. Stop both — whichever doesn't exist is a no-op.
+            # system-level, or the heartbeat and watcher units of before
+            # #407. Stop all — whichever doesn't exist is a no-op.
+            systemctl --user stop onionpress-daemon 2>/dev/null || true
             systemctl --user stop onionpress-heartbeat 2>/dev/null || true
             systemctl --user stop onionpress-watcher.timer 2>/dev/null || true
             systemctl --user stop onionpress 2>/dev/null || true
@@ -2596,10 +2425,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # The tray runs in the user session, not via systemd — it has
             # to be killed explicitly or the icon stays until logout.
             pkill -u "$(whoami)" -f onionpress-tray 2>/dev/null || true
-            # Also kill any orphaned systemd-inhibit / dbus-monitor children
-            # left behind if the service was force-killed earlier.
+            # Also kill any orphaned systemd-inhibit child (PREVENT_SLEEP)
+            # left behind if the daemon was force-killed earlier.
             pkill -u "$(whoami)" -f "systemd-inhibit.*OnionPress" 2>/dev/null || true
-            pkill -u "$(whoami)" -f "dbus-monitor.*PrepareForSleep" 2>/dev/null || true
 
             echo "Removing containers and volumes..."
             setup_db_passwords 2>/dev/null || true
@@ -2618,9 +2446,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
             echo "Disabling user services..."
             systemctl --user disable onionpress 2>/dev/null || true
+            systemctl --user disable onionpress-daemon 2>/dev/null || true
             systemctl --user disable onionpress-heartbeat 2>/dev/null || true
             systemctl --user disable onionpress-watcher.timer 2>/dev/null || true
             rm -f "$USER_SYSTEMD_DIR/onionpress.service" \
+                  "$USER_SYSTEMD_DIR/onionpress-daemon.service" \
                   "$USER_SYSTEMD_DIR/onionpress-heartbeat.service" \
                   "$USER_SYSTEMD_DIR/onionpress-watcher.service" \
                   "$USER_SYSTEMD_DIR/onionpress-watcher.timer"

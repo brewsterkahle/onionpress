@@ -478,7 +478,7 @@ class TestLaunchers(unittest.TestCase):
         i = text.index("\nstart_containers() {")
         body = text[i:text.index("\n}\n", i)]
         post = body.index('start_post_up "$wp_installed"')
-        for before in ("after_wordpress_installed", "hold_heartbeat_client_until_installed",
+        for before in ("after_wordpress_installed", "bind_wordpress_port_for_install_state false",
                        "note_if_lan_looks_local"):
             self.assertLess(body.index(before), post, before)
         # Issue #504: no watcher for the onionheaven container (a core service).

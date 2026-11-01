@@ -54,11 +54,13 @@ class TestRecord(unittest.TestCase):
 
 
 class TestBothClientsUseIt(unittest.TestCase):
-    """The record's rules live in hub_record only (issue #407)."""
+    """The record's rules live in hub_record only (issue #407; the Linux
+    heartbeat client, its second reader, is gone)."""
 
     def test_no_second_copy(self):
-        for rel in ("src/onionpress/onionheaven.py",
-                    "linux/onionpress-heartbeat.py"):
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(__file__), "..", "linux",
+                                                     "onionpress-heartbeat.py")))
+        for rel in ("src/onionpress/onionheaven.py",):
             text = _source(rel)
             self.assertIn("hub_record", text, rel)
             self.assertNotIn('"left_on_hubs")\n    if not isinstance', text, rel)

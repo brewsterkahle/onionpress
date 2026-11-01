@@ -8,7 +8,7 @@ key being imported), the OnionHeaven request signatures and the WordPress
 database password go to their child processes on stdin instead:
 
   - curl in onionpress-tor reads the hub payload with --data-binary @-
-    (docker exec -i), on the Mac and in the Linux heartbeat daemon;
+    (docker exec -i), from the daemon on both platforms;
   - MariaDB clients in onionpress-db read the password from MYSQL_PWD,
     which a sh prelude fills from the first line of stdin (backup.py and
     the Linux launcher's db_client);
@@ -183,71 +183,6 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
                              (0, "ok"))
             onionheaven._run_docker(self.app, ["x"])
         self.assertEqual([c[1] for c in rec.calls], ["a", "b", None])
-
-
-_HB_HOME = tempfile.mkdtemp(prefix="op-hb-argv-test-")
-
-
-def _load_linux_heartbeat():
-    """Import linux/onionpress-heartbeat.py under a throwaway HOME (it opens
-    ~/.onionpress/onionpress.log at import), as test_linux_analytics_upload
-    does."""
-    os.makedirs(os.path.join(_HB_HOME, ".onionpress"), exist_ok=True)
-    saved_home = os.environ.get("HOME")
-    os.environ["HOME"] = _HB_HOME
-    sys.modules.setdefault("key_manager", key_manager)
-    sys.modules.setdefault("onion_auth", onion_auth)
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "onionpress_heartbeat_argv_test",
-            os.path.join(PROJECT_DIR, "linux", "onionpress-heartbeat.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-    finally:
-        if saved_home is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = saved_home
-    return mod
-
-
-class TestLinuxHeartbeatPayloadOnStdin(unittest.TestCase):
-    """linux/onionpress-heartbeat.py: the docker-exec fallback of
-    sign_and_post (first registration, and whenever the persistent
-    connection is down)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.hb = _load_linux_heartbeat()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(_HB_HOME, ignore_errors=True)
-
-    def test_fallback_sends_key_on_stdin(self):
-        priv, pub, pem_b64 = _keypair()
-        addr = onion_auth.derive_onion_address(pub)
-        rec = _Recorder(lambda argv: '{"online": true}')
-        with mock.patch.object(self.hb, "_hub_conn", None), \
-                mock.patch.object(self.hb.subprocess, "run", rec):
-            ok, resp = self.hb.sign_and_post(
-                "online", self.hb.DEFAULT_HUB, addr, HC, priv, pub,
-                extra={"arti_key_pem": pem_b64})
-        self.assertTrue(ok)
-        self.assertEqual(resp, {"online": True})
-        self.assertEqual(len(rec.calls), 1)
-        argv, stdin = rec.calls[0]
-        self.assertEqual(argv[:4], ["docker", "exec", "-i", "onionpress-tor"])
-        i = argv.index("--data-binary")
-        self.assertEqual(argv[i + 1], "@-")
-        self.assertEqual(json.loads(stdin)["arti_key_pem"], pem_b64)
-        rec.assert_secret_not_in_argv(self, pem_b64)
-
-    def test_docker_exec_without_input_is_unchanged(self):
-        rec = _Recorder(lambda argv: "x")
-        with mock.patch.object(self.hb.subprocess, "run", rec):
-            self.assertEqual(self.hb.docker_exec("c", ["true"]), (True, "x"))
-        self.assertEqual(rec.calls, [(["docker", "exec", "c", "true"], None)])
 
 
 class TestBackupDbPasswordOnStdin(unittest.TestCase):

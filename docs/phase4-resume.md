@@ -618,3 +618,48 @@ ctor-to-arti` have no caller left; `put-wp-tree` (bundled_plugins) and
 not removed here). Not live-tested on Linux: the page restore writes the
 key the Mac's way (`write_private_key`: docker cp into the live tor
 container and a tor restart) instead of `.import-key-pending`.
+
+
+## Slice 9 (2026-10-31): `onionpress daemon` on Linux (issue #407, #530 §2)
+
+`linux/onionpress-heartbeat.py` (2,107 lines), `linux/onionpress-sleep-hook`,
+the `onionpress-watcher.service`/`.timer` pair and the launcher's
+`_status_poll_loop`, `start_container_log_capture`, `write_status`,
+`stop/start_heartbeat_client`, the heartbeat hold
+(`hold_heartbeat_client_until_installed` and friends) and the
+`sleep-pre|sleep-post` case went; `src/onionpress/heartbeat_unit.py` (slice
+8's seam) with them. `onionpress daemon` (`daemon.py`) runs on Linux as the
+`onionpress-daemon.service` user unit (`Before=onionpress.service`;
+`onionpress.service` is now `Type=oneshot` + `RemainAfterExit`, its `start`
+returning after `daemon start`). The seams, each a branch on
+`Daemon.os_name`: `power.LogindPowerHandler` (the heartbeat's
+`SleepInhibitor`, behind `MacPowerHandler`'s interface: `register`,
+`run_loop_once`, `stop`, `OFFLINE_MAX_TIME`; the daemon's `handle_sleep` /
+`handle_wake` are the one policy, the `/offline` held to the handler's
+budget), `SystemdInhibitor` for `PREVENT_SLEEP`, `_setup_environment`
+(the #503 socket rule), `_runtime_ready`, `health.linux_has_default_route`
+behind `check_internet_connectivity`, `status_writer`'s `os_name`,
+`hub_registration_allowed` (the daemon-side #464 gate, replacing the
+runtime mask), `_watch_rootless_netns` (the bash loop's egress re-apply),
+and Mac-only skips (thumbnails, the clearnet capture, the proxy, the
+`start-tor` after setup). `daemon_client` gained its systemd half
+(`systemd_unit`, `unit_loaded_pid`, `_start_unit`; stop/status/remove
+branch on `os.uname`, so the module stays stdlib-only). Retired with the
+heartbeat: `status_writer.OneShotStatus`/`run_once`/`heartbeat_verdict`
+and `onionpress write-status` (handle_action runs no `write-status` after
+an action: the daemon's pass writes it), `reachability.ReachabilityLoop`
+and `reachability.json`, `analytics_sharing.daemon_running`'s systemctl
+branch (the pid file on both platforms), `config`'s START_ON_BOOT units
+(`onionpress-daemon.service`). The `HubConnection` (a persistent SOCKS
+socket for a ~5 ms `/offline`) was dropped: a docker-exec curl at ~1.7 s
+fits logind's 5 s default delay (`OFFLINE_MAX_TIME = 3` leaves room for the
+two watchdog signals). Packaging: `install-tree.sh`, `build-linux.sh`
+(Depends gains `python3-dbus`; the postinst's upgrade stops the old units,
+lifts the heartbeat's runtime mask, `try-restart`s the site and `restart`s
+the daemon; no `lift_heartbeat_holds`), `check-deb.sh`, `install.sh`
+(removes an earlier hook and the old user units). The 25 Linux start
+traces lost only the hold's five lines (`OP_UPDATE_START_TRACES=1`).
+Not live-tested on Linux: suspend/resume under logind, the hub
+registration from the daemon, the Settings page's requests at the
+daemon's 30 s cadence (the watcher's was 10 s), the .deb upgrade from a
+pre-#407 install.

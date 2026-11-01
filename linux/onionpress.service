@@ -5,8 +5,14 @@ Wants=docker.service
 After=docker.service
 
 [Service]
-Type=notify
-NotifyAccess=all
+# `onionpress start` brings the containers up and returns; the unit stays
+# active (RemainAfterExit) so `is-active` says so and ExecStop runs at a
+# stop or a restart. The long-running work (status, probe, heartbeat, the
+# Settings page's requests, log capture) is onionpress-daemon.service's,
+# which is ordered before this unit (issue #407; until then `start` kept
+# a 30 s status loop alive as a Type=notify unit).
+Type=oneshot
+RemainAfterExit=yes
 ExecStart=/opt/onionpress/onionpress start
 ExecStop=/opt/onionpress/onionpress stop
 TimeoutStartSec=900

@@ -29,7 +29,7 @@ class TestCoverageConfig(unittest.TestCase):
 
     def test_floors(self):
         script = _read("build/coverage-floors.sh")
-        self.assertIn("TOTAL_FLOOR=71", script)
+        self.assertIn("TOTAL_FLOOR=74", script)
         floors = dict(re.findall(r"(?m)^(src/onionpress/\S+\.py) (\d+)$", script))
         self.assertEqual(floors, {"src/onionpress/cli.py": "98",
                                   "src/onionpress/app_commands.py": "94",
@@ -42,9 +42,9 @@ class TestCoverageConfig(unittest.TestCase):
                                   "src/onionpress/ports.py": "86",
                                   "src/onionpress/secrets_file.py": "96",
                                   "src/onionpress/onion_hostname.py": "98",
-                                  "src/onionpress/reachability.py": "87",
+                                  "src/onionpress/reachability.py": "98",
                                   "src/onionpress/image_overrides.py": "95",
-                                  "src/onionpress/daemon.py": "81",
+                                  "src/onionpress/daemon.py": "83",
                                   "src/onionpress/launcher_ops.py": "84",
                                   "src/onionpress/scrub.py": "90",
                                   "src/onionpress/key_manager.py": "87",

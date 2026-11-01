@@ -29,19 +29,17 @@ written here from one pass of the daemon's checks:
   cut to ``redact.WORDPRESS_STATUS_KEYS`` (:func:`write_volume`, with
   ``version``, ``config-current.json`` and the scrubbed
   ``recent-logs.txt``), and in full, host paths included, as
-  ``~/.onionpress/status.json`` (:func:`write_host_copy`) for the Linux
-  heartbeat's analytics snapshot and the launcher's port detection.
+  ``~/.onionpress/status.json`` (:func:`write_host_copy`) for the
+  analytics snapshot and the launcher's port detection.
 
-The Mac daemon (onionpress.daemon) is one app: its ``write_status_to_volume``
-is :func:`write` and its ``publish_state`` is :func:`publish`. Until the
-daemon runs on Linux (#407), ``onionpress write-status`` builds the same
-documents from one pass over the stack (:class:`OneShotStatus`: the
-containers, the served address, Tor's bootstrap, the heartbeat's
-``reachability.json`` as the one measure of reachability), and the Linux
-launcher's ``write_status`` and its 30 s tick call it. What differs
-between the platforms is a ``detect_os()`` seam here: the platform's
-name in the documents, where the host's boot time is read, and the
-one-shot's wording of its WEDGE WARNING.
+The daemon (onionpress.daemon, on both platforms since issue #407) is
+the one app: its ``write_status_to_volume`` is :func:`write` and its
+``publish_state`` is :func:`publish`; nothing else writes these
+documents (until #407 Linux's ``onionpress write-status`` built them
+from one pass over the stack for the launcher's 30 s tick). What
+differs between the platforms is a ``detect_os()`` seam here: the
+platform's name in the documents and where the host's boot time is
+read.
 
 The fields Linux's bash gathered beside the daemon's (the tray's
 ``wp_installed``, ``onboarded``, ``wayback_queue_count``,
@@ -66,18 +64,10 @@ from . import redact
 from . import wp_files
 from .daemon_client import display_state_of, state_path
 from .platform import OS, detect_os
-from .ports import PortAttributes, PortConfig
 
 VOLUME_DIR = "/var/lib/onionpress"
 HOST_STATUS_FILENAME = "status.json"
 LOG_FILENAME = "onionpress.log"
-
-# The heartbeat's verdict (onionpress.reachability, reachability.json) is
-# used while it is this fresh and for the served address; otherwise the
-# one-shot knows nothing about reachability (never a probe of its own).
-REACHABILITY_FRESH_SECONDS = 180
-# "starting" for this long without "running" gets one WEDGE WARNING.
-WEDGE_AFTER_SECONDS = 600
 
 # Markers under the data dir that the status reports.
 VANITY_MARKER = ".vanity-running"
@@ -85,11 +75,6 @@ WP_ADMIN_PASSWORD_FILE = "wp-admin-password"
 # The mkp224o probe's answer, by the tor image's id: one `docker run` per
 # image, not one per status pass.
 MKP224O_PROBE_CACHE = ".mkp224o-probe"
-
-# The one-shot's memory between runs (the bash write_status's files).
-LAST_STATE_FILE = ".last_status_state"
-YELLOW_SINCE_FILE = ".yellow-since"
-WEDGE_MARKER = ".wedge-warning-fired"
 
 # What the daemon shows for an address it does not have yet.
 PLACEHOLDER_ADDRESSES = ("Starting...", "Not running", "Generating address...")
@@ -296,30 +281,6 @@ def serving_from_wayback(state, client_registered):
     return state != "running" and bool(client_registered)
 
 
-def heartbeat_verdict(data_dir, onion_address, now=None, fresh=REACHABILITY_FRESH_SECONDS):
-    """(reachable, http_code) from the heartbeat's reachability.json when
-    it is at most *fresh* seconds old and for *onion_address*; (None,
-    None) otherwise. The recovery loop's dual probe is the one measure of
-    reachability (issue #266); nothing here probes."""
-    from .reachability import STATUS_FILENAME
-    now = time.time() if now is None else now
-    try:
-        with open(os.path.join(data_dir, STATUS_FILENAME), encoding="utf-8") as f:
-            d = json.load(f)
-        age = now - float(d["checked_at"])
-        if (0 <= age <= fresh and d.get("onion_address") == onion_address
-                and d.get("reachable") in (True, False)):
-            code = d.get("http_code")
-            return d["reachable"], (str(code) if code not in (None, "") else None)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        pass
-    return None, None
-
-
-# ---------------------------------------------------------------------------
-# The documents
-# ---------------------------------------------------------------------------
-
 def gather_fields(app, now=None):
     """The fields Linux's bash gathered beside the daemon's, from *app*'s
     docker and data dir: one call each, docker asked only while the stack
@@ -508,197 +469,3 @@ def write(app, now=None):
 def publish(app, now=None):
     """daemon-state.json, atomically."""
     write_json_atomic(state_path(app.app_support), state_document(app, now))
-
-
-# ---------------------------------------------------------------------------
-# One pass without a daemon (Linux until #407)
-# ---------------------------------------------------------------------------
-
-class OneShotStatus(PortAttributes):
-    """The daemon's status pass as one run: what `onionpress write-status`
-    gathers on Linux until the daemon runs there (#407). It reads the
-    stack (containers, the served address, Tor's bootstrap) and the
-    heartbeat's verdict, keeps the bash write_status's memory between
-    runs (the last state, when "starting" began, whether the WEDGE
-    WARNING was given) in the data dir, and logs its lines."""
-
-    def __init__(self, paths, *, docker, health, version, log, os_name=None, now=None):
-        now = time.time() if now is None else now
-        self.now = now
-        self.paths = paths
-        self.app_support = paths.data_dir
-        self.config_file = paths.config_file
-        self.bin_dir = paths.bin_dir
-        self.colima_home = paths.colima_home
-        self.docker_socket = paths.docker_socket
-        self.log_file = paths.log_file
-        self._docker = docker
-        self._health = health
-        self.version = version
-        self._log = log
-        self.os_name = os_name or detect_os()
-        offset = os.environ.get("ONIONPRESS_PORT_OFFSET", "")
-        self.ports = PortConfig.from_offset(int(offset) if offset.isdigit() else 0)
-        self.startup_time = now
-        self.runtime_ready = True
-        self.port_conflict = []
-        # The address cached by the last run, as the daemon shows it.
-        self.onion_address = op_config.cached_onion_address(self.app_support) or "Not running"
-        self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)
-        self.healthcheck_address = ""
-        self.is_running = False
-        self.is_ready = False
-        self._has_internet = True
-        self._yellow_since = None
-        self._last_check_complete_ts = now
-        self._last_bootstrap_pct = 0
-        self._last_reachability = (None, None)
-        self._wp_installed = None
-        self._containers_seen = {}
-        self._onionheaven_overview = None
-        self._status_fields = {}
-        self._last_status_payload = None
-        self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
-        self._wordpress_confirmed = False
-        self._images_present = {}
-        self.proxy_server = None
-        self._sleeping = False
-        self._pending_question = None
-        self._onionname_collision = None
-        self._settings_page_error = ""
-        self._wedge_warning_fired = os.path.isfile(self._marker(WEDGE_MARKER))
-        self._last_probe_code = ""
-        self._last_probe_why = ""
-        self._last_probe_ms = 0
-
-    def log(self, message):
-        self._log(message)
-
-    def read_config_value(self, key, default=""):
-        return op_config.read_value(self.config_file, key, default)
-
-    def _marker(self, name):
-        return os.path.join(self.app_support, name)
-
-    def _state_fields(self):
-        return {
-            "is_running": self.is_running,
-            "is_ready": self.is_ready,
-            "has_internet": self._has_internet,
-            "yellow_since": self._yellow_since,
-            "last_check_complete": self._last_check_complete_ts,
-        }
-
-    def gather(self):
-        """One pass over the stack."""
-        containers = list_containers(self._docker)
-        self._containers_seen = dict(containers or [])
-        self.is_running = bool(containers) and all(
-            state.lower() == "running" for _, state in containers)
-        if self.is_running:
-            addr = onion_hostname.read_served_address(self._docker)
-            if addr:
-                self.onion_address = addr
-                self.is_onionheaven = onionheaven.is_onionheaven_instance(addr)
-            else:
-                self.onion_address = "Generating address..."
-            try:
-                bootstrapped, pct = self._health.check_tor_bootstrap()
-            except Exception:
-                bootstrapped, pct = False, 0
-            self._last_bootstrap_pct = pct
-            if addr and bootstrapped:
-                self._last_reachability = heartbeat_verdict(self.app_support, addr, self.now)
-                self._last_probe_code = self._last_reachability[1] or ""
-            self.is_ready = self._last_reachability[0] is True
-        self._wordpress_confirmed = self.is_ready
-        self._note_state(state_of(self, self.now))
-
-    def _note_state(self, state):
-        """The bash write_status's log lines: state transitions, and one
-        WEDGE WARNING after 10 min in "starting"."""
-        last_state = self._marker(LAST_STATE_FILE)
-        prev = ""
-        try:
-            with open(last_state, encoding="utf-8") as f:
-                prev = f.read().strip()
-        except OSError:
-            pass
-        if state != prev:
-            if state == "running":
-                self.log(f"Onion service is now reachable at http://{self.onion_address}/")
-            elif state == "starting" and prev == "running":
-                self.log("Onion service is no longer reachable (state: starting)")
-            elif state == "stopped" and prev not in ("", "stopped"):
-                self.log("OnionPress stopped")
-            try:
-                with open(last_state, "w", encoding="utf-8") as f:
-                    f.write(state + "\n")
-            except OSError:
-                pass
-        yellow_since = self._marker(YELLOW_SINCE_FILE)
-        wedge = self._marker(WEDGE_MARKER)
-        if not self.is_running or self.is_ready:
-            for path in (yellow_since, wedge):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-            self._yellow_since = None
-            self._wedge_warning_fired = False
-            return
-        try:
-            with open(yellow_since, encoding="utf-8") as f:
-                self._yellow_since = float(f.read().strip())
-        except (OSError, ValueError):
-            self._yellow_since = self.now
-            try:
-                with open(yellow_since, "w", encoding="utf-8") as f:
-                    f.write(f"{int(self.now)}\n")
-            except OSError:
-                pass
-        if (not self._wedge_warning_fired
-                and self.now - self._yellow_since >= WEDGE_AFTER_SECONDS):
-            self.log(wedge_warning(self.os_name))
-            self._wedge_warning_fired = True
-            try:
-                with open(wedge, "w", encoding="utf-8"):
-                    pass
-            except OSError:
-                pass
-
-
-def wedge_warning(os_name=None):
-    """The one-shot's WEDGE WARNING: on Linux the launcher's wording (how
-    to restart the service and Docker), on a Mac the daemon's."""
-    if (os_name or detect_os()) == OS.LINUX:
-        return ("WEDGE WARNING: WordPress unreachable for 10+ min. Try restarting the "
-                "OnionPress service: `systemctl --user restart onionpress` (or the system "
-                "equivalent). If still wedged, the Docker daemon may be stuck — restart it "
-                "with `systemctl --user restart docker` (rootless) or `sudo systemctl "
-                "restart docker` (system Docker).")
-    return ("WEDGE WARNING: onion service unreachable for 10+ min. Automatic "
-            "recovery: see the `probe verdict=` and `descriptor republish` lines.")
-
-
-def run_once(paths, log, *, version=None, docker=None, health=None, os_name=None, now=None):
-    """`onionpress write-status`: both documents from one pass. Always 0:
-    a pass that could not read the stack still writes what it knows."""
-    from . import __version__
-    from .docker import Docker
-    from .health import HealthChecker
-    docker = docker or Docker(paths)
-    app = OneShotStatus(
-        paths, docker=docker, health=health or HealthChecker(docker, log_func=log),
-        version=version or os.environ.get("ONIONPRESS_VERSION") or __version__,
-        log=log, os_name=os_name, now=now)
-    try:
-        app.gather()
-    except Exception as e:
-        app.log(f"status: could not read the stack's state: {e}")
-    write(app, app.now)
-    try:
-        publish(app, app.now)
-    except OSError as e:
-        app.log(f"status: could not write the state file: {e}")
-    return 0

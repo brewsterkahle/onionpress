@@ -642,112 +642,25 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
             )
 
 
-class TestLinuxSleepHookWiring(unittest.TestCase):
-    """Guard the suspend/resume → OnionHeaven notification path.
+class TestLinuxSleepIsTheDaemons(unittest.TestCase):
+    """Suspend and resume reach the hub and the watchdogs from the daemon's
+    logind delay inhibitor (onionpress.power.LogindPowerHandler, issue
+    #407; tests/test_linux_daemon.py drives it). The system-sleep hook of
+    before (a no-op since 2.4.99) and the launcher's sleep-pre|sleep-post
+    case are gone, and install.sh removes an earlier install's hook."""
 
-    Without this wiring, a laptop close-lid leaves a stale onion descriptor
-    on the DHT for minutes (until the hub's missed-heartbeat timeout fires)
-    and resume takes a full 60s heartbeat tick before the hub stops fronting
-    our site via Wayback fallback. Mac fires `notify_onionheaven_offline()`
-    in `handle_sleep`; Linux mirrors that via a systemd system-sleep hook.
-    """
-
-    def test_sleep_hook_script_exists(self):
-        hook = _read("linux/onionpress-sleep-hook")
-        self.assertRegex(
-            hook, r'#!/bin/bash', "Hook must be a bash script.")
-        # Hook must call the launcher with sleep-pre and sleep-post.
-        self.assertRegex(
-            hook, r'sleep-\$ACTION',
-            "Hook must invoke /opt/onionpress/onionpress sleep-$ACTION so "
-            "pre and post both reach the launcher subcommand.",
-        )
-        # Bound to systemd's pre/post + sleep/hibernate contract.
-        self.assertIn(
-            "suspend|hibernate|hybrid-sleep|suspend-then-hibernate", hook,
-            "Hook must cover every sleep type systemd-logind dispatches.",
-        )
-        # Per-user timeout so a stuck Docker can't hold up suspend.
-        self.assertRegex(
-            hook, r'timeout\s+\d+',
-            "Hook must wrap the per-user launcher invocation in `timeout` "
-            "so a hung Docker can't block the suspend.",
-        )
-
-    def test_install_sh_installs_sleep_hook(self):
-        script = _read("linux/install.sh")
-        # The install command can wrap across lines via `\` continuation,
-        # so match with DOTALL and `.` allowed to span newlines.
-        self.assertRegex(
-            script,
-            r'install\s+(?:-D\s+)?-m\s+0755[\s\S]*?onionpress-sleep-hook[\s\S]*?'
-            r'/usr/lib/systemd/system-sleep/onionpress',
-            "install.sh must drop linux/onionpress-sleep-hook into "
-            "/usr/lib/systemd/system-sleep/onionpress (mode 0755).",
-        )
-
-    def test_install_sh_creates_system_sleep_dir(self):
-        """Issue #264: /usr/lib/systemd/system-sleep/ does not exist on a
-        fresh Debian 13, so a plain `install -m 0755 … system-sleep/onionpress`
-        aborted the whole curl|bash install with "No such file or directory".
-        `install -D` creates the missing parent directories."""
-        script = _read("linux/install.sh")
-        self.assertRegex(
-            script,
-            r'install\s+-D\s+-m\s+0755\s+[^\n]*onionpress-sleep-hook',
-            "install.sh must use `install -D` for the sleep hook so the "
-            "system-sleep directory is created when it is missing.",
-        )
-
-    def test_deb_packages_sleep_hook(self):
-        script = _read("build/build-linux.sh")
-        self.assertIn(
-            "/usr/lib/systemd/system-sleep", script,
-            "build-linux.sh must stage the sleep hook into the .deb's "
-            "/usr/lib/systemd/system-sleep/ directory.",
-        )
-        self.assertRegex(
-            script, r'onionpress-sleep-hook',
-            "build-linux.sh must reference linux/onionpress-sleep-hook.",
-        )
-
-    def test_launcher_has_sleep_pre_and_post_subcommands(self):
-        script = _read("linux/onionpress")
-        self.assertRegex(
-            script, r'sleep-pre\|sleep-post\)',
-            "linux/onionpress must dispatch a sleep-pre|sleep-post case so "
-            "the system-sleep hook has something to call.",
-        )
-        # Both signals must reach the heartbeat client (USR1 = /offline,
-        # USR2 = immediate /online).
-        self.assertIn(
-            "onionpress-heartbeat", script,
-            "Sleep subcommand must kill -s SIGUSR{1,2} the heartbeat unit.",
-        )
-
-    def test_heartbeat_handles_usr1_and_usr2(self):
-        src = _read("linux/onionpress-heartbeat.py")
-        self.assertRegex(
-            src, r'signal\.signal\(signal\.SIGUSR1',
-            "Heartbeat client must register a SIGUSR1 handler — sleep-pre "
-            "uses it to flush /offline before suspend.",
-        )
-        self.assertRegex(
-            src, r'signal\.signal\(signal\.SIGUSR2',
-            "Heartbeat client must register a SIGUSR2 handler — sleep-post "
-            "uses it to send an immediate /online after resume.",
-        )
-        # The flag-based pattern: handler sets a global, main loop reacts.
-        # Direct send_offline() inside a signal handler would be unsafe.
-        self.assertRegex(
-            src, r'_pending_offline\s*=\s*True',
-            "USR1 handler should flip a flag and let the main loop send "
-            "/offline — network I/O inside a signal handler is unsafe.",
-        )
-        self.assertRegex(
-            src, r'_pending_online\s*=\s*True',
-            "USR2 handler should flip a flag for the same reason.",
-        )
+    def test_no_hook_no_case(self):
+        self.assertFalse(os.path.exists(os.path.join(PROJECT_ROOT, "linux", "onionpress-sleep-hook")))
+        self.assertNotIn("sleep-pre", _read("linux/onionpress"))
+        self.assertNotIn("onionpress-sleep-hook", _read("build/build-linux.sh"))
+        install = _read("linux/install.sh")
+        self.assertNotIn("onionpress-sleep-hook", install)
+        self.assertIn("$SUDO rm -f /usr/lib/systemd/system-sleep/onionpress", install)
+        daemon = _read("src/onionpress/daemon.py")
+        self.assertIn("from .power import LogindPowerHandler", daemon)
+        power = _read("src/onionpress/power.py")
+        self.assertIn('signal_name="PrepareForSleep"', power)
+        self.assertIn('manager.Inhibit("sleep", "OnionPress",', power)
 
 
 class TestLinuxInstallRefusesPlainRoot(unittest.TestCase):
@@ -1108,41 +1021,20 @@ class TestUninstallPathsKillTray(unittest.TestCase):
         )
 
 
-class TestStopContainersWritesStoppedStatus(unittest.TestCase):
-    """When the launcher stops containers, it must write a final
-    status.json with state="stopped" so the tray (which polls the file
-    every 2s) flips its icon to gray within one cycle. Without this,
-    the tray holds the previous "running" snapshot indefinitely.
+class TestStopContainersLeavesTheStatusToTheDaemon(unittest.TestCase):
+    """The daemon's next pass (within 10 s of a stop) writes the stopped
+    status the tray reads (issue #407); the launcher's stop_containers
+    writes nothing itself (until #407 it ran a one-shot write-status so
+    the tray flipped to gray within its 2 s poll)."""
 
-    The launcher's write_status() already maps an empty `docker compose ps`
-    to state="stopped" — stop_containers just has to call it.
-    """
-
-    def test_stop_containers_writes_status(self):
+    def test_stop_containers_writes_no_status(self):
         script = _read("linux/onionpress")
-        m = re.search(
-            r'stop_containers\(\)\s*\{(.*?)^\}', script,
-            re.DOTALL | re.MULTILINE)
+        m = re.search(r'stop_containers\(\)\s*\{(.*?)^\}', script, re.DOTALL | re.MULTILINE)
         self.assertIsNotNone(m, "stop_containers() must exist")
         body = m.group(1)
-        # write_status must be called after the compose down — order matters:
-        # the call needs to see the post-down `docker compose ps` (empty).
-        down = re.search(r'docker\s+compose\s+(?:"\$\{COMPOSE_WITH_CF\[@\]\}"\s+)?down', body)
-        ws = re.search(r'\bwrite_status\b', body)
-        self.assertIsNotNone(down, "stop_containers must run `docker compose down`")
-        self.assertIsNotNone(
-            ws,
-            "stop_containers must call write_status so the tray flips its "
-            "icon to gray. Linux tray is a separate process from the "
-            "launcher (file-based IPC via status.json); without this, the "
-            "icon stays purple/yellow indefinitely after the service stops.",
-        )
-        self.assertLess(
-            down.start(), ws.start(),
-            "write_status must come AFTER `docker compose down` — write_status "
-            "calls `docker compose ps` to derive state; calling it before "
-            "down would still report the running containers.",
-        )
+        self.assertIsNotNone(re.search(r'docker\s+compose\s+(?:"\$\{COMPOSE_WITH_CF\[@\]\}"\s+)?down', body))
+        self.assertNotIn("write_status", body)
+        self.assertNotIn("write-status", script)
 
 
 class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
