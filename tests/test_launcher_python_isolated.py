@@ -97,10 +97,11 @@ class TestMacCensus(unittest.TestCase):
             '"$_BUNDLED_PYTHON_BIN" "$@"; }', _read(MAC))
 
     def test_every_bundled_python_c_says_dash_p(self):
-        """-m goes through the wrapper's PYTHONSAFEPATH; a -c says -P too."""
+        """-m goes through the wrapper's PYTHONSAFEPATH; a -c says -P too
+        (none is left since the port probe moved to onionpress.ports,
+        issue #405; the rule stays for the next one)."""
         for n, line in _code_lines(_read(MAC)):
             self.assertNotIn("bundled_python -c", line, f"{MAC}:{n}: -c without -P")
-        self.assertIn("bundled_python -P -c", _read(MAC))
 
     def test_no_system_python_on_the_mac(self):
         """Modern Macs have no usable python3; nothing may call one."""
@@ -125,14 +126,6 @@ def _op_py_definition():
     start = text.index('ONIONPRESS_PYTHONPATH="${ONIONPRESS_PYTHONPATH:-$INSTALL_DIR/lib}"')
     end = text.index("\n}\n", text.index("op_py() {", start)) + len("\n}\n")
     return text[start:end]
-
-
-def _linux_port_probe():
-    """The port probe's `python3 -I -c '…'` (its socket import)."""
-    text = _read(LINUX)
-    start = text.index("        if python3 -I -c '\nimport socket, sys")
-    end = text.index("' \"$wp\"", start) + len("' \"$wp\"")
-    return text[start:end].strip()
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
@@ -192,12 +185,6 @@ class TestPlantedModulesAreNotImported(unittest.TestCase):
         r = self._bash(script, {"ONIONPRESS_PYTHONPATH": SRC})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('"version"', r.stdout)
-
-    def test_the_port_probe_imports_the_real_socket(self):
-        script = "wp=1\n" + _linux_port_probe() + "; then echo free; else echo busy; fi\n"
-        r = self._bash(script)
-        self.assertNotIn("PLANTED", r.stderr + r.stdout)
-        self.assertIn(r.stdout.strip(), ("free", "busy"), r.stderr)
 
     def test_the_mac_wrapper_drops_the_current_directory(self):
         """bundled_python as defined, with this interpreter as the bundle's

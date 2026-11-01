@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
     derivatives, docker_versions, handle_action, key_import, launcher_ops, multisite, onionheaven,
-    redact, scrub, setup_logic, start, status_writer, wordpress_egress,
+    ports, redact, scrub, setup_logic, start, status_writer, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -454,6 +454,12 @@ ROWS = [
     Row("wordpress-egress", ["wordpress-egress"], "wordpress_egress.ensure",
         mock.call(ANY, ANY, action="apply", wp_port=9090), rc=1,
         returns=mock.Mock(ok=False, line=lambda: "failed"), env={"ONIONPRESS_WP_PORT": "9090"}),
+    # The launchers' top level (#405): ports.resolve_at_start with the
+    # environment's preset, no OnionPressCLI; the answer is KEY=VALUE lines
+    # (tests/test_launcher_env.py has the lines and the failure).
+    Row("launcher-env", ["launcher-env"], "ports.resolve_at_start",
+        mock.call(D(""), preset="10000", docker=ANY, log=ANY), rc=0,
+        returns=ports.PortConfig.from_offset(10000), env={"ONIONPRESS_PORT_OFFSET": "10000"}),
     Row("open-login", ["open-login", "http://localhost:8080/wp-admin/"], "launcher_ops.open_login",
         mock.call("http://localhost:8080/wp-admin/"), rc=0, returns=None),
     Row("verify-admin-password", ["verify-admin-password"], "backup.verify_wp_admin_password_any",
@@ -492,7 +498,7 @@ MODULES = {
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
     "start": start, "setup_logic": setup_logic, "status_writer": status_writer,
-    "key_import": key_import,
+    "key_import": key_import, "ports": ports,
 }
 
 
