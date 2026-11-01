@@ -20,9 +20,10 @@ from urllib.parse import urlsplit
 from . import __version__
 from .platform import OS, detect_os, resolve_paths, detect_timezone
 from .config import (
-    ensure_config, ensure_secrets, read_value, detect_port_offset,
+    ensure_config, ensure_secrets, read_value,
     validate_address_prefix, DEFAULTS,
 )
+from . import ports
 from .ports import port_environ
 from .docker import Docker
 from .containers import ContainerManager
@@ -642,15 +643,15 @@ class OnionPressCLI:
         # Ensure config exists
         ensure_config(self.paths)
 
-        # The ports: the launcher's own offset when it says so
-        # (ONIONPRESS_PORT_OFFSET, as the daemon and the start steps read
-        # it), else the bind probe. Beside this install's own running stack
-        # the probe found its ports taken and moved a restore to the next
-        # offset (issue #507).
-        from .config import PortConfig
-        offset = os.environ.get("ONIONPRESS_PORT_OFFSET", "")
-        self.port_config = (PortConfig.from_offset(int(offset)) if offset.isdigit()
-                            else detect_port_offset())
+        # The ports: ports.resolve_at_start, the one rule (issue #405): the
+        # launcher's own offset when it says so (ONIONPRESS_PORT_OFFSET, as
+        # the daemon and the start steps read it), else the running stack's
+        # port, else the bind probe. Beside this install's own running
+        # stack the probe found its ports taken and moved a restore to the
+        # next offset (issue #507).
+        self.port_config = ports.resolve_at_start(
+            self.paths.data_dir, preset=os.environ.get("ONIONPRESS_PORT_OFFSET"),
+            docker=Docker(self.paths, log_func=self.log), log=self.log)
 
         # Build env for Docker
         secrets = ensure_secrets(self.paths.secrets_file)
@@ -2594,6 +2595,67 @@ def _run_wordpress_egress(run):
     return 0 if result.ok else 1
 
 
+# What `onionpress launcher-env` prints: the launchers' main() exports
+# these and nothing else from its answer (an allowlist on both sides).
+LAUNCHER_ENV_KEYS = ("ONIONPRESS_PORT_OFFSET", "ONIONPRESS_WP_PORT", "ONIONPRESS_SOCKS_PORT",
+                     "ONIONPRESS_PROXY_PORT", "DOCKER_DIR", "DOCKER_HOST", "DOCKER_SOCK")
+
+
+def launcher_environment(paths, port_config, environ=None, os_name=None) -> dict:
+    """The environment a launcher exports at the top of its main() (issue
+    #405), from the one rule for each value: the four port variables
+    (ports.port_environ of *port_config*, what compose and every start
+    step read), DOCKER_DIR (platform.resolve_paths: the bundle's docker
+    folder, the Linux install tree's; "" when none is known, and the
+    launcher keeps its own) and, on Linux, the Docker daemon the rest of
+    OnionPress uses: DOCKER_HOST as the daemon's _setup_environment sets
+    it (issue #503: a preset one kept, else resolve_paths' rootless socket
+    when it exists, else the system one) and DOCKER_SOCK, its path, for
+    the compose file's socket mounts. The Mac's Colima environment,
+    DOCKER_HOST included, stays the launcher's own."""
+    environ = os.environ if environ is None else environ
+    os_name = os_name or detect_os().value
+    env = dict(port_environ(port_config))
+    env["DOCKER_DIR"] = paths.docker_dir
+    if os_name == OS.LINUX.value:
+        docker_host = environ.get("DOCKER_HOST") or f"unix://{paths.docker_socket}"
+        env["DOCKER_HOST"] = docker_host
+        env["DOCKER_SOCK"] = (docker_host[len("unix://"):] if docker_host.startswith("unix://")
+                              else paths.docker_socket)
+    return env
+
+
+def _run_launcher_env(run):
+    # The launchers' top level (issue #405): the ports once, by
+    # ports.resolve_at_start (a preset ONIONPRESS_PORT_OFFSET as it is;
+    # else the previous instance's port waited for, the running stack's
+    # port, else the bind probe), and the paths by platform.resolve_paths,
+    # printed KEY=VALUE per line for main() to export. No OnionPressCLI
+    # (its setup creates config and secrets). Log lines go to stderr in
+    # the launcher's format (it appends them to its log); never a
+    # traceback: on failure the ERROR's words and exit 1, and the
+    # launcher keeps its defaults.
+    log = _make_log_func()
+    try:
+        paths = resolve_paths(data_dir=run.args.data_dir)
+        pc = ports.resolve_at_start(
+            paths.data_dir, preset=os.environ.get("ONIONPRESS_PORT_OFFSET"),
+            docker=Docker(paths), log=log)
+        env = launcher_environment(paths, pc)
+    except Exception as e:
+        log(f"ERROR: the ports and paths could not be resolved: {e}")
+        return 1
+    for key in LAUNCHER_ENV_KEYS:
+        value = env.get(key)
+        if value is None:
+            continue
+        if "\n" in value:
+            log(f"ERROR: {key} holds a newline; not exported")
+            continue
+        print(f"{key}={value}")
+    return 0
+
+
 def _run_apply_settings_updates(run):
     # The payload was written inside WordPress, so it is untrusted
     # (config.SETTINGS_PAGE_KEYS). Same fast path as safe-config: only
@@ -2947,6 +3009,14 @@ _COMMANDS = [
             "ones; both launchers gate every image pull on it"),
      _run_using_local_images),
     ("wordpress-egress", _add_wordpress_egress, _run_wordpress_egress),
+    ("launcher-env",
+     _plain("Print the environment a launcher exports at the top of its "
+            "main(): the port variables (ports.resolve_at_start: a preset "
+            "ONIONPRESS_PORT_OFFSET as it is, else the previous instance's "
+            "port waited for, the running stack's, else the bind probe) and "
+            "the paths (DOCKER_DIR; on Linux DOCKER_HOST and DOCKER_SOCK), "
+            "KEY=VALUE per line; log lines on stderr"),
+     _run_launcher_env),
     ("apply-settings-updates",
      _plain("Merge the settings page's config-updates.json (on stdin) into "
             "the config — allowlisted keys with valid values only; prints "

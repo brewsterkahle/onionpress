@@ -186,115 +186,44 @@ export ONIONPRESS_VERSION
 export TZ="$(cat /etc/timezone 2>/dev/null || echo UTC)"
 export PYTHONDONTWRITEBYTECODE=1
 
-# Rootless Docker: point CLI and compose at the user's rootless daemon socket
-_rootless_sock="/run/user/$(id -u)/docker.sock"
-if [ -S "$_rootless_sock" ]; then
-    export DOCKER_HOST="unix://$_rootless_sock"
-    export DOCKER_SOCK="$_rootless_sock"
-fi
-
-# Port-offset detection. Mirrors app/MacOS/onionpress's detect_port_offset
-# (Mac multi-user). Probes all three host-exposed ports — WP 8080, SOCKS
-# 9050, proxy 9077 — and bumps the offset by 10000 if any is in use. The
-# common Linux collision is a system tor on 9050 (apt-installed by
-# torbrowser-launcher); offset 10000 publishes OnionPress SOCKS on 19050
-# instead. The container internally still listens on 9050, so the onion
-# service is unaffected. Uses real socket bind (not lsof) so it sees
-# ports owned by other users / system services.
-detect_port_offset() {
-    local offset=0
-    while true; do
-        local wp=$((8080 + offset))
-        local socks=$((9050 + offset))
-        local proxy=$((9077 + offset))
-        if [ $proxy -gt 65535 ]; then
-            offset=0
-            break
-        fi
-        if python3 -I -c '
-import socket, sys
-for p in sys.argv[1:]:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", int(p)))
-    except OSError:
-        sys.exit(1)
-    finally:
-        s.close()
-' "$wp" "$socks" "$proxy" 2>/dev/null; then
-            break
-        fi
-        offset=$((offset + 10000))
-    done
-    echo "$offset"
+# The environment every verb runs with (issue #405): the ports and the
+# paths, resolved once by the Python at the top of main() and exported
+# here and nowhere else. `onionpress launcher-env` answers KEY=VALUE per
+# line: ONIONPRESS_PORT_OFFSET and the three port variables compose and
+# every start step read (onionpress.ports.resolve_at_start: a preset
+# ONIONPRESS_PORT_OFFSET, the daemon's or the tray's, as it is; else the
+# previous instance's port waited for, the running stack's published
+# port, else the bind probe), DOCKER_DIR (platform.resolve_paths: the
+# install tree's compose folder, a checkout's), and the Docker daemon the
+# rest of OnionPress uses: DOCKER_HOST (a preset one kept, else the
+# user's rootless socket when it exists, else the system one: the
+# daemon's rule, issue #503) and DOCKER_SOCK, its path, for the compose
+# file's socket mounts. Its log lines go to the log file only: stdout is
+# what the tray reads. When the Python does not answer (a broken install)
+# the launcher keeps going on the preset offset or 0, so `stop` still
+# brings the containers down.
+launcher_environment() {
+    local answer key value
+    answer=$(op_py --data-dir "$DATA_DIR" launcher-env 2>>"$LOG_FILE") || answer=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ONIONPRESS_PORT_OFFSET|ONIONPRESS_WP_PORT|ONIONPRESS_SOCKS_PORT|ONIONPRESS_PROXY_PORT)
+                [[ "$value" =~ ^[0123456789]{1,5}$ ]] && export "$key=$value" ;;
+            DOCKER_DIR)
+                [ -n "$value" ] && [ -d "$value" ] && DOCKER_DIR="$value" ;;
+            DOCKER_HOST|DOCKER_SOCK)
+                [ -n "$value" ] && export "$key=$value" ;;
+        esac
+    done <<< "$answer"
+    if ! [[ "${ONIONPRESS_WP_PORT:-}" =~ ^[0123456789]{1,5}$ ]]; then
+        [[ "${ONIONPRESS_PORT_OFFSET:-}" =~ ^[0123456789]{1,5}$ ]] || ONIONPRESS_PORT_OFFSET=0
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: the ports could not be resolved (onionpress launcher-env gave no answer): using offset $ONIONPRESS_PORT_OFFSET" >> "$LOG_FILE"
+        export ONIONPRESS_PORT_OFFSET
+        export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
+        export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
+        export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
+    fi
 }
-
-if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
-    # If the service is already running, read its offset from status.json
-    # rather than re-detecting via socket bind. The bind test returns 0
-    # when nothing currently holds port 8080 (e.g. between restarts or
-    # when another user's containers hold it but the bind test runs as a
-    # different uid), causing standalone commands like `onionpress setup`
-    # to target the wrong port.
-    _status_json="$DATA_DIR/status.json"
-    if [ -f "$_status_json" ] && command -v python3 >/dev/null 2>&1; then
-        _running_wp_port=$(python3 -I -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    p = int(d.get('wp_port', 0))
-    if p > 0:
-        print(p - 8080)
-except Exception:
-    pass
-" "$_status_json" 2>/dev/null)
-        if [ -n "$_running_wp_port" ] && [ "$_running_wp_port" -ge 0 ] 2>/dev/null; then
-            ONIONPRESS_PORT_OFFSET="$_running_wp_port"
-        fi
-    fi
-fi
-
-if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
-    # Sticky-offset recovery (mirrors src/menubar.py:258). If we just
-    # quit/restarted, our previous offset's ports are likely in
-    # TIME_WAIT for ~30-60s. Naive detection sees them as "taken" and
-    # bumps to the next offset, giving the user a different port number
-    # for the rest of the session even after the old socket frees.
-    # Avoid this by reading a sentinel written on stop and waiting up
-    # to 15s for the prior offset's ports to come back. Stale sentinels
-    # (>60s) are ignored — likely from a crash where we never got to
-    # write a fresh one.
-    _prev_sentinel="$DATA_DIR/.previous-port-offset"
-    if [ -f "$_prev_sentinel" ]; then
-        _age=$(( $(date +%s) - $(stat -c %Y "$_prev_sentinel" 2>/dev/null || echo 0) ))
-        if [ "$_age" -lt 60 ]; then
-            _prev=$(cat "$_prev_sentinel" 2>/dev/null | tr -dc '0-9')
-            if [ -n "$_prev" ]; then
-                _desired=$((8080 + _prev))
-                for _i in $(seq 1 30); do  # up to 15s, 0.5s each
-                    if python3 -I -c '
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-try:
-    s.bind(("127.0.0.1", int(sys.argv[1])))
-    s.close()
-except OSError:
-    s.close(); sys.exit(1)
-' "$_desired" 2>/dev/null; then
-                        break
-                    fi
-                    sleep 0.5
-                done
-            fi
-        fi
-        rm -f "$_prev_sentinel"
-    fi
-    ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
-fi
-export ONIONPRESS_PORT_OFFSET
-export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
-export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
-export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
 
 # Bind host for WordPress's published port. Only WordPress: Tor's SOCKS
 # port is fixed to 127.0.0.1 in the compose file. Linux is typically
@@ -1517,6 +1446,7 @@ usage() {
 }
 
 main() {
+    launcher_environment
     case "${1:-start}" in
         start)
             # PID lock
