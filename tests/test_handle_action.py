@@ -660,10 +660,107 @@ class TestRestoreBackup(_Case):
 
 class TestUpdate(_Case):
 
+    def _answer(self, **fields):
+        doc = {"update_available": False, "current": "2.5.6", "latest": "2.5.6",
+               "installable": False, "install_problem": None}
+        doc.update(fields)
+        self.script({"update --check --json": {"stdout": json.dumps(doc) + "\n"}})
+
     def test_linux_only_checks(self):
+        self._answer(update_available=True, installable=True, latest="2.6.0")
         self.request("update")
         ha.handle(self.host("linux"))
-        self.assertEqual(self.argvs(), [["settings-page-update-check"]])
+        self.assertEqual(self.argvs(), [["update", "--check", "--json"]])
+        res = self.docker.result("update-result.json")
+        self.assertEqual((res["success"], res["update_available"], res["installable"]),
+                         (True, True, True))
+        self.assertEqual(res["message"], ha.LINUX_UPDATE_AVAILABLE_MSG.format(latest="2.6.0"))
+        self.assertIn("run `onionpress update` on this machine", res["message"])
+        self.assertNotIn("Check for Updates", res["message"])
+        self.assertRegex(res["checked_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_release_the_update_cannot_install(self):
+        self._answer(update_available=True, installable=False, latest="2.6.0",
+                     install_problem="release v2.6.0 publishes no SHA256SUMS, so its package cannot be checked.")
+        self.request("update")
+        ha.handle(self.host("linux"))
+        res = self.docker.result("update-result.json")
+        self.assertEqual((res["success"], res["update_available"], res["installable"]),
+                         (True, True, False))
+        self.assertIn("cannot install it: release v2.6.0 publishes no SHA256SUMS", res["message"])
+
+    def test_one_github_lookup_per_five_minutes(self):
+        # GitHub allows 60 an hour and the page can ask every 10 s: the
+        # answer is kept five minutes in the data dir (no container
+        # mounts it), each request's id on its own copy.
+        self._answer(update_available=True, installable=True, latest="2.6.0")
+        self.docker.put("request-id", "Req_1-a\n")
+        self.request("update")
+        ha.handle(self.host("linux"))
+        first = self.docker.result("update-result.json")
+        self.assertEqual(first["request_id"], "Req_1-a")
+        self.assertEqual(len(self.argvs()), 1)
+        cache = os.path.join(self.data_dir, ha.UPDATE_CHECK_CACHE)
+        with open(cache) as f:
+            kept = json.load(f)
+        self.assertNotIn("request_id", kept)
+        self.assertEqual(oct(os.stat(cache).st_mode & 0o777), "0o600")
+        # Asked again at once: the same answer, without asking GitHub.
+        self.docker.put("request-id", "Req_2\n")
+        self.request("update")
+        ha.handle(self.host("linux"))
+        again = self.docker.result("update-result.json")
+        self.assertEqual(again["request_id"], "Req_2")
+        self.assertEqual({k: v for k, v in again.items() if k != "request_id"},
+                         {k: v for k, v in first.items() if k != "request_id"})
+        self.assertEqual(len(self.argvs()), 1)
+        self.assertTrue(any("from the last 5 minutes" in m for m in self.logs))
+        # Six minutes later, GitHub again.
+        old = os.stat(cache).st_mtime - 360
+        os.utime(cache, (old, old))
+        self.request("update")
+        ha.handle(self.host())
+        self.assertEqual(len(self.argvs()), 2)
+
+    def test_a_stale_link_or_broken_cache_is_not_an_answer(self):
+        self._answer()
+        cache = os.path.join(self.data_dir, ha.UPDATE_CHECK_CACHE)
+        for make in (lambda: os.symlink("/etc/hostname", cache),
+                     lambda: open(cache, "w").write("{not json"),
+                     lambda: os.mkdir(cache)):
+            with self.subTest(make):
+                shutil.rmtree(cache, ignore_errors=True)
+                if os.path.lexists(cache):
+                    os.unlink(cache)
+                make()
+                before = len(self.argvs())
+                self.request("update")
+                ha.handle(self.host("linux"))
+                self.assertEqual(len(self.argvs()), before + 1)
+
+    def test_a_failed_check_is_kept_too(self):
+        # A rate-limited GitHub answers failures: asking again at once
+        # would only spend more of the hour.
+        self._answer(error="Update check curl failed: exit=6", update_available=False)
+        self.request("update")
+        ha.handle(self.host("linux"))
+        res = self.docker.result("update-result.json")
+        self.assertFalse(res["success"])
+        self.assertFalse(res["installable"])
+        self.request("update")
+        ha.handle(self.host("linux"))
+        self.assertEqual(len(self.argvs()), 1)
+
+    def test_a_cache_that_cannot_be_written_is_a_warning(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes anywhere")
+        self._answer()
+        self.request("update")
+        os.chmod(self.data_dir, 0o500)
+        self.addCleanup(os.chmod, self.data_dir, 0o700)
+        ha.handle(self.host("linux"))
+        self.assertTrue(any("could not keep the update check" in m for m in self.logs))
+        self.assertTrue(self.docker.result("update-result.json")["success"])
 
     def test_mac_up_to_date_is_a_success(self):
         self.script({"update --check --json": {"stdout": json.dumps(
@@ -767,21 +864,21 @@ class TestRequestId(_Case):
                 self.assertTrue(all(c[4] == "head" for c in before),
                                 f"the removal comes right after the request is read: {before}")
                 res = self.docker.result(name)
-                if res is not None:        # Linux's update: the launcher writes it
-                    self.assertNotIn("stale", res)
-                    self.assertEqual(res["request_id"], "req1")
+                self.assertNotIn("stale", res)
+                self.assertEqual(res["request_id"], "req1")
 
     def test_every_result_file_is_known(self):
         self.assertEqual(set(ha.RESULT_FILES), set(ha.ACTIONS) - {"refresh-status"})
         written = set(re.findall(r'write_result\("([a-z-]+\.json)"', open(ha.__file__).read()))
         self.assertEqual(written, set(ha.RESULT_FILES.values()))
 
-    def test_linux_update_check_hands_the_id_to_the_launcher(self):
+    def test_linux_update_check_carries_the_id(self):
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": False, "current": "2.5.6", "latest": "2.5.6"}) + "\n"}})
         self.request_with_id("update", "upd-1")
         ha.handle(self.host("linux"))
-        calls = self.launcher_calls()
-        self.assertEqual(calls[-1]["argv"], ["settings-page-update-check"])
-        self.assertEqual(calls[-1]["env"].get("ONIONPRESS_REQUEST_ID"), "upd-1")
+        self.assertEqual(self.launcher_calls()[-1]["argv"], ["update", "--check", "--json"])
+        self.assertEqual(self.docker.result("update-result.json")["request_id"], "upd-1")
 
     def test_a_pending_question_keeps_the_id_for_its_answer(self):
         self.script(TestKeyImport._confirm_answer(self))
@@ -1123,13 +1220,14 @@ class TestLaunchers(unittest.TestCase):
                                 r'handle-action --launcher "\$INSTALL_DIR/onionpress" "\$\{@:2\}"\n'
                                 r'            ;;\n')
         for case, body in (("settings-page-backup", 'create_backup "$BACKUP_PASS" "$2" --without-hub-data --without-host-secrets'),
-                           ("settings-page-restore", 'restore_backup "$BACKUP_PASS" "$2" --from-settings-page'),
-                           ("settings-page-update-check", "update_settings_page_check")):
+                           ("settings-page-restore", 'restore_backup "$BACKUP_PASS" "$2" --from-settings-page')):
             with self.subTest(case=case):
                 start = linux.index(f"\n        {case})\n")
                 branch = linux[start:linux.index("\n            ;;\n", start)]
                 self.assertIn(body, branch)
         self.assertNotIn("                create-backup)\n", linux)
+        # The update check is the shared handler's (`update --check --json`).
+        self.assertNotIn("settings-page-update-check", linux)
         self.assertIn("|handle-action|", linux)
         self.assertEqual(linux.count('umask 077; cat > "$1"'), 0)
 

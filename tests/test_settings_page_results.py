@@ -5,8 +5,8 @@
 The page writes `requested-action` and polls for the action's result
 file; the last run's file was still there, so the first poll took it for
 this run's and stopped. Now the page writes an id to `request-id` first,
-the host (onionpress.handle_action, and the Linux launcher's
-update_settings_page_check) echoes it as `request_id` in the result, and
+the host (onionpress.handle_action, on both platforms) echoes it as
+`request_id` in the result, and
 the poll takes only a result carrying it. A result without one (a host
 from before the id) counts only when written since the request; a page
 that sent no id gets today's behaviour. The three sides must agree on the
@@ -48,12 +48,6 @@ def _function(src, name):
     assert m, f"no function {name}"
     end = src.index("\n" + m.group(1) + "}\n", m.end())
     return src[m.start():end + len(m.group(1)) + 2]
-
-
-def _shell_function(src, name):
-    m = re.search(r"^" + re.escape(name) + r"\(\) \{\n", src, re.M)
-    assert m, f"no shell function {name}"
-    return src[m.start():src.index("\n}\n", m.end()) + 3]
 
 
 def _block(src, start, end):
@@ -115,12 +109,12 @@ class TestSources(unittest.TestCase):
         pattern = ha.REQUEST_ID_RE.pattern
         self.assertEqual(pattern, "[A-Za-z0-9_-]{1,64}")
         self.assertIn(f"'/^{pattern}$/D'", self.poll)
-        linux = _shell_function(_read(LINUX), "update_settings_page_put_result")
-        self.assertIn(f're.fullmatch(r"{pattern}", rid)', linux)
-        self.assertIn('os.environ.get("ONIONPRESS_REQUEST_ID", "")', linux)
-        check = _shell_function(_read(LINUX), "update_settings_page_check")
-        self.assertEqual(check.count("update_settings_page_put_result"), 2)
-        self.assertNotIn("wp_put", check)
+        # The Linux launcher writes no result of its own any more: the
+        # update check is the shared handler's (2.6.2), so nothing in bash
+        # needs the id.
+        linux = _read(LINUX)
+        self.assertNotIn("ONIONPRESS_REQUEST_ID", linux)
+        self.assertNotIn("update-result.json", linux)
         self.assertEqual(ha.REQUEST_ID_FILE, "request-id")
         self.assertIn("'/var/lib/onionpress/request-id'", self.request)
 

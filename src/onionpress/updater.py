@@ -1,5 +1,16 @@
 """
-OnionPress updater — checks for new releases and installs them.
+OnionPress updater: the one release client of both platforms.
+
+The release lookup on GitHub (the latest, a chosen version, a pre-release),
+the version compare, the draft and pre-release rules, the release's
+SHA256SUMS and the check of a downloaded asset against it live here, for
+`onionpress update` (cli.cmd_update) and `check-for-update`. What differs
+by platform is the install step and where the installed version is read:
+a Mac's app bundle is replaced by the staged swap below
+(download_and_install); Linux's release package is fetched and checked
+here (fetch_deb) and installed by the launcher's apt-get leaf
+(`update-install-deb`, linux/onionpress). Until 2.6.1 linux/onionpress
+carried a second client of its own in bash.
 
 Multi-user aware: detects other OnionPress instances on the same Mac
 and guides the user through a safe coordinated update.
@@ -13,6 +24,10 @@ import shutil
 import socket
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
+
+from . import __version__
+
 
 def _parse_version(version_str):
     """Parse a version string like '2.10.3' into a tuple of ints."""
@@ -20,6 +35,26 @@ def _parse_version(version_str):
         return tuple(int(x) for x in version_str.split("."))
     except (ValueError, AttributeError):
         return (0,)
+
+
+# A release version as the tags carry it after the "v": one to four
+# groups of digits. The digits are spelled out (not 0-9, \d) so nothing
+# but ASCII digits passes; fullmatch, so a trailing newline fails too.
+_RELEASE_VERSION = re.compile(r"[0123456789]{1,9}(\.[0123456789]{1,9}){1,3}")
+
+
+def is_release_version(text):
+    """True for a release version like 2.5.3 (no "v", no suffix)."""
+    return isinstance(text, str) and _RELEASE_VERSION.fullmatch(text) is not None
+
+
+def version_newer(a, b):
+    """True when release version *a* is newer than *b*: compared group by
+    group as numbers, missing groups as 0 (2.6 is 2.6.0; 2.10.0 is newer
+    than 2.9.9), never as text."""
+    x, y = _parse_version(a), _parse_version(b)
+    n = max(len(x), len(y))
+    return x + (0,) * (n - len(x)) > y + (0,) * (n - len(y))
 
 
 # macOS's CA bundle. Debian, Ubuntu and Raspberry Pi OS keep theirs at
@@ -115,41 +150,224 @@ def _primary_user(others):
 
 
 # ---------------------------------------------------------------------------
-# GitHub release check
+# GitHub release lookup
 # ---------------------------------------------------------------------------
+
+# One repository for releases, on both platforms.
+RELEASE_REPO = "brewsterkahle/onionpress"
+RELEASE_API = f"https://api.github.com/repos/{RELEASE_REPO}/releases"
+RELEASE_DOWNLOAD = f"https://github.com/{RELEASE_REPO}/releases/download"
+# Every release carries SHA256SUMS ("<sha256>  <asset name>", sha256sum
+# format, written by build/release.sh); the Linux update installs only a
+# .deb matching its line, and the Mac update installs only a .dmg
+# matching its line (issue #386). Nothing else checks what the DMG is:
+# the bundle is ad-hoc signed, and the swap strips quarantine.
+RELEASE_SUMS = "SHA256SUMS"
+RELEASE_DEB = "onionpress.deb"
+# Where the .deb installs; the update refuses to put it beside another tree.
+RELEASE_INSTALL_DIR = "/opt/onionpress"
+SUMS_MAX_BYTES = 65536
+DEB_MAX_BYTES = 268435456
+# Linux: the file the .deb (and install-tree.sh) write the version to.
+VERSION_FILE = "VERSION"
+
+
+def _curl_argv(*args):
+    """curl for GitHub: HTTPS only, redirects included (release downloads
+    redirect to GitHub's asset host) and held to HTTPS, failing on any
+    HTTP error, with the CA bundle rule of _curl_tls_args. *args* end
+    with the URL."""
+    return ["curl", "--fail", "--silent", "--show-error", "--location",
+            "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
+            "--connect-timeout", "20", *_curl_tls_args(),
+            "-H", "User-Agent: onionpress", *args]
+
+
+def _run_curl(args, timeout):
+    """One curl run; (returncode, stdout, stderr), or (None, "", why) when
+    curl could not run at all."""
+    try:
+        r = subprocess.run(_curl_argv(*args), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "", str(e)
+    return r.returncode, r.stdout, r.stderr.strip()
+
+
+def _curl_failure(rc, stderr):
+    if rc is None:
+        return f"curl could not run: {stderr}"
+    return f"curl exit {rc}: {stderr}" if stderr else f"curl exit {rc}"
+
+
+class UpdateError(Exception):
+    """A lookup, download or check that stops the update; the message is
+    what the person is told."""
+
+
+@dataclass
+class Release:
+    """One GitHub release: its tag (v + a release version), the version,
+    GitHub's record and its asset names."""
+    tag: str
+    version: str
+    data: dict
+    assets: list = field(default_factory=list)
+
+    def asset_count(self, name):
+        return self.assets.count(name)
+
+    def download_url(self, name):
+        """The release's asset by name, from the one host and tag (never
+        a URL GitHub's record offers)."""
+        return f"{RELEASE_DOWNLOAD}/{self.tag}/{name}"
+
+    def dmg_name(self):
+        """The one asset ending in .dmg, or None."""
+        dmgs = [n for n in self.assets if n.endswith(".dmg")]
+        return dmgs[0] if len(dmgs) == 1 else None
+
+    def install_problem(self, os_name):
+        """Why `onionpress update` on *os_name* could not install this
+        release (its package, or the SHA256SUMS to check it against, is
+        missing), or None when it can."""
+        if os_name == "linux":
+            if self.asset_count(RELEASE_DEB) != 1:
+                return f"release {self.tag} has no {RELEASE_DEB}."
+            what = "package"
+        else:
+            if self.dmg_name() is None:
+                return f"release {self.tag} has no .dmg."
+            what = "disk image"
+        if self.asset_count(RELEASE_SUMS) != 1:
+            return (f"release {self.tag} publishes no {RELEASE_SUMS}, "
+                    f"so its {what} cannot be checked.")
+        return None
+
+
+def _release_from(doc, want, pre):
+    """The Release GitHub's answer *doc* describes, held to the rules:
+    one release (from a list: the newest that is not a draft), a tag that
+    is v + a release version (the tag *want*ed, when one was), not a
+    draft, a pre-release only with *pre*. A missing draft or prerelease
+    flag counts as set."""
+    if isinstance(doc, list):
+        doc = next((x for x in doc if isinstance(x, dict) and x.get("draft") is False), None)
+    if not isinstance(doc, dict):
+        raise UpdateError("GitHub's answer did not describe a release.")
+    tag = doc.get("tag_name")
+    tag = re.sub(r"[^A-Za-z0-9._-]", "?", tag if isinstance(tag, str) else "")[:64]
+    if not tag.startswith("v") or not is_release_version(tag[1:]):
+        raise UpdateError(f"the release's tag \"{tag}\" is not a release version.")
+    if want and tag != f"v{want}":
+        raise UpdateError(f"GitHub answered with {tag}, not v{want}.")
+    if doc.get("draft") is not False:
+        raise UpdateError(f"{tag} is a draft, not a release.")
+    if doc.get("prerelease") is not False and not pre:
+        raise UpdateError(f"{tag} is a pre-release; add --pre to install it.")
+    assets = [a.get("name") for a in (doc.get("assets") or [])
+              if isinstance(a, dict) and isinstance(a.get("name"), str)]
+    return Release(tag, tag[1:], doc, assets)
+
+
+def find_release(version=None, pre=False, log=None):
+    """Look up a release on GitHub: the latest (*version* None), or tag
+    v<version>. With *pre* a pre-release may answer (and, without a
+    version, the newest release that is not a draft, pre-release or not).
+    Raises UpdateError: GitHub not reached, not a release version, no
+    such release, a draft, or a pre-release without *pre*."""
+    want = None
+    if version is not None:
+        want = version[1:] if version.startswith("v") else version
+        if not is_release_version(want):
+            raise UpdateError(f"\"{version}\" is not a release version (like 2.5.3).")
+        url = f"{RELEASE_API}/tags/v{want}"
+    elif pre:
+        url = f"{RELEASE_API}?per_page=30"
+    else:
+        url = f"{RELEASE_API}/latest"
+    rc, out, err = _run_curl(["--max-time", "30", "--max-filesize", "4000000",
+                              "-H", "Accept: application/vnd.github+json", url], timeout=45)
+    if rc != 0:
+        if log:
+            log(f"Update check curl failed: exit={rc} stderr={err}")
+        if want:
+            raise UpdateError(f"could not find release v{want} on GitHub (no such release, "
+                              f"or GitHub could not be reached; {_curl_failure(rc, err)}).")
+        raise UpdateError(f"could not look up the latest release on GitHub "
+                          f"({_curl_failure(rc, err)}).")
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        doc = None
+    return _release_from(doc, want, pre)
+
+
+@dataclass
+class UpdateCheck:
+    """What `onionpress update` learnt: the release found (None with
+    *error*), whether it is newer than *current* (an install whose
+    version cannot be read takes any release), and why this platform's
+    update could not install it (None when it could)."""
+    current: str
+    release: object = None
+    error: str = None
+    newer: bool = False
+    install_problem: str = None
+
+
+def check_release(current, log=None, *, version=None, pre=False, os_name="macos"):
+    """The release *version* (or the latest) against the installed
+    *current*: an UpdateCheck, never an exception. On any failure (network
+    down, GitHub rate-limited, not a release) its `error` says why."""
+    try:
+        release = find_release(version, pre, log=log)
+    except UpdateError as e:
+        if log:
+            log(f"Update check failed: {e}")
+        return UpdateCheck(current, error=str(e))
+    if log:
+        log(f"Update check: current={current}, latest={release.version}")
+    newer = not is_release_version(current) or version_newer(release.version, current)
+    return UpdateCheck(current, release=release, newer=newer,
+                       install_problem=release.install_problem(os_name))
+
 
 def check_for_update(current_version, log=None):
     """Check GitHub for a newer OnionPress release.
 
     Returns ``(release_data, latest_version)`` if an update is available,
-    or ``None`` if already up to date (or on error).
+    or ``None`` if already up to date (or on error; check_release tells
+    the two apart).
     """
-    url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
-    try:
-        result = subprocess.run(
-            ["curl", "-s", *_curl_tls_args(),
-             "-H", "User-Agent: onionpress", "--max-time", "10", url],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=15,
-        )
-        if result.returncode != 0:
-            if log:
-                log(f"Update check curl failed: exit={result.returncode} "
-                    f"stderr={result.stderr.strip()}")
-            return None
-
-        data = json.loads(result.stdout)
-        latest_version = data.get("tag_name", "").lstrip("v")
-        if log:
-            log(f"Update check: current={current_version}, latest={latest_version}")
-
-        if latest_version and _parse_version(latest_version) > _parse_version(current_version):
-            return (data, latest_version)
-
-    except Exception as e:
-        if log:
-            log(f"Update check failed: {e}")
+    c = check_release(current_version, log=log)
+    if c.release is not None and c.newer:
+        return (c.release.data, c.release.version)
     return None
+
+
+def installed_version(os_name, *, app_path=None, install_dir=None):
+    """The version installed here: a Mac's from the bundle's Info.plist
+    (*app_path*), Linux's from the install tree's VERSION file
+    (*install_dir*, else $ONIONPRESS_INSTALL_DIR, else /opt/onionpress);
+    the running package's own version where neither can be read."""
+    if os_name == "macos":
+        if app_path:
+            import plistlib
+            try:
+                with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+                    return plistlib.load(f).get("CFBundleShortVersionString") or __version__
+            except (OSError, ValueError):
+                pass
+        return __version__
+    install_dir = install_dir or os.environ.get("ONIONPRESS_INSTALL_DIR") or RELEASE_INSTALL_DIR
+    try:
+        with open(os.path.join(install_dir, VERSION_FILE), encoding="utf-8",
+                  errors="replace") as f:
+            text = f.readline().strip()
+    except OSError:
+        text = ""
+    return text or __version__
 
 
 # ---------------------------------------------------------------------------
@@ -158,12 +376,6 @@ def check_for_update(current_version, log=None):
 
 STAGING_PREFIX = ".onionpress-update-"
 
-# Every release carries SHA256SUMS ("<sha256>  <asset name>", sha256sum
-# format, written by build/release.sh); the Linux update installs only a
-# .deb matching its line, and the Mac update installs only a .dmg
-# matching its line (issue #386). Nothing else checks what the DMG is:
-# the bundle is ad-hoc signed, and the swap strips quarantine.
-RELEASE_SUMS = "SHA256SUMS"
 _SUMS_LINE = re.compile(r"^([0-9a-fA-F]{64}) [ *](\S+)$", re.M)
 
 
@@ -194,19 +406,62 @@ def _fetch_release_sums(release_data, tmp_dir):
     if not sums_url:
         raise RuntimeError(f"The release carries no {RELEASE_SUMS}; not installing an unchecked DMG")
     sums_path = os.path.join(tmp_dir, RELEASE_SUMS)
-    result = subprocess.run(
-        ["curl", "-L", "-s", *_curl_tls_args(),
-         "-H", "User-Agent: onionpress", "--max-time", "60",
-         "--max-filesize", "65536", "-o", sums_path, sums_url],
-        capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=90,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Could not download {RELEASE_SUMS} (curl exit {result.returncode}): "
-            f"{result.stderr.strip()}")
+    rc, _, err = _run_curl(["--max-time", "60", "--max-filesize", str(SUMS_MAX_BYTES),
+                            "-o", sums_path, sums_url], timeout=90)
+    if rc != 0:
+        raise RuntimeError(f"Could not download {RELEASE_SUMS} ({_curl_failure(rc, err)})")
     with open(sums_path, "r", encoding="utf-8", errors="replace") as f:
-        return f.read(65536)
+        return f.read(SUMS_MAX_BYTES)
+
+
+def fetch_deb(release, tmp_dir, log=None):
+    """Download *release*'s SHA256SUMS and onionpress.deb into *tmp_dir*
+    (a folder of the user's own) and check the package: its sha256 is
+    the one SHA256SUMS gives for onionpress.deb (exactly one such line),
+    and it is the onionpress package of the release's version (dpkg-deb).
+    Returns (path, sha256); raises UpdateError, with nothing to install."""
+    sums_path = os.path.join(tmp_dir, RELEASE_SUMS)
+    deb_path = os.path.join(tmp_dir, RELEASE_DEB)
+    rc, _, err = _run_curl(["--max-time", "60", "--max-filesize", str(SUMS_MAX_BYTES),
+                            "-o", sums_path, release.download_url(RELEASE_SUMS)], timeout=90)
+    if rc != 0:
+        raise UpdateError(f"could not download {RELEASE_SUMS} of {release.tag} "
+                          f"({_curl_failure(rc, err)}).")
+    rc, _, err = _run_curl(["--max-time", "900", "--max-filesize", str(DEB_MAX_BYTES),
+                            "-o", deb_path, release.download_url(RELEASE_DEB)], timeout=960)
+    if rc != 0:
+        raise UpdateError(f"could not download {RELEASE_DEB} of {release.tag} "
+                          f"({_curl_failure(rc, err)}).")
+    with open(sums_path, "r", encoding="utf-8", errors="replace") as f:
+        want = published_sha256(f.read(SUMS_MAX_BYTES), RELEASE_DEB)
+    if not want:
+        raise UpdateError(f"{RELEASE_SUMS} of {release.tag} does not give one sha256 "
+                          f"for {RELEASE_DEB}.")
+    got = sha256_of(deb_path)
+    if got != want:
+        raise UpdateError(f"{RELEASE_DEB} of {release.tag} does not match its {RELEASE_SUMS} "
+                          f"(sha256 {got}, published {want}).")
+    if _deb_field(deb_path, "Package") != "onionpress":
+        raise UpdateError(f"{RELEASE_DEB} of {release.tag} is not the onionpress package.")
+    deb_version = _deb_field(deb_path, "Version")
+    if deb_version != release.version:
+        raise UpdateError(f"{RELEASE_DEB} of {release.tag} is version "
+                          f"{deb_version or 'unknown'}, not {release.version}.")
+    if log:
+        log(f"update: {RELEASE_DEB} of {release.tag} matches its {RELEASE_SUMS} (sha256 {got})")
+    return deb_path, got
+
+
+def _deb_field(deb_path, name):
+    """`dpkg-deb --field <deb> <name>`'s first line, or "" when it fails."""
+    try:
+        r = subprocess.run(["dpkg-deb", "--field", deb_path, name], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
 
 
 def stage_new_bundle(source_app, install_path):
@@ -317,17 +572,9 @@ def download_and_install(release_data, latest_version, install_path,
 
     try:
         # Download
-        result = subprocess.run(
-            ["curl", "-L", "-s", *_curl_tls_args(),
-             "-H", "User-Agent: onionpress", "--max-time", "300",
-             "-o", dmg_path, dmg_url],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=360,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"Download failed (curl exit {result.returncode}): "
-                f"{result.stderr.strip()}")
+        rc, _, err = _run_curl(["--max-time", "300", "-o", dmg_path, dmg_url], timeout=360)
+        if rc != 0:
+            raise RuntimeError(f"Download failed ({_curl_failure(rc, err)})")
 
         dmg_size = os.path.getsize(dmg_path)
         if log:
