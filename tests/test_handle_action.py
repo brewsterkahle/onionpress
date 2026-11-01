@@ -235,14 +235,15 @@ class TestQuietTick(_Case):
         self.assertEqual(ha.handle(self.host()), {"handled": None})
         self.assertEqual(self.argvs(), [])
 
-    def test_linux_refreshes_the_logs(self):
+    def test_no_request_writes_nothing_on_linux_either(self):
+        # recent-logs.txt has one writer, the status pass (#523,
+        # onionpress.status_writer); the quiet tick no longer republishes it.
         log_file = os.path.join(self.data_dir, "onionpress.log")
         with open(log_file, "w") as f:
             f.write(f"[2026-10-22 12:00:00] started for {os.path.expanduser('~')}/x\n")
         self.assertEqual(ha.handle(self.host("linux")), {"handled": None})
-        text = self.docker.get("recent-logs.txt")
-        self.assertIn("started for", text)
-        self.assertNotIn(os.path.expanduser("~"), text)
+        self.assertIsNone(self.docker.get("recent-logs.txt"))
+        self.assertEqual(self.argvs(), [])
 
     def test_unknown_action_is_dropped_and_logged_by_size_only(self):
         # Issue #396: the log goes back to WordPress (recent-logs.txt) and

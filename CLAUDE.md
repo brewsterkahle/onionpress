@@ -205,7 +205,8 @@
   10 min failing; 5 min for `desc-missing`/`desc-stale`) asks the watchdog
   for DEL_ONION + ADD_ONION via `launcher_ops.request_watchdog_republish`.
   Mac: the daemon's `check_status`; Linux: `onionpress-heartbeat.py`
-  (writes `reachability.json`, which `write_status` prefers).
+  (writes `reachability.json`, the status writer's one measure of
+  reachability on Linux).
 - Rate limits: 15 min host, 15 min watchdog, never within 5 min of an
   upload. `REPUBLISH_ON_UNREACHABLE=no` makes it log-only. Both wake
   handlers reset the window (test-enforced).
@@ -403,6 +404,38 @@
   VM is a crash restart's or a terminal start's live site; its port is read
   (`resolve_port_offset`). `TestResolvePorts` in
   `tests/test_mac_daemon_paths.py`.
+
+## One Status Writer (issue #523, consolidation stage 2)
+- **`onionpress.status_writer` writes every status document on both
+  platforms**: `daemon-state.json` (`state_document`, with the status
+  document under `"status"`), the volume's `status.json`, `version`,
+  `config-current.json` and `recent-logs.txt` (`write_volume`, as
+  www-data, `redact.status_for_wordpress` and `wordpress_log_excerpt` on
+  the way in), and the full `~/.onionpress/status.json` host copy
+  (`write_host_copy`: the heartbeat's analytics snapshot, the launcher's
+  port detection). The daemon's `write_status_to_volume` and
+  `publish_state` are `write(self)` / `publish(self)`; Linux's launcher
+  `write_status` is `onionpress write-status` (`run_once` over
+  `OneShotStatus`, the daemon's pass as one run until #407), its 30 s
+  tick and every caller unchanged. Nothing else writes those names:
+  the census in `tests/test_status_writer.py`.
+- The fields Linux's bash gathered (`wp_installed`, `onboarded`,
+  `wayback_queue_count`, `mkp224o_available`, `vanity_in_progress`,
+  `serving_from_wayback`, `wp_admin_password_path`, `wp_port`) are one
+  function each there, gathered on both platforms, docker asked only
+  while the stack runs; `mkp224o_available` is `launcher_ops.
+  tor_image_has_mkp224o` on `DEFAULT_TOR_IMAGE` (generate-vanity's
+  image), its answer kept by image id in `.mkp224o-probe`. Platform
+  differences are `detect_os()` seams in the module (`platform_name`,
+  `host_boot_time`, `wedge_warning`), never a second writer.
+- **The one-shot never probes reachability**: the heartbeat's
+  `reachability.json` (fresh, for the served address) or nothing.
+  `state` is the daemon's display state (`running`/`starting`/`stuck`/
+  `offline`/`stopped`); the tray reads it, and everything else, from
+  `daemon-state.json` through `daemon_client.read_state` (`"status"`),
+  never `status.json`. `tests/test_status_writer.py`,
+  `tests/test_linux_tray_protocol.py`, `TestStatusPass` in
+  `tests/test_mac_daemon.py`.
 
 ## The Start Is onionpress.start (issue #442)
 - **Each launcher's `start_containers` is the Docker wait (Mac: VM
@@ -614,8 +647,8 @@
   `$(( ))`: root in that container chose what the next `onionpress start`
   ran as the Mac user. Every number read out of a container, or derived
   from docker's answer, is now held to `[[ "$x" =~ ^[0123456789]{1,N}$ ]]
-  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`; Linux's
-  `started_epoch`). `[ a -gt b ]` (the test builtin) does not evaluate
+  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`). `[ a -gt
+  b ]` (the test builtin) does not evaluate
   expressions, but write the guard anyway: the census in
   `tests/test_launcher_container_arithmetic.py` follows a value assigned
   from `docker`/`wp_cli`/`wp_exec` output (transitively) into any

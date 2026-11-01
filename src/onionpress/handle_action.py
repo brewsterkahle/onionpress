@@ -379,8 +379,6 @@ def handle(host, confirmed=frozenset(), cancel=False):
 
     action = host.read_shared(REQUEST_FILE).strip()
     if not action:
-        if host.os_name == "linux":
-            write_recent_logs(host)
         return {"handled": None, **extra}
     if action not in ACTIONS:
         # Not logged as written: the log is republished to WordPress.
@@ -845,22 +843,6 @@ def _update(host):
         "message": MAC_UPDATE_AVAILABLE_MSG.format(latest=latest),
         "current": current, "latest": latest,
         "completed_at": now_iso()})
-
-
-# -- recent logs (Linux's quiet tick) --
-
-def write_recent_logs(host):
-    """recent-logs.txt for the status page: the launcher's log, scrubbed
-    (home path, user names) by redact.wordpress_log_excerpt."""
-    log_file = host.paths.log_file
-    if not os.path.isfile(log_file):
-        return
-    try:
-        text = redact.wordpress_log_excerpt(log_file, host.paths.data_dir)
-    except OSError:
-        text = (f"(Recent logs unavailable: could not scrub "
-                f"{os.path.basename(log_file)} for display.)")
-    host.put_shared("recent-logs.txt", text + "\n")
 
 
 # ---------------------------------------------------------------------------

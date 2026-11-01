@@ -98,10 +98,15 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
         for rel in self.FILES:
             self.assertIsNone(pat.search(_read(rel)), f"{rel}: a typo must not count as yes")
 
-    def test_bash_status_only_yes_or_empty_is_enabled(self):
+    def test_status_only_yes_or_empty_is_enabled(self):
+        # status.json's client_enabled is the status writer's on both
+        # platforms (#523): onionheaven.status_block over client_overview's
+        # normalized choice; no bash reads the key for the status any more.
         src = _read("linux/onionpress")
-        self.assertIn("oh_config_enabled=${oh_config_enabled:-yes}", src)
-        self.assertIn('[ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no', src)
+        self.assertNotIn("oh_config_enabled", src)
+        self.assertIn('"client_enabled": c["enabled"] is True,', _read("src/onionpress/onionheaven.py"))
+        self.assertIn("onionheaven.status_block(overview, server_active=bool(app.is_onionheaven))",
+                      _read("src/onionpress/status_writer.py"))
 
     def test_linux_daemon_reads_the_choice_through_one_normalizer(self):
         # Registration, the per-cycle re-read, the opt-out and the

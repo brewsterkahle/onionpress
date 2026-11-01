@@ -908,8 +908,13 @@ class TestLaunchers(unittest.TestCase):
                     self.assertEqual((r.returncode, r.stdout, cache), (1, "", None))
 
     def test_linux_status_carries_only_a_whole_address(self):
-        self.assertIn('is_onion_address "$onion_addr" || onion_addr=""',
-                      _bash_function(_read("linux/onionpress"), "write_status"))
+        # The status is the writer's (onionpress.status_writer, #523): the
+        # served address read by onion_hostname's rule, and status.json's
+        # address a whole v3 address or nothing.
+        writer = _read("src/onionpress/status_writer.py")
+        self.assertIn("addr = onion_hostname.read_served_address(self._docker)", writer)
+        self.assertIn('addr = app.onion_address if key_manager.is_valid_onion_address(app.onion_address) else ""',
+                      writer)
 
 
 # ─── WordPress side ─────────────────────────────────────────────────────

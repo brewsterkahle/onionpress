@@ -8,8 +8,9 @@ always filtered through config.SAFE_CONFIG_KEYS; the Linux launcher now asks
 the same code (`onionpress.cli safe-config`) instead of parsing the file
 itself.
 
-The write_status test runs the launcher's own function in bash with `docker`
-stubbed as a shell function, so no daemon is ever contacted.
+The status writer (onionpress.status_writer, one for both platforms since
+issue #523) writes config-current.json from config.redact_config; its test
+runs it against a fake docker, so no daemon is ever contacted.
 """
 
 import io
@@ -17,7 +18,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,6 +27,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # test_status_writer's fake
 
 from onionpress import cli  # noqa: E402
 from onionpress.config import SAFE_CONFIG_KEYS  # noqa: E402
@@ -47,14 +48,6 @@ ONIONHEAVEN_PROPAGATION_DELAY=240
 def _read(rel_path):
     with open(os.path.join(PROJECT_ROOT, rel_path), "r", encoding="utf-8") as f:
         return f.read()
-
-
-def _function(text, name):
-    # Ends at a column-0 `}` followed by a blank line: write_status embeds
-    # `python3 -c` dict literals that close at column 0 too.
-    start = text.index(f"\n{name}() {{")
-    end = text.index("\n}\n\n", start)
-    return text[start:end] + "\n}\n"
 
 
 class TestSafeConfigCommand(unittest.TestCase):
@@ -94,80 +87,51 @@ class TestSafeConfigCommand(unittest.TestCase):
         self.assertFalse(os.path.exists(missing))
 
 
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
-class TestLinuxWriteStatus(unittest.TestCase):
-    """Run linux/onionpress's write_status() and read back what it wrote
-    into the (stubbed) WordPress volume."""
-
-    DOCKER_STUB = r"""
-docker() {
-    # wp_put's `docker exec -i -u www-data onionpress-wordpress sh -c <script>
-    # sh /var/lib/onionpress/<f> <mode>` lands in $OUT/<f>; every other
-    # docker call fails, as with no daemon.
-    if [ "$1 $2 $3 $4 $5 $6 $7" = "exec -i -u www-data onionpress-wordpress sh -c" ]; then
-        cat > "$OUT/${10##*/}"
-        return 0
-    fi
-    return 1
-}
-log() { :; }
-wp_is_installed() { return 1; }
-"""
+class TestStatusWriterConfigCurrent(unittest.TestCase):
+    """What the status writer hands WordPress as config-current.json."""
 
     def setUp(self):
+        from test_status_writer import FakeDocker
+        from onionpress.platform import OS, resolve_paths
+        from onionpress import status_writer
         self.tmp = tempfile.mkdtemp(prefix="op-write-status-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.data = os.path.join(self.tmp, "data")
-        self.out = os.path.join(self.tmp, "volume")
-        bin_dir = os.path.join(self.tmp, "bin")
-        for d in (self.data, self.out, bin_dir):
-            os.makedirs(d)
-        # The launcher runs `python3`; make that this interpreter, which can
-        # import the package (the system python3 may be too old for it).
-        os.symlink(sys.executable, os.path.join(bin_dir, "python3"))
+        os.makedirs(self.data)
         with open(os.path.join(self.data, "config"), "w") as f:
             f.write(CONFIG)
-        self.env = {
-            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": self.tmp,
-            "DATA_DIR": self.data,
-            "DOCKER_DIR": self.tmp,
-            "LOG_FILE": os.path.join(self.tmp, "onionpress.log"),
-            "ONIONPRESS_PYTHONPATH": SRC,
-            "ONIONPRESS_VERSION": "0.0.0-test",
-            "_IN_WRITE_STATUS": "1",
-            "OUT": self.out,
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
+        self.docker = FakeDocker({
+            "ps -a --filter label=com.docker.compose.project":
+                "onionpress-tor\trunning\tdocker\nonionpress-wordpress\trunning\tdocker\n"})
+        self.app = status_writer.OneShotStatus(
+            resolve_paths(data_dir=self.data, app_bundle=""), docker=self.docker,
+            health=mock.Mock(**{"check_tor_bootstrap.return_value": (False, 0)}),
+            version="0.0.0-test", log=lambda m: None, os_name=OS.LINUX)
+        self.app.gather()
+        self.write = status_writer.write
 
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _write_status(self, extra=""):
-        launcher = _read("linux/onionpress")
-        script = (_function(launcher, "op_py") + _function(launcher, "wp_put")
-                  + _function(launcher, "write_status")
-                  + _function(launcher, "write_recent_logs")
-                  + self.DOCKER_STUB + extra + "\nwrite_status\n")
-        result = subprocess.run(["bash", "-c", script], env=self.env,
-                                capture_output=True, text=True, timeout=120)
-        path = os.path.join(self.out, "config-current.json")
-        self.assertTrue(os.path.exists(path),
-                        f"write_status wrote no config-current.json\n{result.stderr}")
-        with open(path) as f:
-            return f.read()
+    def _config_current(self):
+        self.write(self.app)
+        self.assertIn("config-current.json", self.docker.volume,
+                      "the writer wrote no config-current.json")
+        return self.docker.volume["config-current.json"][0]
 
     def test_config_current_holds_only_allowlisted_keys(self):
-        raw = self._write_status()
+        raw = self._config_current()
         self.assertNotIn(TOKEN, raw)
         self.assertNotIn("k3y", raw)
         exported = json.loads(raw)
         self.assertLessEqual(set(exported), SAFE_CONFIG_KEYS)
         self.assertEqual(exported["START_ON_BOOT"], "no")
         self.assertEqual(exported["ADDRESS_PREFIX"], "op2")
+        self.assertEqual(self.app._last_status_payload["config"], exported)
 
-    def test_helper_failure_writes_empty_object_not_raw_config(self):
-        raw = self._write_status(extra="op_py() { return 1; }\n")
-        self.assertEqual(json.loads(raw), {})
+    def test_an_unreadable_config_is_an_empty_object_never_raw(self):
+        os.chmod(os.path.join(self.data, "config"), 0)
+        self.addCleanup(os.chmod, os.path.join(self.data, "config"), 0o600)
+        if os.access(os.path.join(self.data, "config"), os.R_OK):
+            self.skipTest("root reads everything")
+        self.assertEqual(json.loads(self._config_current()), {})
 
 
 class TestSettingsPageRoundTrip(unittest.TestCase):

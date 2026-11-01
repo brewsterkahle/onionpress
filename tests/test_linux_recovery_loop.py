@@ -260,13 +260,18 @@ class TestHeartbeatRunsTheLoop(unittest.TestCase):
 
 class TestLauncherUsesTheVerdict(unittest.TestCase):
     def test_write_status_reads_reachability_json(self):
-        src = _read("linux/onionpress")
-        body = src[src.index("write_status() {"):]
-        body = body[:body.index("\n}\n")]
-        self.assertIn('"$DATA_DIR/reachability.json"', body)
-        # Its own fallback probe asks for the static file first.
-        self.assertIn('"http://${onion_addr}/.onionpress-health"', body)
+        # The status is the writer's (onionpress.status_writer, #523):
+        # the heartbeat's verdict is its one measure of reachability, and
+        # it runs no probe of its own.
+        from onionpress import status_writer
+        writer = _read("src/onionpress/status_writer.py")
+        self.assertIn("heartbeat_verdict(self.app_support, addr, self.now)", writer)
+        self.assertIn("from .reachability import STATUS_FILENAME", writer)
+        self.assertNotIn(".onionpress-health", writer)
+        self.assertNotIn("curl", writer)
+        self.assertNotIn("reachability.json", _read("linux/onionpress"))
         self.assertEqual(reachability.STATUS_FILENAME, "reachability.json")
+        self.assertEqual(status_writer.REACHABILITY_FRESH_SECONDS, 180)
 
 
 class TestLinuxEntryPointsAreInstalled(unittest.TestCase):

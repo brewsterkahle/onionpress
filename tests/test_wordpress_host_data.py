@@ -16,8 +16,9 @@ status.json keeps only redact.WORDPRESS_STATUS_KEYS on all three writers,
 the Mac's action results are scrubbed, and both status endpoints answer only
 the site owner (is_super_admin).
 
-The Linux tests run the launcher's own functions in bash with `docker`
-stubbed as a shell function, so no daemon is ever contacted.
+The writer is one for both platforms since issue #523 (onionpress.status_writer:
+the Mac daemon's pass and Linux's `onionpress write-status`); its tests run it
+against a fake docker, so no daemon is ever contacted.
 """
 
 import io
@@ -26,7 +27,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -36,6 +36,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # test_status_writer's fake
 
 from onionpress import cli, redact  # noqa: E402
 
@@ -50,14 +51,6 @@ def _read(rel_path):
 def _between(text, start_marker, end_marker):
     start = text.index(start_marker)
     return text[start:text.index(end_marker, start + len(start_marker))]
-
-
-def _bash_function(text, name):
-    # Ends at a column-0 `}` followed by a blank line: write_status embeds
-    # `python3 -c` dict literals that close at column 0 too.
-    start = text.index(f"\n{name}() {{")
-    end = text.index("\n}\n\n", start)
-    return text[start:end] + "\n}\n"
 
 
 class TestScrubForWordPress(unittest.TestCase):
@@ -241,137 +234,97 @@ class TestCliCommands(unittest.TestCase):
             self.assertEqual((rc, out), (1, ""), stdin)
 
 
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
-class TestLinuxLauncher(unittest.TestCase):
-    """Run linux/onionpress's write_status() / write_recent_logs() and read
-    back what they wrote into the (stubbed) WordPress volume."""
-
-    DOCKER_STUB = r"""
-docker() {
-    # wp_put's `docker exec -i -u www-data onionpress-wordpress sh -c <script>
-    # sh /var/lib/onionpress/<f> <mode>` runs its script here against
-    # $OUT/<f>; every other docker call fails, as with no daemon.
-    if [ "$1 $2 $3 $4 $5 $6 $7" = "exec -i -u www-data onionpress-wordpress sh -c" ]; then
-        sh -c "$8" sh "$OUT/${10##*/}" "${11}"
-        return
-    fi
-    return 1
-}
-log() { :; }
-wp_is_installed() { return 1; }
-"""
+class TestStatusWriter(unittest.TestCase):
+    """The one status writer (onionpress.status_writer, issue #523: the
+    daemon's and `onionpress write-status`'s) hands the volume the
+    scrubbed log excerpt and the redacted status, never the raw files."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="op-wp-launcher-")
+        from test_status_writer import FakeDocker
+        from onionpress import status_writer
+        from onionpress.platform import OS, resolve_paths
+        self.tmp = tempfile.mkdtemp(prefix="op-wp-writer-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.data = os.path.join(self.tmp, "data")
-        self.out = os.path.join(self.tmp, "volume")
-        bin_dir = os.path.join(self.tmp, "bin")
-        for d in (self.data, self.out, bin_dir):
-            os.makedirs(d)
-        # The launcher runs `python3`; make that this interpreter, which can
-        # import the package (the system python3 may be too old for it).
-        os.symlink(sys.executable, os.path.join(bin_dir, "python3"))
+        os.makedirs(self.data)
+        paths = resolve_paths(data_dir=self.data, app_bundle="")
         with open(os.path.join(self.data, "wp-admin-password"), "w") as f:
             f.write("not-read-by-this-test\n")
-        self.log_file = os.path.join(self.tmp, "onionpress.log")
-        with open(self.log_file, "w") as f:
+        with open(paths.log_file, "w") as f:
             f.write(f"[t] Wrote {self.data}/config\n"
                     f"[t] cloudflared --token {TOKEN}\n"
                     "[t] Bound WordPress to 192.168.1.23:8080\n")
-        self.env = {
-            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": self.tmp,
-            "DATA_DIR": self.data,
-            "DOCKER_DIR": self.tmp,
-            "LOG_FILE": self.log_file,
-            "ONIONPRESS_PYTHONPATH": SRC,
-            "ONIONPRESS_VERSION": "0.0.0-test",
-            "OUT": self.out,
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
-        self.launcher = _read("linux/onionpress")
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _run(self, call, extra=""):
-        script = "".join(_bash_function(self.launcher, n)
-                         for n in ("op_py", "wp_put", "write_status", "write_recent_logs"))
-        script += self.DOCKER_STUB + extra + "\n" + call + "\n"
-        return subprocess.run(["bash", "-c", script], env=self.env,
-                              capture_output=True, text=True, timeout=120)
+        self.docker = FakeDocker({
+            "ps -a --filter label=com.docker.compose.project":
+                "onionpress-tor\trunning\tdocker\nonionpress-wordpress\trunning\tdocker\n"})
+        self.app = status_writer.OneShotStatus(
+            paths, docker=self.docker, health=mock.Mock(**{"check_tor_bootstrap.return_value": (False, 0)}),
+            version="0.0.0-test", log=lambda m: None, os_name=OS.LINUX)
+        self.app.gather()
+        self.write = status_writer.write
 
     def _volume(self, name):
-        path = os.path.join(self.out, name)
-        if not os.path.exists(path):
-            return None
-        with open(path) as f:
-            return f.read()
+        entry = self.docker.volume.get(name)
+        return entry[0] if entry else None
 
     def test_write_status_scrubs_logs_and_status(self):
-        result = self._run("write_status")
+        with mock.patch.dict(os.environ, {"HOME": self.tmp}):
+            self.write(self.app)
         logs = self._volume("recent-logs.txt")
-        self.assertIsNotNone(logs, result.stderr)
+        self.assertIsNotNone(logs)
         self.assertIn("Wrote ~/data/config", logs)
         for leaked in (self.tmp, TOKEN, "192.168.1.23"):
             self.assertNotIn(leaked, logs)
-
         wp_status = json.loads(self._volume("status.json"))
         self.assertNotIn("wp_admin_password_path", wp_status)
         self.assertLessEqual(set(wp_status), redact.WORDPRESS_STATUS_KEYS)
         self.assertEqual(wp_status["platform"], "linux")
-        # Written by wp_put: owner-only, and no temporary file left behind.
+        # Written as www-data, owner-only (wp_files.put_file_args).
         for name in ("status.json", "recent-logs.txt", "version", "config-current.json"):
-            self.assertEqual(os.stat(os.path.join(self.out, name)).st_mode & 0o777, 0o600, name)
-        self.assertEqual(sorted(os.listdir(self.out)),
+            self.assertEqual(self.docker.volume[name][1], "600", name)
+        self.assertEqual(sorted(self.docker.volume),
                          ["config-current.json", "recent-logs.txt", "status.json", "version"])
-        # The tray's host copy keeps it.
+        # The host copy keeps it, for this user only.
         with open(os.path.join(self.data, "status.json")) as f:
             host_status = json.load(f)
         self.assertEqual(host_status["wp_admin_password_path"],
                          os.path.join(self.data, "wp-admin-password"))
+        self.assertEqual(os.stat(os.path.join(self.data, "status.json")).st_mode & 0o777, 0o600)
 
-    def test_helper_failure_never_copies_raw_data(self):
-        self._run("write_status", extra="op_py() { return 1; }\n")
+    def test_scrub_failure_never_copies_raw_data(self):
+        with mock.patch.object(redact, "wordpress_log_excerpt", side_effect=OSError("io")):
+            self.write(self.app)
         logs = self._volume("recent-logs.txt")
         self.assertIn("Recent logs unavailable", logs)
         self.assertNotIn(TOKEN, logs)
-        self.assertIsNone(self._volume("status.json"))
 
-    def test_idle_watcher_tick_uses_the_scrubbed_copy(self):
-        # The quiet tick is the shared handler's (onionpress.handle_action
-        # write_recent_logs, Linux only): the scrubbed excerpt, as the
-        # launcher's write_recent_logs writes it.
+    def test_the_quiet_tick_writes_no_logs(self):
+        # One writer (#523): the status pass republishes the excerpt; the
+        # handle-action run's quiet tick no longer does.
         handler = _read("src/onionpress/handle_action.py")
-        body = handler[handler.index("def write_recent_logs("):handler.index("def apply_config(")]
-        self.assertIn("redact.wordpress_log_excerpt(log_file, host.paths.data_dir)", body)
-        self.assertNotIn("tail", body)
-        self.assertIn('if host.os_name == "linux":\n            write_recent_logs(host)', handler)
-        self._run("write_recent_logs")
-        self.assertNotIn(TOKEN, self._volume("recent-logs.txt"))
-
-    def test_no_raw_copy_of_the_log_remains(self):
-        writers = [ln for ln in self.launcher.splitlines()
-                   if "/var/lib/onionpress/recent-logs.txt" in ln]
-        self.assertEqual(len(writers), 1, writers)
-        self.assertIn('printf \'%s\\n\' "$logs"', writers[0])
+        self.assertNotIn("write_recent_logs", handler)
+        self.assertNotIn('"recent-logs.txt"', handler)
+        self.assertNotIn("recent-logs.txt", _read("linux/onionpress"))
 
 
 class TestMacMenubar(unittest.TestCase):
     def setUp(self):
-        # The status writer is the daemon's (onionpress.daemon, #367); the
-        # menubar writes nothing into the shared volume.
-        self.src = _read("src/onionpress/daemon.py")
+        # The status writer is the daemon's (onionpress.daemon, #367), and
+        # the daemon's is onionpress.status_writer (#523: one writer for
+        # both platforms); the menubar writes nothing into the shared volume.
+        self.src = _read("src/onionpress/status_writer.py")
+        self.daemon = _read("src/onionpress/daemon.py")
         self.menubar = _read("src/menubar.py")
 
     def test_status_and_logs_written_scrubbed(self):
-        body = _between(self.src, "    def write_status_to_volume(self):",
-                        "    def poll_settings_page(self):")
+        body = _between(self.src, "def write_recent_logs(docker, log_file, data_dir):",
+                        "def write_host_copy(data_dir, status):")
         self.assertIn("json.dumps(redact.status_for_wordpress(status), indent=2)", body)
-        self.assertIn("redact.wordpress_log_excerpt(log_file, self.app_support)", body)
+        self.assertIn("redact.wordpress_log_excerpt(log_file, data_dir)", body)
         self.assertNotIn("readlines()", body)
+        self.assertIn("        status_writer.write(self)\n", self.daemon)
         # The analytics uploader still gets the full payload (scrubbed there).
-        self.assertIn("self._last_status_payload = status\n", body)
+        self.assertIn("app._last_status_payload = status\n", self.src)
 
     def test_action_results_scrubbed(self):
         # The page's action results are the shared handler's (issue #366).
@@ -384,8 +337,10 @@ class TestMacMenubar(unittest.TestCase):
 
     def test_only_these_writers_reach_the_shared_files(self):
         for name in ("recent-logs.txt", "status.json"):
-            self.assertEqual(self.src.count(f"/var/lib/onionpress/{name}"), 1, name)
-            self.assertNotIn(f"/var/lib/onionpress/{name}", self.menubar, name)
+            self.assertEqual(self.src.count(f'_put(docker, "{name}"'), 1, name)
+            for other in (self.menubar, self.daemon):
+                self.assertNotIn(f"/var/lib/onionpress/{name}", other, name)
+                self.assertNotIn(f'"{name}"', other, name)
 
 
 class TestStatusPageIsTheOwners(unittest.TestCase):
