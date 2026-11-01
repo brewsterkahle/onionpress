@@ -78,11 +78,15 @@ class TestPostinstText(unittest.TestCase):
         reload_ = block.find('systemctl --user --machine="${REAL_USER}@.host" daemon-reload')
         self.assertGreaterEqual(reload_, 0, "the user manager must read the new unit files first")
         m = re.search(
-            r'systemctl --user --machine="\$\{REAL_USER\}@\.host" try-restart \\\n\s*onionpress\.service onionpress-heartbeat\.service',
+            r'systemctl --user --machine="\$\{REAL_USER\}@\.host" try-restart \\\n\s*\$restart_units',
             block)
         self.assertIsNotNone(
-            m, "onionpress.service and onionpress-heartbeat.service are try-restarted "
-            "(a stopped site stays stopped) through the same --machine mechanism")
+            m, "the units are try-restarted (a stopped site stays stopped) through "
+            "the same --machine mechanism")
+        self.assertIn('restart_units="onionpress.service onionpress-heartbeat.service"', block,
+                      "both units in one call: the heartbeat is After= the site")
+        self.assertIn('restart_units="onionpress.service"', block,
+                      "the site alone while the heartbeat is held (#506)")
         self.assertGreater(m.start(), reload_, "daemon-reload comes before the restart")
         self.assertNotIn("--no-block", block,
                          "the restart blocks, so `onionpress update`'s own restart "
@@ -132,6 +136,11 @@ class TestPostinstRuns(unittest.TestCase):
 echo "systemctl $*" >> "$STUB_LOG"
 case " $* " in
     *" --machine="*) [ "${STUB_MACHINE_FAILS:-}" = "1" ] && exit 1 ;;
+esac
+case "$*" in
+    *" is-enabled onionpress-heartbeat.service") [ -z "${STUB_HEARTBEAT_ENABLED:-}" ] || echo "$STUB_HEARTBEAT_ENABLED" ;;
+    *" is-active onionpress.service") echo "${STUB_SITE_ACTIVE:-active}" ;;
+    *" is-active onionpress-heartbeat.service") echo "${STUB_HEARTBEAT_ACTIVE:-active}" ;;
 esac
 exit 0
 ''',
@@ -296,6 +305,74 @@ exit 1
         r, calls = self._run("configure", "2.5.6", SUDO_USER="root")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse([c for c in calls if "--machine" in c], calls)
+
+
+class TestHeartbeatHold(TestPostinstRuns):
+    """Issue #506: the launcher's runtime mask of the heartbeat unit (its
+    hold until WordPress is installed) outlived `apt purge`, so a reinstall
+    in the same boot failed `enable --now` and started nothing, and the
+    upgrade said "restarted where it was running" when nothing had."""
+
+    def test_a_first_install_lifts_a_stale_hold_before_enabling(self):
+        r, calls = self._run("configure")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        unmask = calls.index("runuser -u opuser -- env XDG_RUNTIME_DIR=/run/user/1000 "
+                             "systemctl --user unmask --runtime onionpress-heartbeat.service")
+        enable = next(i for i, c in enumerate(calls) if "enable --now" in c)
+        self.assertLess(unmask, enable)
+
+    def test_an_upgrade_with_a_held_heartbeat_restarts_the_site_alone(self):
+        r, calls = self._run("configure", "2.6.1", STUB_HEARTBEAT_ENABLED="masked-runtime",
+                             STUB_HEARTBEAT_ACTIVE="inactive")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("systemctl --user --machine=opuser@.host try-restart onionpress.service", calls)
+        self.assertFalse([c for c in calls if "try-restart" in c and "heartbeat" in c], calls)
+        self.assertIn("OnionPress restarted", r.stdout)
+        self.assertIn("onionpress.service active, onionpress-heartbeat.service inactive "
+                      "(held until WordPress is set up)", r.stdout)
+        self.assertNotIn("where it was running", r.stdout)
+
+    def test_the_upgrade_message_reports_what_runs(self):
+        r, _ = self._run("configure", "2.6.1")
+        self.assertIn("onionpress.service active, onionpress-heartbeat.service active", r.stdout)
+        r, _ = self._run("configure", "2.6.1", STUB_SITE_ACTIVE="inactive",
+                         STUB_HEARTBEAT_ACTIVE="inactive")
+        self.assertIn("onionpress.service inactive, onionpress-heartbeat.service inactive", r.stdout)
+        self.assertIn("a stopped unit stays stopped", r.stdout)
+
+    def test_prerm_and_postrm_lift_the_holds(self):
+        build = _read(BUILD)
+        prerm, postrm = _heredoc(build, "PRERM"), _heredoc(build, "POSTRM")
+        fn = re.compile(r"^lift_heartbeat_holds\(\) \{\n.*?^\}\n", re.DOTALL | re.MULTILINE)
+        a, b = fn.search(prerm), fn.search(postrm)
+        self.assertIsNotNone(a); self.assertIsNotNone(b)
+        self.assertEqual(a.group(0), b.group(0), "one function in both maintainer scripts")
+        remove = re.search(r"^\s*remove\)\n(.*?)^\s*;;", _code(prerm), re.DOTALL | re.MULTILINE)
+        self.assertIn("lift_heartbeat_holds", remove.group(1))
+        purge = re.search(r"^\s*purge\)\n(.*?)^\s*;;", _code(postrm), re.DOTALL | re.MULTILINE)
+        self.assertIn("lift_heartbeat_holds", purge.group(1))
+        self.assertIn("systemctl --user unmask --runtime onionpress-heartbeat", _code(_read("linux/install.sh")),
+                      "install.sh lifts a stale hold before its enable too")
+        # Under bash: only a numeric /run/user/<uid> holding the mask is
+        # unmasked, by that user's own manager.
+        run = os.path.join(self.tmp, "run")
+        for name, masked in (("1000", True), ("1001", False), ("lock", True)):
+            d = os.path.join(run, name, "systemd", "user")
+            os.makedirs(d)
+            if masked:
+                os.symlink("/dev/null", os.path.join(d, "onionpress-heartbeat.service"))
+        getent = os.path.join(self.bin, "getent")
+        with open(getent, "w") as f:
+            f.write('#!/bin/bash\n[ "$2" = 1000 ] && echo "opuser:x:1000:1000::/h:/bin/bash"\n')
+        os.chmod(getent, 0o755)
+        script = a.group(0) + "lift_heartbeat_holds\necho rc=$?\n"
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                           env={"PATH": self.bin, "STUB_LOG": self.log, "ONIONPRESS_RUN_USER": run})
+        self.assertEqual(r.stdout.strip(), "rc=0", r.stderr)
+        with open(self.log) as f:
+            calls = [line.rstrip("\n") for line in f]
+        self.assertEqual(calls, [f"runuser -u opuser -- env XDG_RUNTIME_DIR={run}/1000 "
+                                 "systemctl --user unmask --runtime onionpress-heartbeat.service"])
 
 
 if __name__ == "__main__":

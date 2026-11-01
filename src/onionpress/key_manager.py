@@ -257,10 +257,16 @@ CTOR_HEADER_PUBLIC = b'== ed25519v1-public: type0 ==\x00\x00\x00'  # 32 bytes
 
 
 def read_ctor_keys(key_dir):
-    """Read C Tor format keys from directory. Returns (private_64, public_32)."""
+    """Read C Tor format keys from directory. Returns (private_64, public_32).
+
+    Newer tor writes no hs_ed25519_public_key; then the folder's `hostname`
+    (the address, which is the public key) names it, as extract_keys does
+    for the container's files (issue #519: a Linux backup of a key Tor
+    minted itself had only the secret key and the hostname)."""
     import os
     secret_path = os.path.join(key_dir, 'hs_ed25519_secret_key')
     public_path = os.path.join(key_dir, 'hs_ed25519_public_key')
+    hostname_path = os.path.join(key_dir, 'hostname')
 
     with open(secret_path, 'rb') as f:
         secret_data = f.read()
@@ -268,6 +274,9 @@ def read_ctor_keys(key_dir):
         raise ValueError(f"Secret key file too short: {len(secret_data)} bytes")
     private_key = secret_data[32:]  # skip 32-byte C Tor header
 
+    if not os.path.isfile(public_path) and os.path.isfile(hostname_path):
+        with open(hostname_path, 'rb') as f:
+            return private_key, _pubkey_from_hostname(f.read())
     with open(public_path, 'rb') as f:
         public_data = f.read()
     if len(public_data) < 32:

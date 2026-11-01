@@ -377,7 +377,7 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         self.assertLess(check, body.index("self.restore_mode = True"))
         # The facts come from `onionpress prepare-restore --check --json`
         # (issue #475), which reads the backup with peek_backup_metadata.
-        self.assertIn('["prepare-restore", zip_path, "--check", "--json"]',
+        self.assertIn('"prepare-restore", zip_path, "--check", "--json", password=password',
                       mv._read("src/menubar.py"))
         cli_src = mv._read("src/onionpress/cli.py")
         body = cli_src[cli_src.index("def cmd_prepare_restore_check"):]
@@ -389,9 +389,15 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         src = mv._read("src/menubar.py")
         body = src[src.index("    def restore(self, _):"):]
         body = body[:body.index("\n    @rumps.clicked", 1)]
-        # The facts come from `onionpress restore --check --json`.
-        self.assertIn("facts.get('excludes_onion_key') is True", body)
-        self.assertIn("keeps its onion address", body)
+        self.assertIn("_MacRestoreUI(self)", body)
+        self.assertIn("ui_client.restore_facts_text(facts)",
+                      src[src.index("class _MacRestoreUI"):src.index("class OnionPressApp")])
+        # The facts come from `onionpress restore --check --json`; the
+        # text is ui_client's (both UIs).
+        text = mv._read("src/onionpress/ui_client.py")
+        text = text[text.index("def restore_facts_text("):text.index("def plan_restore(")]
+        self.assertIn('facts.get("excludes_onion_key") is True', text)
+        self.assertIn("keeps its onion address", text)
         cli_src = mv._read("src/onionpress/cli.py")
         self.assertIn('"excludes_onion_key": metadata.get("excludes_onion_key") is True', cli_src)
 
@@ -469,37 +475,49 @@ class TestLaunchersKeepTheAddress(unittest.TestCase):
         return mv.TestLauncherRestorePaths._fresh_data_dir(self)
 
     def _setup_from_backup(self, path):
+        """`setup --from-backup`'s host side (#509: the restore's
+        prepare_install_from_backup): (rc, the refusal); the log is read
+        with _log()."""
         return mv.TestLauncherRestorePaths._setup_from_backup(self, path)
 
+    def _log(self):
+        with open(os.path.join(self.tmp, "log")) as f:
+            return f.read()
+
     def test_setup_from_a_backup_without_a_key(self):
-        # `setup --from-backup` is setup_logic's since #442.9.
+        # `setup --from-backup` is the restore since #509: a keyless backup
+        # keeps the address Tor serves (read from the tor container; a
+        # setup runs with the stack up).
         path = _keyless_backup(self.tmp, "k.zip")
         data = self._fresh_data_dir()
-        rc, said = self._setup_from_backup(path)
+        with mock.patch("onionpress.backup.served_onion_address", return_value=OLD_ADDR):
+            rc, _ = self._setup_from_backup(path)
         self.assertEqual(rc, 0)
-        self.assertIn("this install keeps its own address", said)
+        self.assertIn(f"this install keeps its key and its address {OLD_ADDR}", self._log())
         self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")), [OLD_ADDR])
         self.assertFalse(os.path.exists(os.path.join(data, ".import-key-pending")))
 
     def test_setup_from_a_backup_with_a_key(self):
         path = _keyed_backup(self.tmp, "keyed.zip")
         data = self._fresh_data_dir()
-        rc, said = self._setup_from_backup(path)
+        rc, _ = self._setup_from_backup(path)
         self.assertEqual(rc, 0)
-        self.assertIn("Tor keys restored from backup", said)
+        self.assertIn(f"Restore: synced vanity-keys for {ADDR}", self._log())
         self.assertNotIn(OLD_ADDR, os.listdir(os.path.join(data, "shared", "vanity-keys")))
 
-    def test_the_setup_command_reimports_only_a_restored_key(self):
-        """setup_logic.setup_from_terminal asks the hubs to release the old
-        key and flags the import only when the backup's key was put in
-        place (tests/test_terminal_setup.py runs both cases)."""
+    def test_the_setup_command_leaves_the_key_to_the_restore(self):
+        """setup_logic.setup_from_terminal touches no key of its own (#509):
+        the backup's setup is cli.cmd_restore (the hubs asked to let the
+        replaced key go, the key volume seeded), passed in by cli._run_setup
+        (tests/test_terminal_setup.py runs the flow)."""
         text = mv._read("src/onionpress/setup_logic.py")
         flow = text[text.index("def setup_from_terminal("):]
-        gate = flow.index("        if address:\n            # The backup's key replaces")
-        end = flow.index("        return SETUP_RESTART", gate)
-        for what in ('release_onionheaven("restore"', "IMPORT_KEY_PENDING), \"w\""):
-            self.assertEqual(flow.count(what), 1, what)
-            self.assertTrue(gate < flow.index(what) < end, what)
+        for what in ("release_onionheaven", "IMPORT_KEY_PENDING", "vanity-keys"):
+            self.assertNotIn(what, flow, what)
+        self.assertIn("if restore(backup_password, from_backup) != 0:", flow)
+        runner = mv._read("src/onionpress/cli.py")
+        runner = runner[runner.index("def _run_setup("):runner.index("def _add_start_post_up(")]
+        self.assertIn(".cmd_restore(password, zip_path, run.hub_recovery_key)", runner)
 
 
 # ---------------------------------------------------------------------------
@@ -580,8 +598,9 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         """`onionpress handle-action` stops at {"confirm": "address-change"}
         for a restore of another address; the menubar's
         _ask_settings_page_question asks in a native dialog."""
-        ns = {}
-        exec(textwrap.dedent(_menubar_method("_ask_to_replace_address")), ns)
+        from onionpress import ui_client
+        ns = {"ui_client": ui_client, "rumps": mock.Mock()}
+        exec(textwrap.dedent(_menubar_method("_ask_cli_question")), ns)
         exec(textwrap.dedent(_menubar_method("_ask_settings_page_question")), ns)
         question = {"confirm": "address-change", "current": OLD_ADDR, "new": ADDR,
                     "action": "restore-backup", "handled": "restore-backup"}
@@ -589,10 +608,9 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
             with self.subTest(answer=answer):
                 app = types.SimpleNamespace(
                     log=mock.Mock(), show_native_alert=mock.Mock(return_value=answer))
-                app._ask_to_replace_address = types.MethodType(
-                    ns["_ask_to_replace_address"], app)
+                app._ask_cli_question = types.MethodType(ns["_ask_cli_question"], app)
                 self.assertIs(ns["_ask_settings_page_question"](app, question), want)
-                title, message = app.show_native_alert.call_args.args[:2]
+                message = app.show_native_alert.call_args.kwargs["message"]
                 self.assertIn(OLD_ADDR, message)
                 self.assertIn(ADDR, message)
                 self.assertIn("restore a backup of another onion address", message)

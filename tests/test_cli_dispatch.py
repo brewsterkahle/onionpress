@@ -203,7 +203,8 @@ ROWS = [
     Row("backup-metadata", ["backup-metadata", "--version", "1"],
         "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
         excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
-        with_host_secrets=True, secrets_left_out=[]), rc=0, returns={"a": 1}),
+        with_host_secrets=True, secrets_left_out=[], excludes_onion_key=False),
+        rc=0, returns={"a": 1}),
     Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
         "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 
@@ -374,14 +375,16 @@ ROWS = [
     Row("setup", ["setup", "--user", "alice", "--title", "T", "--launcher", "/l"],
         "setup_logic.setup_from_terminal",
         mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
-                  user="alice", title="T", from_backup="", ia_account="", log=ANY),
+                  user="alice", title="T", from_backup="", ia_account="", log=ANY,
+                  restore=ANY),
         rc=0, returns=0, setup_cli=False,
         check=lambda t, m: t.assertEqual(
             (m.call_args.kwargs["user"], m.call_args.kwargs["title"],
              m.call_args.kwargs["launcher_bin"]), ("alice", "T", "/l"))),
     Row("setup", ["setup", "--from-backup", "/b.zip"], "setup_logic.setup_from_terminal",
         mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
-                  user="", title="", from_backup="/b.zip", ia_account="", log=ANY),
+                  user="", title="", from_backup="/b.zip", ia_account="", log=ANY,
+                  restore=ANY),
         rc=10, returns=10, setup_cli=False),
     # #442.8: the launchers' start_containers() is start.start_containers
     # (Linux --until-core); exit 1 stops the start, 0 / 3 say whether
@@ -488,13 +491,10 @@ ROWS = [
         mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
         mock.call(password=None, clean=True), setup_cli=True),
-    # The password as backup's: from the environment (then gone from it),
-    # the old positional with a warning (TestScrubPassword).
+    # The password as backup's: from the environment (then gone from it);
+    # one on argv is refused (test_scrub_refuses_a_password_on_argv, #504).
     Row("scrub", ["scrub"], "scrub.run_scrub",
         mock.call(password="pw", clean=False), setup_cli=True,
-        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
-    Row("scrub", ["scrub", "argvpw"], "scrub.run_scrub",
-        mock.call(password="argvpw", clean=False), setup_cli=True,
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 ]
 
@@ -617,11 +617,19 @@ class TestDispatch(unittest.TestCase):
             with self.subTest(row=repr(row)):
                 self.run_row(row)
 
-    def test_scrub_warns_only_about_a_password_on_argv(self):
-        scrub_rows = [r for r in ROWS if r.argv[:1] == ["scrub"]]
-        _, err = self.run_row(next(r for r in scrub_rows if "argvpw" in r.argv))
-        self.assertIn("visible to other users", err)
-        _, err = self.run_row(next(r for r in scrub_rows if r.argv == ["scrub"]))
+    def test_scrub_refuses_a_password_on_argv(self):
+        err = io.StringIO()
+        with mock.patch.object(cli, "OnionPressCLI"), \
+             mock.patch.object(scrub, "run_scrub") as run, \
+             mock.patch.dict(os.environ, {cli.BACKUP_PASSWORD_ENV: "pw"}), \
+             contextlib.redirect_stderr(err):
+            rc = cli.main(["--data-dir", self.dir, "scrub", "argvpw"])
+        self.assertEqual(rc, 2)
+        self.assertIn("visible to other users", err.getvalue())
+        self.assertNotIn("argvpw", err.getvalue())
+        run.assert_not_called()
+        self.assertNotIn(cli.BACKUP_PASSWORD_ENV, os.environ)
+        _, err = self.run_row(next(r for r in ROWS if r.argv == ["scrub"]))
         self.assertNotIn("visible to other users", err)
 
     def test_handle_action_prints_the_result_as_json_only_when_asked(self):

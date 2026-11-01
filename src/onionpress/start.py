@@ -340,12 +340,14 @@ class KeySeed:
                 self.log(f"       Falling back to 'op2'. Edit ADDRESS_PREFIX in "
                          f"{self.paths.config_file}.")
             prefix = DEFAULT_PREFIX
-        self.log(f"Using address prefix: '{prefix}'")
 
         key_dir = vanity_key_dir(self.paths.data_dir)
         if key_dir:
+            # A hand-placed or imported key: the prefix plays no part (#507:
+            # the prefix line came first and read as if it had).
             self.log(f"Using pre-imported key: {os.path.basename(key_dir)}")
         else:
+            self.log(f"Using address prefix: '{prefix}'")
             key_dir = generate_vanity_on_host(prefix, self.paths.data_dir, self.bin_dir,
                                               self.log, self.paths.log_file)
             if key_dir:
@@ -380,8 +382,17 @@ class KeySeed:
             # mkp224o is in the tor image (multi-arch, so the .deb stays
             # Architecture: all); generate-vanity checks the prefix and the
             # image, and failing leaves a random address for this install.
+            # The image is pulled first: a fresh install's first start (the
+            # postinst's) has pulled nothing yet, and generate-vanity's
+            # image check read that as "no mkp224o", leaving a random
+            # address whose key never reached the key volume as a PEM, so
+            # no backup carried it (issue #519). A pull that fails only
+            # loses the vanity prefix, as before.
             self.log(f"First run with ADDRESS_PREFIX={prefix} -- checking tor image "
                      "for mkp224o...")
+            if self.manager.ensure_tor_image() is None:
+                self.log("WARNING: the tor image could not be pulled; the address "
+                         "will not carry the prefix")
             if run_cli_step(["generate-vanity"], data_dir=self.paths.data_dir,
                             log_file=self.paths.log_file) == 0:
                 self.log("Vanity address generated; will be installed below")
@@ -679,7 +690,8 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     """Everything after the core services are up, in the launchers' order:
     the Mac's .htaccess repair, Tor (`tor` in the START SUMMARY when it
     will not start), Linux's SOCKS port check, the pinned plugins, the
-    Mac's install-from-backup import, deactivate-wp-statistics and
+    install-from-backup import (both platforms since #508: a restore that
+    failed past its import keeps the staging for it), deactivate-wp-statistics and
     provision-post-install (each a WARNING and a START SUMMARY name when it
     fails), the plugins' setup, the image-derivative rebuild and the Mac's
     archive.org login (both detached: they outlive the launcher), the Mac's
@@ -743,12 +755,13 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
                                            log_file=paths.log_file))
     bundled_plugins.install_bundled_plugins(host)
 
-    # A backup staged for this install: its database and content go into
-    # the running containers before the provisioning, which then refreshes
-    # the theme and mu-plugins to this version's.
+    # A backup staged for this install (the welcome screen's Restore from
+    # backup, or a restore that failed past its import, #508): its database
+    # and content go into the running containers before the provisioning,
+    # which then refreshes the theme and mu-plugins to this version's.
     staging = ""
     marker = os.path.join(paths.data_dir, INSTALL_FROM_BACKUP)
-    if mac and os.path.isfile(marker):
+    if os.path.isfile(marker):
         try:
             with open(marker, encoding="utf-8") as f:
                 staging = f.readline().rstrip("\n")
@@ -760,6 +773,11 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
                             data_dir=paths.data_dir) != 0:
                 log("ERROR: install-from-backup import failed — leaving marker for retry")
                 staging = ""
+            else:
+                # The backup's database is in: the site is installed from
+                # here on, whatever start_core saw before the import (the
+                # image rebuild below used to wait one more start, #507).
+                installed = True
         else:
             log(f"Install-from-backup: marker present but staging missing ({staging}); "
                 "ignoring")

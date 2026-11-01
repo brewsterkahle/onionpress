@@ -141,6 +141,17 @@
   first-run key seed removes its volume and stops (`start.KeySeed`; one seed, `containers.run_key_seed`, for
   start and restore). `tests/test_install_invariants.py`,
   `tests/test_first_run_key_seed.py`.
+- **Linux's first run pulls the tor image before `generate-vanity`** (#519:
+  the postinst's first start had pulled nothing, "no image" read as "no
+  mkp224o", Tor minted a key that never reached the key volume as a PEM,
+  and every backup of that site was unrestorable). **A Linux backup holds
+  the PEM or says it has no key**: a C-Tor-only key is converted
+  (`key_manager.py ctor-to-arti`, the public key from `hostname` when tor
+  wrote none); no key at all is a WARNING and `excludes_onion_key` in
+  metadata (the restore then keeps the install's key, as for the Mac
+  page's backup), never an archive no restore accepts.
+  `TestLinux` in `tests/test_first_run_key_seed.py`,
+  `tests/test_linux_backup_key_pem.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
   multi-arch index digest, mkp224o by commit, wp-cli by sha256);
   `MKP224O_VERSION` matches `build/build-dmg-simple.sh`. Re-pin the
@@ -203,6 +214,11 @@
   `launcher_ops.py` and `tor-watchdog.py`. Every Python entry point in
   `linux/` is installed by both `install.sh` and `build-linux.sh`.
   `tests/test_linux_recovery_loop.py`.
+- **The Linux heartbeat reaches the daemon the launcher uses** (#503): its
+  main() runs `point_docker_at_the_daemon()` before its first `docker` call
+  (`resolve_paths`' socket into DOCKER_HOST, a preset one kept; the unit
+  sets no DOCKER_HOST, and must not: a system-Docker install has none).
+  `tests/test_linux_heartbeat_docker_socket.py`.
 - The watchdog is started only through entrypoint.sh's `supervise_watchdog`
   (a function, not a `*tor-watchdog*` script: hosts signal
   `pgrep -f '[t]or-watchdog'`). `tests/test_tor_watchdog_supervised.py`.
@@ -247,6 +263,13 @@
   constructions of our own.**
 - Secrets never go on argv: stdin or the environment.
   `tests/test_secrets_off_argv.py`.
+- **A backup password given as an argument is refused** (#504; exit 2 from
+  the launchers' `read_backup_password`, identical in both, and
+  `cli.read_backup_password` / `scrub`): `backup`, `restore`, `scrub` and
+  `setup --from-backup` take it from `ONIONPRESS_BACKUP_PASSWORD`, stdin or
+  a prompt only. The old positional forms are still parsed so they get the
+  refusal, never a mis-read argument. `tests/test_backup_password_handoff.py`,
+  `tests/test_terminal_setup.py`.
 
 ## WordPress Branch Moves With the Image
 - `WORDPRESS_BRANCH` in the wordpress Dockerfile is the branch the audit
@@ -344,10 +367,31 @@
   `onionpress …` subcommand run through the launcher; it imports none of
   `backup`, `hub_backup`, `updater`. A new menu action gets its subcommand
   first. `tests/test_menubar_actions.py`.
-- launchd agent `org.onionpress.daemon` (one per user, `KeepAlive` on
-  failure only, `AbandonProcessGroup`); `onionpress daemon
-  start|stop|status|offline`. The launcher's `stop` runs `daemon offline`
-  before stopping containers; `quit` runs `daemon stop` first.
+- **The menubar and the Linux tray are widgets of one client** (#526,
+  `src/onionpress/ui_client.py`: stdlib + `confirm` + `launcher_ops`, so
+  the menubar's docker-free import closure holds): both call the
+  launcher only through `ui_client.Launcher` (secrets in the environment,
+  stdin /dev/null) and read its answers only through `run_json` /
+  `run_confirmed` (the `--check --json` → ask → `--confirmed` loop),
+  `plan_backup` / `run_backup`, `plan_restore` / `run_restore` /
+  `restore_summary` (the dialogs an object the UI supplies: `BackupUI`,
+  `RestoreUI`) and `update_outcome`; no `subprocess` argv in either names
+  the launcher. The tray imports the package hard (the .deb installs it
+  beside the tray): no degraded fallbacks. `tests/test_ui_client.py`.
+- launchd agent `org.onionpress.daemon` (`KeepAlive` on failure only,
+  `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
+  The launcher's `stop` runs `daemon offline` before stopping containers;
+  `quit` runs `daemon stop` first.
+- **Labels are per data dir** (#505: launchd's gui domain is per user, and
+  a second install on the account took the real daemon for its own):
+  `daemon_client.data_dir_label` keeps `org.onionpress.daemon` /
+  `com.onionpress.launcher` for the account's own `~/.onionpress`
+  (`default_data_dir`, the passwd home, never `$HOME`) and derives
+  `<label>.<8 hex of the real path's sha256>` for any other; every
+  launchctl target and plist name goes through `agent_label(data_dir)` /
+  `login_item.launchagent_label(data_dir)`. The two literals stay
+  (e2e/harness/safety.py checks the default). `TestLabelPerDataDir` in
+  `tests/test_mac_daemon.py`.
 - State in `~/.onionpress/daemon-state.json` (atomic, 0600); a state older
   than 90 s or from a dead pid shows "Reconnecting", never "Stopped". Two
   processes never write one RotatingLog.
@@ -379,9 +423,13 @@
 - The launchers' `setup)` case is `run_setup` (passwords moved into the
   environment, never the CLI's argv) → `setup_logic.setup_from_terminal`,
   which installs through `install_fresh_wordpress`; its exit says what the
-  launcher does next (10: restart for a backup's key). `--from-backup`
-  takes the address from the key (`stage_setup_from_backup`), never
-  metadata.json; no key, no new one. `tests/test_terminal_setup.py`.
+  launcher does next (10: restart after a backup's restore).
+- **`setup --from-backup` is the restore** (#509): `setup_from_terminal`
+  runs `cmd_restore`'s install-from-backup rebuild (the backup's key,
+  database and content; the address from the key, never metadata.json; no
+  key, no new one), marks the setup complete and has the launcher restart.
+  Never a WordPress under temporary credentials. `tests/test_terminal_setup.py`,
+  `TestLauncherRestorePaths` in `tests/test_backup_metadata_validation.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
@@ -396,9 +444,11 @@
   `--confirmed <what>`. Off a terminal it refuses without confirmation
   (exit 3). `{"ask": "password"}` (exit 5): secret via env or stdin.
 - A new question: `confirm.add_arguments`, `confirm.require`, the name in
-  `QUESTIONS`, a dialog in `_ask_cli_question`, a flow in
-  `tests/test_cli_confirm_protocol.py`. The Linux tray is a client too
-  (`tests/test_linux_tray_protocol.py`).
+  `QUESTIONS`, **its one wording in `ui_client.question_text`** (the
+  menubar's `_ask_cli_question` and the tray's `_ask_question` render it;
+  a word to type is `typed`), a flow in
+  `tests/test_cli_confirm_protocol.py` and `tests/test_ui_client.py`. The
+  tray's own side is `tests/test_linux_tray_protocol.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published: nothing private there under a name not
@@ -499,6 +549,14 @@
   `tests/test_wordpress_egress.py`.
 - `migrate_tor_network` removes an old onionpress-network before the first
   `compose up`, removing only known containers by exact name.
+
+## The onionheaven Container Is a Core Service (issue #504)
+- `onionheaven` is in `containers.CORE_SERVICES` with `restart:
+  unless-stopped` under autoheal: every start brings it up on every node.
+  **No launcher watcher for it** (the Linux 30 s poll forked from every CLI
+  run outlived it, one orphan per `restart`/`setup`, each with its parent's
+  argv in ps); web-server.py's activation flag is read by nothing on the
+  host. `tests/test_start_sequence.py`, `tests/test_start_post_up.py`.
 
 ## The Docker Socket Stays Out of onionheaven
 - Only `autoheal-proxy` and `onionheaven-farm` mount the socket (`:ro`,
@@ -624,11 +682,18 @@
   `install_fresh_wordpress` runs (the tray, `provision`), the `setup`
   case, `start_containers` for an installed site. Only the wordpress
   service's port reads `ONIONPRESS_BIND_HOST` (test-held), so the
-  per-command override reaches nothing else. The .deb postinst's
-  upgrade `try-restart onionpress-heartbeat` fails while the unit is
-  held (it prints the commands and never fails the install).
+  per-command override reaches nothing else.
   `tests/test_linux_wordpress_port_until_installed.py` (the functions
   under bash against stub docker/systemctl).
+- **The hold never outlives the package** (#506: the runtime mask under
+  `/run/user` survived `apt purge`, and the reinstall's `enable --now`
+  failed, starting nothing): the postinst's first install unmasks before
+  `enable --now` (install.sh too), `prerm` remove and `postrm` purge run
+  `lift_heartbeat_holds` (identical in both: every `/run/user/<uid>` with
+  the mask, the user's own manager unmasks), and the postinst's upgrade
+  try-restarts the site's unit alone while the heartbeat is held, then
+  reports each unit's `is-active`, never what it asked for.
+  `TestHeartbeatHold` in `tests/test_deb_upgrade_restarts.py`.
 - **The image denies `install.php` and `setup-config.php` to every
   source but the owner's**: `onionpress-install-page.conf` (`<Files ~>`,
   `Require ip 127.0.0.0/8 ::1` or `%{REMOTE_ADDR} == osenv('ONIONPRESS_WP_GATEWAY')`,
@@ -826,6 +891,22 @@
 - `wp_files.own(recursive=True)` never enters `creations` and follows no
   link.
 
+## A Restore Works From Any Folder and Leaves the Site Up (issue #508)
+- Linux's compose files are the install tree's: `resolve_paths` takes
+  `platform.linux_docker_dir()` (`$ONIONPRESS_INSTALL_DIR/docker`,
+  `<root>/docker` beside `lib/onionpress`, a checkout's
+  `app/Resources/docker`); nothing in the Python side depends on the
+  current folder. `TestLinuxDockerDir` in `tests/test_onionpress_platform.py`.
+- A restore never writes `wp-content/creations` (the host's `~/OnionPress`,
+  bind-mounted; under rootless Docker www-data's tar cannot set its
+  times): `put_wp_content` passes `WP_CONTENT_NEVER_RESTORED` as
+  `put_tree(skip=)`. `TestPutTree` in `tests/test_wordpress_writes_as_www_data.py`.
+- A restore that fails past its teardown starts Tor again (`tor_back` in
+  `cmd_restore`) and keeps its staging; **both** platforms' starts import a
+  kept `.install-from-backup` (`start.post_up`). `TestCmdRestore` in
+  `tests/test_cli_commands.py`, `tests/test_start_post_up.py`, the
+  `install-from-backup*` start traces.
+
 ## Backup Encryption (backup format 2)
 - Format 2: plain `.zip` with `README.txt` + `onionpress-backup.enc`
   (Argon2id INTERACTIVE + secretstream XChaCha20-Poly1305 via PyNaCl, as
@@ -935,7 +1016,10 @@
   current user's processes). The daemon resolves the offset at start
   (`_resolve_ports_at_start`), sets `onion_proxy`'s module globals
   (`_apply_ports`) and publishes `ports`; the launcher's fallback respects a
-  preset `ONIONPRESS_PORT_OFFSET`.
+  preset `ONIONPRESS_PORT_OFFSET`, and so does `OnionPressCLI` (#507: its
+  bind probe beside this install's own running stack moved a restore to
+  the next offset). `TestPortOffsetFromTheLauncher` in
+  `tests/test_onionpress_cli.py`.
 - **No `LSMultipleInstancesProhibited`** in any Info.plist (enforced across
   users). Launcher `pgrep` uses `-u "$(whoami)"` and matches this bundle's
   MenubarApp only. `tests/test_launcher_pgrep_anchor.py`.

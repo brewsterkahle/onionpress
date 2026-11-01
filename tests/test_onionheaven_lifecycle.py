@@ -507,7 +507,7 @@ class TestMaintain(_MacCase):
         self.assertLess(uninstall.index('"hub-holds-key", confirmed'),
                         uninstall.index('"uninstall", confirmed'))
         proceed = menubar[menubar.index("def _proceed_with_uninstall(self):"):]
-        self.assertLess(proceed.index('["uninstall", "--check", "--json", *flags]'),
+        self.assertLess(proceed.index('["uninstall", "--check", "--json"], self._ask_cli_question'),
                         proceed.index("def do_uninstall():"))
         # The Settings page's restore releases before the key is replaced
         # (the CLI's settings-page-restore).
@@ -887,13 +887,19 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         self.assertNotIn("heartbeat_client", branch[:check])
         self.assert_before(real, "stop_heartbeat_client", 'op_py --data-dir "$DATA_DIR" restore', "restore")
         self.assert_before(real, 'op_py --data-dir "$DATA_DIR" restore', "start_heartbeat_client", "restore")
-        # `setup --from-backup` is setup_logic.setup_from_terminal's since
-        # #442.11: the hubs are asked to delete the current key, keeping the
-        # backup's own address, before the key import is flagged.
+        # `setup --from-backup` is the restore since #509: cmd_restore asks
+        # the hubs to delete the current key, keeping the backup's own
+        # address, before any key volume goes; the setup flow itself asks
+        # nothing and replaces no key.
         flow = _read("src/onionpress/setup_logic.py")
         flow = flow[flow.index("def setup_from_terminal("):]
-        self.assert_before(flow, 'release_onionheaven("restore", keep_address=address',
-                           "IMPORT_KEY_PENDING)", "setup")
+        self.assertNotIn("release_onionheaven", flow)
+        self.assertNotIn("IMPORT_KEY_PENDING", flow)
+        self.assertIn("if restore(backup_password, from_backup) != 0:", flow)
+        cli = _read("src/onionpress/cli.py")
+        body = cli[cli.index("    def cmd_restore("):cli.index("    def cmd_import_backup_artifacts(")]
+        self.assert_before(body, 'release_onionheaven("restore", keep_address=addr',
+                           '"volume", "rm", vol', "cmd_restore")
 
 
 # ─── Linux heartbeat daemon ────────────────────────────────────────────

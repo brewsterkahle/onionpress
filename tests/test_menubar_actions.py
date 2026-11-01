@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """src/menubar.py performs no operation itself (issue #366, CLI-first
-phase 2): every menu action and the Settings page's requests run
-`onionpress <cmd>` through the launcher; the menubar keeps the dialogs,
-the progress window and the notifications, and asks the questions the
-CLI tells it to ask (onionpress.confirm). AppKit, so checked as source."""
+phase 2; #526): every menu action and the Settings page's requests run
+`onionpress <cmd>` through the launcher, by the UIs' shared client
+(onionpress.ui_client, tests/test_ui_client.py: the protocol, the backup
+and restore flows, the questions' wording); the menubar keeps the
+dialogs, the progress window and the notifications. AppKit, so checked
+as source."""
 import ast
 import os
 import re
 import sys
 import textwrap
+import time
 import types
 import unittest
 from unittest import mock
@@ -16,7 +19,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from onionpress import confirm  # noqa: E402
+from onionpress import confirm, ui_client  # noqa: E402
 
 # The UI processes' import closure is computed once, in test_mac_daemon.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,19 +36,26 @@ ALLOWED = {
 }
 NEVER_IMPORTED = ("backup", "hub_backup", "updater")
 
-# Every action's launcher argv, as the source spells it.
+# Every action's launcher call, as the source spells it: through
+# ui_client (the Launcher, or a flow of its own).
 ACTIONS = (
-    '["backup", "--check", "--json", "--user", username]',
-    '["backup", "--json", "-o", output_path, "--user", username]',
-    '["restore", zip_path, "--check", "--json"]',
-    '["prepare-restore", zip_path, "--check", "--json"]',
-    'launcher_ops.run_launcher_restore(',
-    '["update", "--check", "--json"]',
-    '["update", "--yes", "--json"]',
-    '["uninstall", "--check", "--json", *flags]',
-    '["uninstall", "--json", *flags]',
-    '[self.launcher_script, "handle-action", "--json", *args]',
-    '[self.launcher_script, "config", "set", key]',
+    'ui_client.plan_backup(\n            self.launcher, _MacBackupUI(self)',
+    'ui_client.run_backup(self.launcher, plan',
+    'ui_client.plan_restore(self.launcher, zip_path, _MacRestoreUI(self)',
+    'ui_client.run_restore(\n                    self.launcher, plan',
+    'self.launcher.run_json(\n            "prepare-restore", zip_path, "--check", "--json", password=password',
+    'self.launcher.run_json(\n                "prepare-restore", sw.restore_zip, "--json",\n                password=sw.restore_password',
+    'self.launcher.run_json("update", "--check", "--json"',
+    'self.launcher.run_json("update", "--yes", "--json"',
+    'ui_client.run_confirmed(\n            self.launcher, ["uninstall", "--check", "--json"], self._ask_cli_question',
+    'self.launcher.run_json(\n                    "uninstall", "--json", *flags',
+    'self.launcher.run_json("handle-action", "--json", *args)',
+    'ui_client.run_confirmed(\n            self.launcher, args, self._ask_cli_question, action="Change"',
+    'self.launcher.run("daemon", "start"',
+    'self.launcher.wait("start")',
+    'self.launcher.wait("stop")',
+    'self.launcher.wait("restart")',
+    'self.launcher.run("quit", "--leave-menubar"',
 )
 
 
@@ -79,6 +89,10 @@ class TestImports(unittest.TestCase):
                 self.assertNotIn(name, imported)
         for alias in ("backup_manager", "hub_backup", "updater"):
             self.assertNotRegex(self.src, rf"\b{alias}\.")
+        # The protocol is ui_client's: the menubar reads no answer itself.
+        self.assertNotIn("confirm", imported)
+        self.assertNotIn("launcher_ops", imported)
+        self.assertIn("ui_client", imported)
 
     def test_action_modules_are_not_imported_transitively(self):
         """Issue #475: neither by the menubar, nor the windows it opens,
@@ -90,11 +104,11 @@ class TestImports(unittest.TestCase):
         for name in NEVER_IMPORTED:
             with self.subTest(name=name):
                 self.assertNotIn(f"onionpress.{name}", loaded)
+        self.assertIn("onionpress.ui_client", loaded)
 
     def test_the_welcome_restore_opens_the_backup_through_the_launcher(self):
         body = _method(self.src, "_check_welcome_backup")
-        self.assertIn('["prepare-restore", zip_path, "--check", "--json"]', body)
-        self.assertIn("launcher_ops.BACKUP_PASSWORD_ENV: password", body)
+        self.assertIn('"prepare-restore", zip_path, "--check", "--json", password=password', body)
         with open(os.path.join(os.path.dirname(MENUBAR), "onionpress", "setup_window.py"),
                   encoding="utf-8") as f:
             setup_window = f.read()
@@ -112,7 +126,9 @@ class TestImports(unittest.TestCase):
         for name in ("_handle_requested_action", "poll_config_updates", "poll_requested_actions",
                      "_settings_page_key_import", "_settings_page_restore_confirmed",
                      "_release_onionheaven_before_restore", "_prune_dangling_images",
-                     "_write_result"):
+                     "_write_result", "_run_launcher_json", "_launcher_failure",
+                     "_ask_hub_recovery_key", "_ask_to_replace_address", "_short_onion",
+                     "run_command"):
             with self.subTest(name=name):
                 self.assertNotIn(f"def {name}(", self.src)
         self.assertNotIn("create_backup(", self.src)
@@ -126,6 +142,11 @@ class TestImports(unittest.TestCase):
         for argv in ACTIONS:
             with self.subTest(argv=argv):
                 self.assertIn(argv, self.src)
+        # Through the client only: no subprocess argv names the launcher
+        # (tests/test_ui_client.py holds both UIs to that), and the one
+        # client is made once.
+        self.assertEqual(self.src.count("ui_client.Launcher("), 1)
+        self.assertNotIn("[self.launcher_script", self.src)
         # No docker in an action: the status loop's reads are the only
         # docker calls left (status.json, the address, wp-cli reads).
         for name in ("backup", "restore", "check_for_updates", "_install_update",
@@ -142,22 +163,74 @@ class TestImports(unittest.TestCase):
         # stops at in its state for the menubar.
         daemon = open(os.path.join(PROJECT_ROOT, "src", "onionpress", "daemon.py"), encoding="utf-8").read()
         self.assertIn("self.write_status_to_volume()\n                self.poll_settings_page()", daemon)
-        self.assertIn('[self.launcher_script, "handle-action", "--json", *args]', self.src)
+        self.assertIn('self.launcher.run_json("handle-action", "--json", *args)', self.src)
+
+
+class TestViewTickKeepsTheState(unittest.TestCase):
+    """The view loop's tick copies a fresh daemon state into self.state:
+    auto_start's wait for the runtime, its port-conflict gate and the
+    setup window's steps read it there. Without the copy self.state
+    stayed the empty dict from __init__, _wait_for_state never came
+    true and every launch waited the full 3 minutes (2.6.0, 2.6.1)."""
+
+    def _app(self, state):
+        src = _src()
+        ns = {"os": os,
+              "time": types.SimpleNamespace(time=time.time, monotonic=time.monotonic,
+                                            sleep=lambda s: None),
+              "op_daemon": types.SimpleNamespace(
+                  read_state=lambda data_dir: state,
+                  state_is_fresh=lambda doc, now: bool(doc))}
+        for name in ("_view_tick", "_wait_for_state"):
+            exec(textwrap.dedent(_method(src, name)), ns)
+        app = types.SimpleNamespace(
+            app_support=os.path.join(os.sep, "nonexistent", "onionpress"),
+            state={}, _state_fresh=False, _daemon_seen=False, _daemon_missing_since=None,
+            display_state="stopped", onion_address="", cloudflare_tunnel_enabled=False,
+            _last_bootstrap_pct=0, wp_port=8080, _start_failed_rc=None, _last_painted=None,
+            read_config_value=lambda key, default="": default,
+            log=mock.Mock(), _apply_state=mock.Mock(), ensure_daemon_running=mock.Mock(),
+            update_menu=mock.Mock(), handle_reopen=mock.Mock())
+        for name in ("_view_tick", "_wait_for_state"):
+            setattr(app, name, types.MethodType(ns[name], app))
+        return app
+
+    def test_a_fresh_state_is_copied_and_the_wait_sees_it(self):
+        state = {"pid": 1, "version": "2.6.1", "updated_at": time.time(),
+                 "runtime_ready": True, "port_conflict": [8080]}
+        app = self._app(state)
+        app._view_tick()
+        self.assertTrue(app._state_fresh)
+        self.assertEqual(app.state, state)
+        app._apply_state.assert_called_once_with(state)
+        self.assertTrue(app._wait_for_state(lambda s: s.get("runtime_ready"), 5))
+        self.assertEqual(app.state.get("port_conflict"), [8080])
+        app.ensure_daemon_running.assert_not_called()
+
+    def test_no_state_is_not_fresh_and_the_wait_times_out(self):
+        app = self._app(None)
+        app._view_tick()
+        self.assertFalse(app._state_fresh)
+        self.assertEqual(app.state, {})
+        app._apply_state.assert_not_called()
+        app.ensure_daemon_running.assert_called_once()
+        self.assertFalse(app._wait_for_state(lambda s: True, 0.05))
 
 
 class TestDialogs(unittest.TestCase):
-    """The questions the CLI asks, as native dialogs: Cancel is the
-    default, no answer in 5 minutes is Cancel, every question has one."""
+    """The questions the CLI asks, as native dialogs: worded by
+    ui_client.question_text, Cancel is the default, no answer in 5
+    minutes is Cancel, every question has one."""
 
     def _app(self, answer, window_answer=None):
         src = _src()
-        ns = {"rumps": mock.Mock()}
+        ns = {"rumps": mock.Mock(), "ui_client": ui_client}
         if window_answer is not None:
             ns["rumps"].Window.return_value.run.return_value = window_answer
-        for name in ("_ask_cli_question", "_ask_to_replace_address"):
+        for name in ("_ask_cli_question", "_ask_settings_page_question"):
             exec(textwrap.dedent(_method(src, name)), ns)
         app = types.SimpleNamespace(log=mock.Mock(), show_native_alert=mock.Mock(return_value=answer))
-        for name in ("_ask_cli_question", "_ask_to_replace_address"):
+        for name in ("_ask_cli_question", "_ask_settings_page_question"):
             setattr(app, name, types.MethodType(ns[name], app))
         return app, ns["rumps"]
 
@@ -177,6 +250,9 @@ class TestDialogs(unittest.TestCase):
                     self.assertEqual(kwargs.get("default_button"), 0)
                     self.assertEqual(kwargs.get("cancel_button"), 0)
                     self.assertEqual(kwargs["buttons"][0], "Cancel")
+                    q = ui_client.question_text(what, f, "Uninstall")
+                    self.assertEqual(kwargs["buttons"][1], q.yes)
+                    self.assertEqual((kwargs["title"], kwargs["message"]), (q.title, q.message))
 
     def test_the_facts_reach_the_dialog(self):
         app, _ = self._app(1)
@@ -197,25 +273,50 @@ class TestDialogs(unittest.TestCase):
                                     (0, "DELETE", False)):
             with self.subTest(clicked=clicked, text=text):
                 app, rumps = self._app(1, window_answer=types.SimpleNamespace(clicked=clicked, text=text))
-                self.assertIs(app._ask_cli_question("uninstall", {"deletes": []}), want)
+                self.assertIs(app._ask_cli_question("uninstall", {"deletes": []}, action="Uninstall"), want)
                 self.assertEqual(rumps.Window.call_args.kwargs["cancel"], "Cancel")
+                self.assertEqual(rumps.Window.call_args.kwargs["ok"], "Confirm Deletion")
+                if clicked and not want:
+                    self.assertIn("(You typed: 'yes')", rumps.alert.call_args.kwargs["message"])
 
     def test_an_unknown_question_is_no(self):
         app, _ = self._app(1)
         self.assertIs(app._ask_cli_question("format-disk", {}), False)
         app.show_native_alert.assert_not_called()
+        self.assertIs(app._ask_settings_page_question({"confirm": "format-disk"}), False)
+        self.assertIs(app._ask_settings_page_question({"confirm": "reset"}), False)
+        app.show_native_alert.assert_not_called()
+
+    def test_the_settings_page_questions(self):
+        for question, button in (({"confirm": "address-change", "current": "a" * 56 + ".onion",
+                                   "new": "b" * 56 + ".onion"}, "Replace"),
+                                 ({"confirm": "address-change", "current": "a" * 56 + ".onion",
+                                   "new": "b" * 56 + ".onion", "action": "restore-backup"}, "Restore"),
+                                 ({"confirm": "clearnet-tunnel", "replace": False}, "Set Token")):
+            for answer, want in ((1, True), (0, False), (None, False)):
+                with self.subTest(what=question["confirm"], button=button, answer=answer):
+                    app, _ = self._app(answer)
+                    self.assertIs(app._ask_settings_page_question(question), want)
+                    kwargs = app.show_native_alert.call_args.kwargs
+                    self.assertEqual(kwargs["buttons"], ["Cancel", button])
+                    self.assertEqual((kwargs["default_button"], kwargs["cancel_button"]), (0, 0))
+                    self.assertIn("confirmed" if want else "not confirmed", app.log.call_args.args[0])
 
     def test_every_question_is_handled(self):
+        """Every question in confirm.QUESTIONS is worded (test_ui_client
+        runs them); the menubar asks the sealed-hub-data one with its key
+        field (_MacRestoreUI.ask_recovery_key), the rest in
+        _ask_cli_question."""
         src = _src()
-        body = _method(src, "_ask_cli_question")
         for what in confirm.QUESTIONS:
-            if what == "sealed-hub-data-left-out":
-                self.assertIn('facts.get("confirm") == "sealed-hub-data-left-out"', src)
-            else:
-                self.assertIn(f'if what == "{what}":', body)
+            self.assertIsNotNone(ui_client.question_text(what, {}), what)
+        self.assertIn("ui_client.question_text(ui_client.SEALED_HUB_DATA_QUESTION, facts)",
+                      src[src.index("class _MacRestoreUI"):src.index("class OnionPressApp")])
+        self.assertIn("ui_client.question_text(what, facts, action)", _method(src, "_ask_cli_question"))
 
     def test_no_answer_in_five_minutes_is_cancel(self):
         self.assertIn("max_wait = 300", _method(_src(), "show_native_alert"))
+        self.assertEqual(ui_client.QUESTION_TIMEOUT_SEC, 300)
 
 
 class TestFailuresSurface(unittest.TestCase):
@@ -224,42 +325,19 @@ class TestFailuresSurface(unittest.TestCase):
 
     def test_each_action_shows_the_clis_message(self):
         src = _src()
-        for name, shown in (("backup", 'rumps.alert(title="Verification Failed", message=failure)'),
-                            ("backup", 'pw.finish(\n                    f"Backup failed: {failure}"'),
-                            ("restore", 'rumps.alert(title="Invalid Backup", message=failure)'),
-                            ("restore", 'pw.finish(failure,\n                                                   title="Restore Failed")'),
+        for name, shown in (("backup", "result.message"),
+                            ("restore", 'pw.finish(result.failure,\n                                                   title="Restore Failed")'),
                             ("check_for_updates", 'title="Update Check Failed"'),
                             ("_install_update", '"Update Failed",\n            f"Could not install the update automatically.\\n\\n{failure}'),
                             ("_proceed_with_uninstall", 'title="Uninstall Error"'),
                             ("_apply_state", '"Settings Page Requests Not Handled"')):
             with self.subTest(name=name):
                 self.assertIn(shown, _method(src, name))
-
-    def test_the_launcher_json_runner(self):
-        """_run_launcher_json: the answer is the CLI's last JSON line, a
-        secret goes in the environment, stdin is /dev/null unless input
-        is given, and a run that cannot start is (-1, None)."""
-        import subprocess
-        src = _src()
-        ns = {"os": os, "subprocess": subprocess, "threading": __import__("threading"),
-              "op_confirm": confirm, "launcher_ops": __import__("onionpress.launcher_ops").launcher_ops}
-        exec(textwrap.dedent(_method(src, "_run_launcher_json")), ns)
-        app = types.SimpleNamespace(launcher_script="/bin/sh", log=mock.Mock())
-        run = types.MethodType(ns["_run_launcher_json"], app)
-        rc, ans, out, err = run(["-c", 'echo "[2026-10-22 12:00:00] working" >&2; echo "{\\"ok\\": true, \\"env\\": \\"$SECRET\\"}"'],
-                                env={"SECRET": "s3"})
-        self.assertEqual((rc, ans), (0, {"ok": True, "env": "s3"}))
-        lines = []
-        rc, ans, out, err = run(["-c", 'echo "[2026-10-22 12:00:00] step one" >&2; read x; echo "{\\"ok\\": true, \\"got\\": \\"$x\\"}"'],
-                                input="hello\n", on_line=lines.append)
-        self.assertEqual((rc, ans, lines), (0, {"ok": True, "got": "hello"}, ["step one"]))
-        rc, ans, out, err = run(["-c", "read x; echo no-input-means-devnull-$x; exit 3"])
-        self.assertEqual((rc, ans), (3, None))
-        self.assertIn("no-input-means-devnull-", out)
-        app.launcher_script = "/nonexistent/onionpress"
-        rc, ans, out, err = run(["backup"])
-        self.assertEqual((rc, ans), (-1, None))
-        app.log.assert_called()
+        ui = src[src.index("class _MacBackupUI"):src.index("class _MacRestoreUI")]
+        self.assertIn('rumps.alert(title="Verification Failed", message=problem)', ui)
+        ui = src[src.index("class _MacRestoreUI"):src.index("class OnionPressApp")]
+        self.assertIn("rumps.alert(title=title, message=message)", ui)
+        self.assertIn('rumps.alert(title="Recovery Key Not Accepted", message=problem)', ui)
 
 
 if __name__ == "__main__":

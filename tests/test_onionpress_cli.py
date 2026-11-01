@@ -79,7 +79,8 @@ class TestCLIArgParsing(unittest.TestCase):
     def test_backup_command(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_backup.return_value = 0
-        result = main(["backup", "mypass"])
+        with mock.patch.dict(os.environ, {"ONIONPRESS_BACKUP_PASSWORD": "mypass"}):
+            result = main(["backup"])
         self.assertEqual(result, 0)
         # cli.py dispatches backup as cmd_backup(password, output, user) —
         # output and --user both default to None when omitted.
@@ -90,7 +91,8 @@ class TestCLIArgParsing(unittest.TestCase):
     def test_backup_with_output(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_backup.return_value = 0
-        result = main(["backup", "mypass", "/tmp/backup.zip"])
+        with mock.patch.dict(os.environ, {"ONIONPRESS_BACKUP_PASSWORD": "mypass"}):
+            result = main(["backup", "-o", "/tmp/backup.zip"])
         instance.cmd_backup.assert_called_once_with("mypass", "/tmp/backup.zip", None,
                                                     check=False, json_output=False)
 
@@ -98,9 +100,21 @@ class TestCLIArgParsing(unittest.TestCase):
     def test_restore_command(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_restore.return_value = 0
-        result = main(["restore", "mypass", "/tmp/backup.zip"])
+        with mock.patch.dict(os.environ, {"ONIONPRESS_BACKUP_PASSWORD": "mypass"}):
+            result = main(["restore", "/tmp/backup.zip"])
         instance.cmd_restore.assert_called_once_with(
             "mypass", "/tmp/backup.zip", "", confirmed=frozenset(), json_output=False)
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_a_password_on_argv_is_refused(self, MockCLI):
+        # Issue #504: the old positional forms parse, and are refused.
+        for argv in (["backup", "mypass"], ["restore", "mypass", "/tmp/backup.zip"]):
+            with self.subTest(argv=argv), mock.patch("sys.stderr", io.StringIO()), \
+                 self.assertRaises(SystemExit) as cm:
+                main(argv)
+            self.assertEqual(cm.exception.code, 2)
+        MockCLI.return_value.cmd_backup.assert_not_called()
+        MockCLI.return_value.cmd_restore.assert_not_called()
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_regenerate_derivatives_command(self, MockCLI):
@@ -434,6 +448,48 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
         self.assertEqual(self.calls[seed_at + 1:], [["volume", "rm", "onionpress-onion-keys"]])
         self.cli.containers.start_core.assert_not_called()
         self.cli.containers.start_tor.assert_not_called()
+
+
+class TestPortOffsetFromTheLauncher(unittest.TestCase):
+    """Issue #507: OnionPressCLI ran the bind probe beside this install's
+    own running stack, found its ports taken and moved a restore to the
+    next offset. With the launcher's ONIONPRESS_PORT_OFFSET in the
+    environment the CLI takes that, as the daemon and the start steps do;
+    without it the probe decides as before."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="op-cli-ports-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _cli(self, env):
+        from onionpress import cli as cli_mod
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(cli_mod, "Docker"), \
+             mock.patch.object(cli_mod, "ContainerManager"), \
+             mock.patch.object(cli_mod, "detect_port_offset") as probe:
+            from onionpress.ports import PortConfig
+            probe.return_value = PortConfig.from_offset(10000)
+            if "ONIONPRESS_PORT_OFFSET" not in env:
+                os.environ.pop("ONIONPRESS_PORT_OFFSET", None)
+            c = cli_mod.OnionPressCLI(data_dir=self.dir, app_bundle="")
+        return c, probe
+
+    def test_a_preset_offset_is_taken_without_the_probe(self):
+        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "35000"})
+        probe.assert_not_called()
+        self.assertEqual((c.port_config.offset, c.port_config.wp_port), (35000, 43080))
+
+    def test_zero_from_the_launcher_counts(self):
+        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "0"})
+        probe.assert_not_called()
+        self.assertEqual(c.port_config.wp_port, 8080)
+
+    def test_without_one_the_probe_decides(self):
+        c, probe = self._cli({})
+        probe.assert_called_once()
+        self.assertEqual(c.port_config.offset, 10000)
+        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "junk"})
+        probe.assert_called_once()
 
 
 if __name__ == "__main__":

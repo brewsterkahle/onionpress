@@ -42,7 +42,7 @@ def _read(rel):
 
 def _methods(src):
     tree = ast.parse(src)
-    cls = [n for n in tree.body if isinstance(n, ast.ClassDef)][0]
+    cls = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OnionPressApp"][0]
     return {n.name: ast.get_source_segment(src, n)
             for n in cls.body if isinstance(n, ast.FunctionDef)}
 
@@ -652,6 +652,11 @@ class TestLaunchdAgent(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-daemon-agent-")
         self.addCleanup(shutil.rmtree, self.dir, True)
+        # This temp dir plays the account's own ~/.onionpress: the default
+        # label (another dir's is derived: TestLabelPerDataDir).
+        patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.plist = os.path.join(self.dir, "org.onionpress.daemon.plist")
         self.launcher = os.path.join(self.dir, "onionpress")
         with open(self.launcher, "w") as f:
@@ -693,7 +698,7 @@ class TestLaunchdAgent(unittest.TestCase):
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
         with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: next(states)), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: next(states)), \
                 mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
@@ -702,7 +707,7 @@ class TestLaunchdAgent(unittest.TestCase):
         calls.clear()
         states = iter([(True, None), (True, 7)])
         with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: next(states)), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: next(states)), \
                 mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
@@ -717,7 +722,7 @@ class TestLaunchdAgent(unittest.TestCase):
         with open(op_daemon.pid_path(self.dir), "w") as f:
             f.write(str(2 ** 22 - 1))      # not alive: nothing to wait for
         with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (True, None)), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (True, None)), \
                 mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.stop_agent(self.dir, self.lines.append, self.plist, offline=True)
         self.assertTrue(ok)
@@ -727,25 +732,25 @@ class TestLaunchdAgent(unittest.TestCase):
         with open(op_daemon.pid_path(self.dir), "w") as f:
             f.write(str(os.getpid()))
         with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)), \
                 mock.patch.object(op_daemon.os, "kill") as kill:
             op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=True)
         self.assertTrue(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
         kill.assert_any_call(os.getpid(), op_daemon.signal.SIGTERM)
         with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)), \
                 mock.patch.object(op_daemon.os, "kill"):
             op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=False)
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
 
     def test_status_and_the_cli(self):
-        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)):
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)):
             doc = op_daemon.agent_status(self.dir)
         self.assertFalse(doc["loaded"])
         self.assertFalse(doc["state_fresh"])
         out = io.StringIO()
         paths = resolve_paths(data_dir=self.dir, app_bundle="")
-        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (True, 77)):
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (True, 77)):
             rc = op_daemon.run_daemon_command("status", paths, self.lines.append,
                                               json_output=True, out=out)
         self.assertEqual(rc, 0)
@@ -786,6 +791,106 @@ class TestLaunchdAgent(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["json_output"])
         self.assertTrue(run.call_args.kwargs["launcher_script"])
 
+
+
+class TestLabelPerDataDir(unittest.TestCase):
+    """Issue #505: launchd's gui domain is per user, so a second install on
+    the account (a test HOME, a dev build) gets its own label; the
+    account's own ~/.onionpress keeps the literal, which the e2e harness's
+    safety check reads."""
+
+    def setUp(self):
+        self.default = tempfile.mkdtemp(prefix="op-default-")
+        self.other = tempfile.mkdtemp(prefix="op-other-")
+        for d in (self.default, self.other):
+            self.addCleanup(shutil.rmtree, d, True)
+        patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.default)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_default_dir_keeps_the_literal_labels(self):
+        from onionpress import login_item
+        self.assertEqual(op_daemon_client.agent_label(self.default), "org.onionpress.daemon")
+        self.assertEqual(op_daemon_client.agent_label(""), "org.onionpress.daemon")
+        self.assertEqual(login_item.launchagent_label(self.default), "com.onionpress.launcher")
+        self.assertEqual(op_daemon_client.AGENT_LABEL, "org.onionpress.daemon")
+        self.assertEqual(login_item.LAUNCHAGENT_LABEL, "com.onionpress.launcher")
+
+    def test_another_dir_gets_a_derived_label(self):
+        from onionpress import login_item
+        label = op_daemon_client.agent_label(self.other)
+        self.assertRegex(label, r"^org\.onionpress\.daemon\.[0-9a-f]{8}$")
+        self.assertEqual(label, op_daemon_client.agent_label(self.other), "deterministic")
+        self.assertNotEqual(label, op_daemon_client.agent_label(
+            tempfile.mkdtemp(prefix="op-third-", dir=self.other)))
+        login = login_item.launchagent_label(self.other)
+        self.assertEqual(login, "com.onionpress.launcher." + label.rsplit(".", 1)[1])
+        # Paths are normalized: a link to the dir names the same agent.
+        link = os.path.join(self.default, "link")
+        os.symlink(self.other, link)
+        self.assertEqual(op_daemon_client.agent_label(link), label)
+        # The default is the passwd home's, not $HOME's.
+        with mock.patch.dict(os.environ, {"HOME": self.other}):
+            self.assertEqual(op_daemon_client.agent_label(self.other), label)
+        self.assertTrue(op_daemon_client.agent_plist_path(self.other).endswith(
+            f"/Library/LaunchAgents/{label}.plist"))
+        self.assertTrue(login_item.launchagent_path(self.other).endswith(
+            f"/Library/LaunchAgents/{login}.plist"))
+
+    def test_every_launchctl_target_is_the_data_dirs(self):
+        label = op_daemon_client.agent_label(self.other)
+        launcher = os.path.join(self.other, "onionpress")
+        with open(launcher, "w") as f:
+            f.write("#!/bin/sh\n")
+        calls, loaded = [], []
+
+        def launchctl(args, timeout=20):
+            # A launchd of one agent: bootstrap loads it, bootout unloads it,
+            # print answers its pid while loaded.
+            calls.append(args)
+            if args[0] == "bootstrap":
+                loaded.append(1)
+            elif args[0] == "bootout":
+                loaded.clear()
+            elif args[0] == "print":
+                return subprocess.CompletedProcess(args, 0 if loaded else 1,
+                                                   "\tpid = 9\n" if loaded else "", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        plist = os.path.join(self.other, "agent.plist")
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
+            ok = op_daemon_client.start_agent(launcher, self.other, lambda *_: None, plist)
+            self.assertTrue(ok)
+            with open(plist, "rb") as f:
+                self.assertEqual(plistlib.load(f)["Label"], label)
+            self.assertIn(["bootstrap", "gui/501", plist], calls)
+            self.assertTrue(all(a[-1] == f"gui/501/{label}" for a in calls if a[0] == "print"), calls)
+            calls.clear()
+            op_daemon_client.stop_agent(self.other, lambda *_: None, plist, wait=0.1)
+            self.assertIn(["bootout", f"gui/501/{label}"], calls)
+            calls.clear()
+            loaded.append(1)        # as after a crash: loaded, then uninstalled
+            op_daemon_client.remove_agent(lambda *_: None, plist, data_dir=self.other)
+            self.assertIn(["bootout", f"gui/501/{label}"], calls)
+            self.assertFalse(os.path.exists(plist))
+            doc = op_daemon_client.agent_status(self.other)
+        self.assertEqual(doc["label"], label)
+        self.assertTrue(doc["plist"].endswith(f"{label}.plist"))
+        # The real install's agent is never named.
+        self.assertFalse(any(a[-1] == "gui/501/org.onionpress.daemon" for a in calls))
+
+    def test_the_login_item_follows_the_config_folder(self):
+        from onionpress import config as op_config, login_item
+        bundle = os.path.join(self.other, "OnionPress.app")
+        os.makedirs(os.path.join(bundle, "Contents", "MacOS"))
+        cfg = os.path.join(self.other, "config")
+        with open(cfg, "w") as f:
+            f.write("LAUNCH_ON_LOGIN=yes\n")
+        plist = os.path.join(self.other, "la.plist")
+        op_config.apply_side_effects(["LAUNCH_ON_LOGIN"], cfg, "macos", lambda *_: None,
+                                     app_bundle=bundle, launchagent_path=plist)
+        with open(plist, "rb") as f:
+            self.assertEqual(plistlib.load(f)["Label"], login_item.launchagent_label(self.other))
 
 class TestUpdateOrder(unittest.TestCase):
     """`onionpress update`: download, stage, stop the daemon, swap,
@@ -884,7 +989,8 @@ class TestMenubarIsAView(unittest.TestCase):
         tree = ast.parse(_read("src/onionpress/daemon_client.py"))
         self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
         imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-        self.assertEqual(imported, {"json", "os", "plistlib", "signal", "subprocess", "time"})
+        self.assertEqual(imported, {"hashlib", "json", "os", "plistlib", "pwd", "signal",
+                                    "subprocess", "time"})
 
     def test_daemon_reexports_the_client(self):
         from onionpress import daemon_client
@@ -939,13 +1045,13 @@ class TestMenubarIsAView(unittest.TestCase):
 
     def test_the_menubar_starts_the_daemon_when_there_is_none(self):
         body = self.methods["ensure_daemon_running"]
-        self.assertIn('[self.launcher_script, "daemon", "start"]', body)
+        self.assertIn('self.launcher.run("daemon", "start"', body)
         self.assertIn("op_daemon.daemon_pid(self.app_support)", body)
-        self.assertIn("op_daemon.agent_loaded_pid()", body)
+        self.assertIn("op_daemon.agent_loaded_pid(self.app_support)", body)
 
     def test_quit_goes_through_the_launcher(self):
         body = self.methods["_perform_quit_cleanup"]
-        self.assertIn('[self.launcher_script, "quit", "--leave-menubar"]', body)
+        self.assertIn('self.launcher.run("quit", "--leave-menubar"', body)
         self.assertIn('"--no-offline"', body)
         self.assertIn("QUIT_KEEPS_SITE_RUNNING", self.methods["_quit_keeps_site_running"])
         self.assertNotIn("colima_bin", body)

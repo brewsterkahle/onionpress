@@ -108,7 +108,8 @@ class TestLaunchers(unittest.TestCase):
         for between in ("after_wordpress_installed", "hold_heartbeat_client_until_installed",
                         "note_if_lan_looks_local"):
             self.assertTrue(core < body.index(between) < post, between)
-        self.assertLess(post, body.index("start_onionheaven_activation_watcher"))
+        # Issue #504: no watcher for the onionheaven container (a core service).
+        self.assertNotIn("activation_watcher", text)
         for gone in ("apply_pending_key_import", "seed_onion_key", "start_core_services"):
             self.assertNotIn(f"\n{gone}() {{", text)
 

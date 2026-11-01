@@ -100,11 +100,14 @@ from .daemon_client import (  # noqa: F401
     STATE_FILENAME,
     _gui_domain,
     _launchctl,
+    agent_label,
     agent_loaded_pid,
     agent_plist,
     agent_plist_path,
     agent_status,
     daemon_pid,
+    data_dir_label,
+    default_data_dir,
     display_state_of,
     install_agent,
     pid_alive,
@@ -728,7 +731,7 @@ class Daemon(PortAttributes):
             if self._had_cached_address:
                 self.log(f"Onion address: {self.onion_address}")
             if os.environ.get("ONIONPRESS_DAEMON_LAUNCHD"):
-                self.log("Running under launchd (" + AGENT_LABEL + ")")
+                self.log("Running under launchd (" + agent_label(self.app_support) + ")")
         except Exception:
             pass
 

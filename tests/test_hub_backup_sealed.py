@@ -881,8 +881,9 @@ class TestCli(unittest.TestCase):
 
     def test_the_launchers_pass_it_through_without_argv(self):
         """Taken out of the launcher's environment before anything runs and
-        handed only to the restore and hub-recovery-key commands, in their
-        environment, never as an argument."""
+        handed only to the restore, hub-recovery-key and setup commands (a
+        backup's setup is the restore), in their environment, never as an
+        argument."""
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
             text = _read(rel)
             with self.subTest(rel):
@@ -895,10 +896,11 @@ class TestCli(unittest.TestCase):
                 self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
                                        r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" \S+ '
                                        r'(-m onionpress\.cli )?--data-dir "\$DATA_DIR" restore "\$restore_path"')
-                # restore --check, restore, hub-recovery-key
+                # restore --check, restore, hub-recovery-key, and run_setup
+                # (setup --from-backup is the restore, #509)
                 uses = [ln.strip() for ln in text.splitlines()
                         if "$_HUB_RECOVERY_KEY" in ln and not ln.lstrip().startswith("#")]
-                self.assertEqual(len(uses), 3, uses)
+                self.assertEqual(len(uses), 4, uses)
                 for line in uses:
                     self.assertTrue(line.startswith(('ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ',
                                                      'if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ')),
@@ -928,32 +930,43 @@ class TestMac(unittest.TestCase):
         self.src = _read("src/menubar.py")
 
     def test_restore_asks_for_the_key_on_a_sealed_backup(self):
+        """The flow is ui_client.plan_restore's (#526, run in
+        tests/test_ui_client.py); the menubar's _MacRestoreUI holds the
+        key dialog, the key typed into a secure field."""
         body = self.src[self.src.index('@rumps.clicked("Restore...")'):]
         body = body[:body.index("def _adopt_restored_address")]
-        ask = body.index("hub_recovery_key = self._ask_hub_recovery_key(facts, zip_path, restore_env)")
-        self.assertLess(body.index('if facts.get("confirm") == "sealed-hub-data-left-out":'), ask)
-        self.assertLess(ask, body.index("_BackupProgressWindow("))
-        self.assertIn("restore_env[launcher_ops.HUB_RECOVERY_KEY_ENV] = hub_recovery_key", body)
-        self.assertIn('confirmed_flags = ["--confirmed", "sealed-hub-data-left-out"]', body)
-        self.assertIn("extra_env=hub_key_env,", body)
-        self.assertIn('extra_args=["--json", *confirmed_flags],', body)
-        self.assertIn("launcher_ops.run_launcher_restore(", body)
-        self.assertIn('answer.get("hub_data") == "restored"', body)
-        ask_body = self.src[self.src.index("def _ask_hub_recovery_key"):]
-        ask_body = ask_body[:ask_body.index('@rumps.clicked("Restore...")')]
-        self.assertIn("NSSecureTextField", ask_body)
+        plan = body.index("plan = ui_client.plan_restore(self.launcher, zip_path, _MacRestoreUI(self), log=self.log)")
+        self.assertLess(plan, body.index("_BackupProgressWindow("))
+        self.assertIn("ui_client.run_restore(", body)
+        self.assertIn("ui_client.restore_summary(", body)
+        ui_src = _read("src/onionpress/ui_client.py")
+        flow = ui_src[ui_src.index("def plan_restore("):ui_src.index("def run_restore(")]
+        self.assertIn("if question == SEALED_HUB_DATA_QUESTION:", flow)
+        self.assertIn("key = ui.ask_recovery_key(facts, problem)", flow)
+        self.assertIn("confirmed.append(SEALED_HUB_DATA_QUESTION)", flow)
         # A typed key is checked by the CLI, in the environment
-        self.assertIn('["restore", zip_path, "--check", "--json"]', ask_body)
-        self.assertIn("launcher_ops.HUB_RECOVERY_KEY_ENV: text", ask_body)
+        self.assertIn("check(password, {HUB_RECOVERY_KEY_ENV: key})", flow)
+        self.assertIn("extra_env[HUB_RECOVERY_KEY_ENV] = key", flow)
+        run = ui_src[ui_src.index("def run_restore("):ui_src.index("def restore_summary(")]
+        self.assertIn("extra_env=plan.extra_env, extra_args=plan.extra_args", run)
+        self.assertIn("launcher_ops.run_launcher_restore(", run)
+        summary = ui_src[ui_src.index("def restore_summary("):ui_src.index("class UpdateOutcome")]
+        self.assertIn('answer.get("hub_data") == "restored"', summary)
+        ask_body = self.src[self.src.index("class _MacRestoreUI"):self.src.index("class OnionPressApp")]
+        ask_body = ask_body[ask_body.index("def ask_recovery_key("):]
+        self.assertIn("NSSecureTextField", ask_body)
+        self.assertIn("ui_client.question_text(ui_client.SEALED_HUB_DATA_QUESTION, facts)", ask_body)
         self.assertEqual(launcher_ops.HUB_RECOVERY_KEY_ENV, hub_backup.RECOVERY_KEY_ENV)
+        from onionpress import ui_client
+        self.assertEqual(launcher_ops.HUB_RECOVERY_KEY_ENV, ui_client.HUB_RECOVERY_KEY_ENV)
 
     def test_a_hub_backup_without_a_key_says_so(self):
         """The CLI's notes (HUB_DATA_UNSEALED_NOTE among them) are shown
         with the finished backup."""
         cli_src = _read("src/onionpress/cli.py")
         self.assertIn("notes.append(HUB_DATA_UNSEALED_NOTE)", cli_src)
-        self.assertIn('for note in ans.get("notes") or []:\n                msg += "\\n\\n" + note',
-                      self.src)
+        self.assertIn('for note in answer.get("notes") or []:\n        msg += "\\n\\n" + note',
+                      _read("src/onionpress/ui_client.py"))
 
     def test_bundled(self):
         self.assertIn("'onionpress.hub_backup'", _read("setup.py"))

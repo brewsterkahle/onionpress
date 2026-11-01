@@ -430,7 +430,7 @@ is_onionheaven_hub() {
 # built one. Never a floating tag such as `alpine`, which a registry or a
 # mirror could swap for an image that reads the key. Each run overrides the
 # entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc}"
+KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
 
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing
@@ -543,6 +543,22 @@ wp_access_host() {
         127.*) echo localhost ;;
         *) echo "$ONIONPRESS_BIND_HOST" ;;
     esac
+}
+
+# Where WordPress answers now: the configured host once a start has seen it
+# installed, else this machine only (the port is on 127.0.0.1 until then,
+# issue #464; a LAN URL before setup pointed nowhere, issue #507).
+wp_access_url() {
+    if [ -f "$DATA_DIR/$WP_INSTALLED_MARKER" ]; then
+        echo "http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
+    else
+        echo "http://localhost:${ONIONPRESS_WP_PORT}"
+    fi
+}
+
+# The address line of a start: the address, or what to do for one.
+onion_address_line() {
+    echo "Onion address: ${ONION_ADDR:-none yet (set up the site: onionpress setup)}"
 }
 
 command_exists() {
@@ -696,17 +712,21 @@ prompt_and_validate_wp_password() {
 # Backup passwords are handed over in ONIONPRESS_BACKUP_PASSWORD, never on a
 # command line: other local users can read any process's argv (ps,
 # /proc/<pid>/cmdline) but not its environment. Sets BACKUP_PASS from the
-# first of: $1 (the old positional form; warns), the variable, a line on
-# stdin, a no-echo prompt. Unsets the variable so the commands this script
-# runs don't inherit it; pass it on as ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
+# first of: the variable, a line on stdin, a no-echo prompt. A password
+# given as an argument ($1: the old positional form of backup, restore,
+# scrub and `setup --from-backup`) is refused, exit 2 (issue #504: a leaked
+# child kept one in ps until reboot). Unsets the variable so the commands
+# this script runs don't inherit it; pass it on as
+# ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
 # Identical in app/MacOS/onionpress and linux/onionpress (test-enforced).
 read_backup_password() {
     BACKUP_PASS="${ONIONPRESS_BACKUP_PASSWORD:-}"
     unset ONIONPRESS_BACKUP_PASSWORD
     if [ -n "${1:-}" ]; then
-        echo "WARNING: a password on the command line is visible to other users of this computer. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
-        BACKUP_PASS="$1"
-    elif [ -z "$BACKUP_PASS" ]; then
+        echo "ERROR: a password on the command line is visible to other users of this computer, so it is refused. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
+        exit 2
+    fi
+    if [ -z "$BACKUP_PASS" ]; then
         if [ -t 0 ]; then
             read -r -s -p "Backup password: " BACKUP_PASS || true
             echo "" >&2
@@ -731,7 +751,10 @@ run_setup() {
             --from-backup)
                 # `--from-backup <zip>`: the password as backup and restore
                 # take it (ONIONPRESS_BACKUP_PASSWORD, stdin, a prompt). The
-                # old `--from-backup <password> <zip>` still works, warned.
+                # old `--from-backup <password> <zip>` is refused by
+                # read_backup_password (never taken for a zip path).
+                # The setup is then the restore (issue #509), so a hub's
+                # recovery key goes along as the restore case passes it.
                 if [ $# -ge 3 ] && [ "${3#-}" = "$3" ]; then
                     read_backup_password "${2:-}"
                     args+=(--from-backup "$3")
@@ -746,7 +769,7 @@ run_setup() {
         esac
     done
     ONIONPRESS_SETUP_PASSWORD="$setup_pass" ONIONPRESS_IA_PASSWORD="$ia_pass" \
-        ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
+        ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
         op_py --data-dir "$DATA_DIR" setup --launcher "$INSTALL_DIR/onionpress" "${args[@]}"
 }
 
@@ -946,9 +969,10 @@ HELPEOF
         printf '%s\n' "$REPLACE_KEY_KEPT" | sed 's/^/  /'
     fi
     echo ""
-    echo "Run 'onionpress restart' to use this address."
-    # Back on: it waits for Tor to serve the new key, and loads that one.
-    start_heartbeat_client
+    echo "Run 'onionpress restart' to use this address (it starts the heartbeat client again)."
+    # Not started here: the unit Wants= onionpress.service, so starting it
+    # would start the whole stack the line above says to restart (#507);
+    # the restart's end starts it, where it is enabled.
     return 0
 }
 
@@ -1176,71 +1200,15 @@ print(json.dumps({"reset": True, **reset_onionheaven()}))
 ' 2>>"$LOG_FILE"
 }
 
-# ─── OnionHeaven lazy activation ──────────────────────────────────────
+# ─── OnionHeaven on a hub ─────────────────────────────────────────────
 #
-# The activation flag marks a hub. web-server.py writes it once it knows the
-# node is one (canonical hub address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes)
-# and removes it on every other node; registrations no longer write it.
-
-ONIONHEAVEN_WATCHER_PID=""
-
-start_onionheaven_activation_watcher() {
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
-        log "OnionHeaven container already running"
-    fi
-
-    # If the activation flag already exists (this node is a hub), start immediately.
-    local activate_flag
-    activate_flag=$(docker exec onionpress-tor cat /var/lib/onionheaven/activate 2>/dev/null) || true
-    if [ -n "$activate_flag" ]; then
-        log "OnionHeaven activation flag found — starting heartbeat container"
-        _activate_onionheaven
-    fi
-
-    if [ -z "$activate_flag" ]; then
-        log "OnionHeaven: no activation flag — not a hub (the heartbeat monitor stays idle)"
-    fi
-
-    # Start persistent watcher — monitors the activation flag and restarts
-    # the onionheaven container if it goes down on a hub.
-    _onionheaven_activation_watcher &
-    ONIONHEAVEN_WATCHER_PID=$!
-}
-
-_onionheaven_activation_watcher() {
-    # Disable errexit — this runs as a background function and any transient
-    # docker failure would silently kill the entire watcher loop (bash 4+).
-    set +e
-    # Persistent loop: poll for the activation flag every 30s.
-    # If the flag exists but the onionheaven container is not running,
-    # restart it.  This handles the case where the container was stopped
-    # externally (e.g., by a test cleanup).
-    while true; do
-        sleep 30
-        local flag
-        flag=$(docker exec onionpress-tor cat /var/lib/onionheaven/activate 2>/dev/null) || true
-        if [ -n "$flag" ]; then
-            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
-                log "OnionHeaven activation flag detected — starting heartbeat container"
-                _activate_onionheaven
-            fi
-        fi
-    done
-}
-
-_activate_onionheaven() {
-    cd "$DOCKER_DIR"
-    docker compose up -d onionheaven >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
-    # Takeover container management is now handled by the heartbeat inside onionheaven
-}
-
-stop_onionheaven_activation_watcher() {
-    if [ -n "$ONIONHEAVEN_WATCHER_PID" ] && kill -0 "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null; then
-        kill "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null || true
-        wait "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null || true
-        ONIONHEAVEN_WATCHER_PID=""
-    fi
-}
+# The onionheaven container is a core service (containers.CORE_SERVICES,
+# `restart: unless-stopped`, under autoheal): every start brings it up on
+# every node, hub or not, as the Mac's does. This launcher keeps no watcher
+# for it (issue #504: the old 30 s poll, forked from every CLI run, outlived
+# it, one orphan per `restart` or `setup`, each carrying its parent's
+# command line in ps). web-server.py's activation flag is a hint nothing
+# on the host reads.
 # The end of the start, once the core is up (start.post_up, #442.7): Tor,
 # the SOCKS port check, the Cloudflare tunnel (only once WordPress is
 # installed; removed when the token goes), the pinned plugins, the
@@ -1421,11 +1389,6 @@ start_containers() {
     # provisioning and the image rebuild (start_post_up): best effort.
     start_post_up "$wp_installed"
 
-    # OnionHeaven: the API server runs inside the tor container (always on).
-    # On a hub, the watcher keeps the onionheaven container (heartbeat
-    # monitor + takeover Tor) running (signaled by an activation flag file).
-    start_onionheaven_activation_watcher
-
     # Last: the clearnet sees the site once it is provisioned.
     start_cloudflare_tunnel "$wp_installed"
 }
@@ -1462,7 +1425,6 @@ start_cloudflare_tunnel() {
 stop_containers() {
     log "Stopping OnionPress containers..."
     stop_container_log_capture
-    stop_onionheaven_activation_watcher
     stop_onionheaven_farm
     # Capture the offset BEFORE compose-down so the next start can wait
     # for the TIME_WAIT sockets to clear and reuse the same offset.
@@ -1908,11 +1870,36 @@ create_backup() {
         else
             key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
             [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
+            key_volume_cat onionpress-tor-state hidden_service/wordpress/hostname > "$staging/tor-keys/hostname" 2>/dev/null || true
+            [ ! -s "$staging/tor-keys/hostname" ] && rm -f "$staging/tor-keys/hostname"
         fi
     fi
 
-    if [ -z "$(ls -A "$staging/tor-keys/" 2>/dev/null)" ]; then
-        log "WARNING: No Tor keys found — backup will not include keys"
+    # The restore takes the PEM and nothing else. A key Tor minted itself
+    # (a first start that could not seed one, issue #519) exists only in C
+    # Tor's form: derive the PEM from it, as the Mac's backup does; no key
+    # at all is no backup, not an archive no restore accepts.
+    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] \
+       && [ -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
+        if python3 "$SCRIPTS_DIR/key_manager.py" ctor-to-arti "$staging/tor-keys" >>"$LOG_FILE" 2>&1 \
+           && [ -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
+            log "Backup: onion service key PEM derived from C Tor's key files"
+        else
+            log "WARNING: could not derive the onion service key PEM from C Tor's key files"
+        fi
+    fi
+    rm -f "$staging/tor-keys/hostname"
+    # No key at all: the archive says so (metadata excludes_onion_key, as
+    # the Mac page's backup does), and a restore keeps the install's own
+    # key and address; an archive with no PEM and no such word failed
+    # every restore ("Backup is missing ks_hs_id.ed25519_expanded_private").
+    local keyless_backup=no
+    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
+        keyless_backup=yes
+        rm -rf "$staging/tor-keys"
+        mkdir -p "$staging/tor-keys"
+        log "WARNING: Backup: no onion service key could be read (the PEM in onionpress-onion-keys, or C Tor's key in onionpress-tor-state): this backup carries none, and a restore of it keeps the key and address of the install it is restored onto"
+        echo "WARNING: No onion service key could be read: this backup carries none (a restore of it keeps the target install's address). See $LOG_FILE." >&2
     fi
 
     # The healthcheck onion service's key is never backed up, as on the
@@ -2026,6 +2013,7 @@ create_backup() {
     [ "$excludes_derivatives" = "true" ] && meta_flags+=(--excludes-image-derivatives)
     [ "$hub_unchecked" = "true" ] && meta_flags+=(--hub-unchecked)
     [ "$with_host_secrets" = "no" ] && meta_flags+=(--without-host-secrets)
+    [ "$keyless_backup" = "yes" ] && meta_flags+=(--excludes-onion-key)
     if ! op_py --data-dir "$DATA_DIR" backup-metadata \
             --onion-address "$onion_addr" --version "$ONIONPRESS_VERSION" \
             --hub-fields "$hub_fields" --secrets-left-out "$secrets_left_out" \
@@ -3429,14 +3417,14 @@ main() {
             write_status
 
             log "OnionPress is running!"
-            log "Onion address: $ONION_ADDR"
-            log "Local access: http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
+            log "$(onion_address_line)"
+            log "Local access: $(wp_access_url)"
 
             echo ""
             echo "OnionPress is running!"
-            echo "  Onion address: $ONION_ADDR"
-            echo "  Local access:  http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
-            echo "  Status page:   http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status"
+            echo "  $(onion_address_line)"
+            echo "  Local access:  $(wp_access_url)"
+            echo "  Status page:   $(wp_access_url)/onionpress-status"
             echo "  Logs:          $LOG_FILE"
 
             # Keep main process alive so systemd (KillMode=control-group)
@@ -3514,7 +3502,9 @@ main() {
             # Usage: onionpress setup [--user USER] [--pass PASS] [--title TITLE]
             #        onionpress setup --from-backup <backup.zip>   (password: ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt)
             # The install the setup window makes (run_setup); a backup's
-            # setup restarts the stack so the start installs its key.
+            # setup is the restore (issue #509: the backup's site, never a
+            # fresh one under temporary credentials), then a restart so
+            # the start provisions the restored site.
             setup_db_passwords
             cd "$DOCKER_DIR"
             shift  # remove "setup" from args
@@ -3600,6 +3590,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         import-key)
+            # The stop inside runs compose: with the DB passwords, or it
+            # warns about every missing one (issue #507).
+            setup_db_passwords
             import_key "${@:2}"
             ;;
 
@@ -3661,7 +3654,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
         backup)
             # backup [-o|--output <path>] [--check] [--json] [--user <login>];
             # the password comes from read_backup_password. The old `backup
-            # <password> [output_path]` still works. --check is the
+            # <password> [output_path]` is refused (issue #504). --check is the
             # check/confirm protocol's (onionpress.confirm, issue #375): the
             # shared CLI verifies the password as the owner's and names the
             # file, making no backup; the tray asks that first and then runs
@@ -3730,7 +3723,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
             # the password comes from read_backup_password and goes on to
             # Python in the environment. The old `restore <password>
-            # <backup_file.zip>` still works. The flags are the check/confirm
+            # <backup_file.zip>` is refused. The flags are the check/confirm
             # protocol's (onionpress.confirm): --check answers what the
             # backup is, or {"ask": "password"} without one.
             setup_db_passwords
@@ -4012,8 +4005,8 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # and verify checks.
             #
             # Args forwarded verbatim — "${@:2}" skips this case label
-            # itself. Supports: `onionpress scrub [<wp-admin-password>]
-            # [--clean]`.
+            # itself. Supports: `onionpress scrub [--clean]` (the password
+            # from the environment, stdin or a prompt; one on argv is refused).
             op_py scrub "${@:2}"
             ;;
 

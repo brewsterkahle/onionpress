@@ -373,7 +373,10 @@ class TestSideEffects(unittest.TestCase):
         with open(self.plist, "rb") as f:
             plist = plistlib.load(f)
         self.assertEqual(plist["ProgramArguments"], ["open", "-a", self.bundle])
-        self.assertEqual(plist["Label"], login_item.LAUNCHAGENT_LABEL)
+        # This install's own label (its config's folder is not the account's
+        # ~/.onionpress; issue #505).
+        self.assertEqual(plist["Label"], login_item.launchagent_label(self.dir))
+        self.assertNotEqual(plist["Label"], login_item.LAUNCHAGENT_LABEL)
         self.assertEqual(self.runs, [])
 
         self._write("LAUNCH_ON_LOGIN=no\n")
@@ -551,7 +554,8 @@ class TestCallers(unittest.TestCase):
         menubar = _read("src/menubar.py")
         self.assertNotIn("op_config.write_value(", menubar)
         self.assertNotIn("op_config.write_config(", menubar)
-        self.assertIn('[self.launcher_script, "config", "set", key]', menubar)
+        self.assertIn('args = ["config", "set", key]', menubar)
+        self.assertIn("ui_client.run_confirmed(\n            self.launcher, args, self._ask_cli_question", menubar)
         tray = _read("linux/onionpress-tray")
         self.assertIn('Launcher.run("config", "set", "SHARE_ANALYTICS_WITH_ONIONHOME"', tray)
 
@@ -784,9 +788,9 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="op-menubar-config-")
         src = _read("src/menubar.py")
         tree = ast.parse(src)
-        from onionpress import confirm as op_confirm
+        from onionpress import ui_client
         ns = {"os": os, "subprocess": __import__("subprocess"), "op_config": op_config,
-              "op_confirm": op_confirm}
+              "ui_client": ui_client}
         node = next(n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef) and n.name == "write_config_value")
         exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
@@ -799,6 +803,8 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
         self.app.launcher_script = "/Applications/OnionPress.app/Contents/MacOS/onionpress"
         self.app.lines = []
         self.app.log = self.app.lines.append
+        # The launcher client the menubar runs the command through (#526)
+        self.app.launcher = ui_client.Launcher(self.app.launcher_script, self.app.log)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)

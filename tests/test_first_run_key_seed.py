@@ -216,6 +216,24 @@ class TestLinux(Base):
             "Vanity generation skipped or failed; falling back to random address",
             "No imported key found -- using random onion address"])
         self.assertEqual(docker.volumes, [])
+        # Issue #519: the image is made sure of before generate-vanity looks
+        # for mkp224o in it (a fresh install's first start has pulled
+        # nothing yet, and "no image" read as "no mkp224o").
+        self.assertIn(["image", "inspect", "--format", "{{.Id}}", PIN], docker.calls)
+
+    def test_a_first_run_pulls_the_tor_image_before_generating(self):
+        docker = FakeDocker(fail=("image inspect",))
+        with mock.patch.object(start, "run_cli_step", return_value=1) as step:
+            self.assertTrue(self.seed(docker, False))
+        pull = next(i for i, c in enumerate(docker.calls) if c[:2] == ["pull", PIN])
+        self.assertLess(pull, len(docker.calls))
+        step.assert_called_once()
+        self.assertEqual(step.call_args.args[0], ["generate-vanity"])
+        # The pull failed here (inspect fails after it too): a warning,
+        # and the vanity step is still attempted, as before.
+        self.assertIn("WARNING: the tor image could not be pulled; the address will not "
+                      "carry the prefix", self.lines)
+        self.assertEqual(docker.volumes, [])
 
     def test_the_key_is_resynced_every_start_and_c_tor_gets_its_files(self):
         self.key()

@@ -78,21 +78,26 @@ def normalize_get_url(url: str) -> str:
     return s
 
 
-def read_backup_password(positional: str | None = None) -> str:
-    """The password for `backup` / `restore`, or "" if none was given.
+PASSWORD_ON_ARGV_MSG = ("ERROR: a password on the command line is visible to other "
+                        "users of this computer, so it is refused. Leave it out to "
+                        f"be prompted, or set {BACKUP_PASSWORD_ENV}.")
 
-    Taken from the first of: the old positional argument (with a warning:
-    argv is readable by every local user), $ONIONPRESS_BACKUP_PASSWORD (how
-    the launchers, menubar and tray pass it), a line on stdin when stdin is
-    not a terminal, or a no-echo prompt. The variable is removed from this
-    process's environment so the docker/zip/unzip children don't inherit it.
+
+def read_backup_password(positional: str | None = None) -> str:
+    """The password for `backup` / `restore` / `scrub`, or "" if none was given.
+
+    Taken from the first of: $ONIONPRESS_BACKUP_PASSWORD (how the launchers,
+    menubar and tray pass it), a line on stdin when stdin is not a terminal,
+    or a no-echo prompt. A password given as an argument (the old positional
+    form) is refused, exit 2: argv is readable by every local user, and a
+    leaked child process kept one in ps until reboot (issue #504). The
+    variable is removed from this process's environment so the
+    docker/zip/unzip children don't inherit it.
     """
     from_env = os.environ.pop(BACKUP_PASSWORD_ENV, "")
     if positional:
-        print("WARNING: a password on the command line is visible to other "
-              "users of this computer. Leave it out to be prompted, or set "
-              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
-        return positional
+        print(PASSWORD_ON_ARGV_MSG, file=sys.stderr)
+        raise SystemExit(2)
     if from_env:
         return from_env
     if sys.stdin is None:
@@ -411,7 +416,7 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
         launcher = os.path.join(app_path, "Contents", "MacOS", "onionpress")
 
     def _stop_daemon():
-        if _daemon.daemon_pid(paths.data_dir) or _daemon.agent_loaded_pid()[0]:
+        if _daemon.daemon_pid(paths.data_dir) or _daemon.agent_loaded_pid(paths.data_dir)[0]:
             log("Update: stopping the OnionPress daemon before the bundle swap")
             _daemon.stop_agent(paths.data_dir, log, offline=False)
 
@@ -513,8 +518,15 @@ class OnionPressCLI:
         # Ensure config exists
         ensure_config(self.paths)
 
-        # Detect ports
-        self.port_config = detect_port_offset()
+        # The ports: the launcher's own offset when it says so
+        # (ONIONPRESS_PORT_OFFSET, as the daemon and the start steps read
+        # it), else the bind probe. Beside this install's own running stack
+        # the probe found its ports taken and moved a restore to the next
+        # offset (issue #507).
+        from .config import PortConfig
+        offset = os.environ.get("ONIONPRESS_PORT_OFFSET", "")
+        self.port_config = (PortConfig.from_offset(int(offset)) if offset.isdigit()
+                            else detect_port_offset())
 
         # Build env for Docker
         secrets = ensure_secrets(self.paths.secrets_file)
@@ -803,11 +815,28 @@ class OnionPressCLI:
             except Exception as e:
                 self.log(f"Restore: could not ask the OnionHeaven hub to delete "
                          f"the old key ({e}); continuing")
+        torn_down = False
+
+        def tor_back(why):
+            # A failure past the teardown left the site down with its
+            # containers rebuilt (#508: Linux stayed down until a restart
+            # by hand). Tor comes back, best effort, so the site, however
+            # far the import got, is reachable at its address; the staging
+            # is kept and the next start imports it again (both platforms).
+            self.log(f"Restore: {why}; starting Tor again so the site is reachable "
+                     f"(the site may be incomplete: run the restore again, or start "
+                     f"OnionPress, which imports the kept backup once more)")
+            try:
+                self.containers.start_tor()
+            except Exception as e:
+                self.log(f"Restore: Tor could not be started again: {e}")
+
         try:
             # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
             # the seeded key and imported backup cleanly (no stale keystore
             # overriding the restored identity, no in-place overwrite).
             self.containers.stop()
+            torn_down = True
             # onionpress-arti-state is the key volume's pre-2026-09-25 name;
             # wiping it too keeps the launcher's migration from bringing the
             # replaced identity back. The key volumes stay when the backup
@@ -817,8 +846,10 @@ class OnionPressCLI:
                 "onionpress-tor-state")
             for vol in key_volumes + ("onionpress-db-data", "onionpress-wordpress-data",
                                       "onionpress-persistent-data"):
-                self.docker.run(["volume", "rm", vol], timeout=20)
-                self.log(f"Removed volume: {vol}")
+                # Quiet: a volume that is not there (onionpress-arti-state
+                # on every install since 2026-09-25) is no failure (#507).
+                if self.docker.run(["volume", "rm", vol], timeout=20, quiet=True).ok:
+                    self.log(f"Removed volume: {vol}")
             if keeps_key:
                 self.log(f"Restore: the backup holds no onion service key; "
                          f"this install keeps its key volumes and its address {addr}")
@@ -861,6 +892,7 @@ class OnionPressCLI:
             if self.cmd_import_backup_artifacts(staging, name_registry=False,
                                                 hub_data=hub.get("data")) != 0:
                 self.log("Restore: artifact import failed — staging kept for retry")
+                tor_back("the import did not finish")
                 return 1
             self.containers.start_tor()
             self.containers.wait_for_tor()
@@ -900,6 +932,8 @@ class OnionPressCLI:
             return 0
         except Exception as e:
             self.log(f"Restore failed: {e}")
+            if torn_down:
+                tor_back("the restore failed after the containers were rebuilt")
             return 1
 
     def cmd_import_backup_artifacts(self, staging: str, name_registry: bool = True,
@@ -1881,8 +1915,8 @@ def _run_get(run):
 
 
 # The password is read by read_backup_password (environment, stdin or a
-# prompt). The positional is the old interface, kept so existing scripts
-# still work; it puts the password where other users can see it.
+# prompt). The positional is the old interface, still parsed so that a
+# script using it gets the refusal, not a mis-read argument (issue #504).
 def _add_backup(sub, name):
     p = sub.add_parser(
         name, help="Create a backup",
@@ -2126,13 +2160,11 @@ def _run_scrub(run):
     _cli(run)
     from . import scrub as _scrub
     # As backup's password: the environment (removed at once, so no child
-    # inherits it), the old positional with a warning, else scrub prompts.
+    # inherits it), else scrub prompts; one on argv is refused (#504).
     password = os.environ.pop(BACKUP_PASSWORD_ENV, "") or None
     if run.args.password:
-        print("WARNING: a password on the command line is visible to other "
-              "users of this computer. Leave it out to be prompted, or set "
-              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
-        password = run.args.password
+        print(PASSWORD_ON_ARGV_MSG, file=sys.stderr)
+        return 2
     return _scrub.run_scrub(
         password=password,
         clean=run.args.clean,
@@ -2530,7 +2562,8 @@ def _add_setup(sub, name):
         name,
         help="Set up WordPress from a terminal (the launchers' `setup`): the "
              "install the setup window makes, with the answers given here or "
-             "asked; --from-backup takes a backup's settings and key. "
+             "asked; --from-backup restores the backup's site instead (what "
+             "`restore` does: its key, database and content; issue #509). "
              f"Passwords only in the environment (${{{_SETUP_PASSWORD_ENV}}}, "
              f"${{{_IA_PASSWORD_ENV}}}, ${{{BACKUP_PASSWORD_ENV}}} for the "
              "backup's). Exit 0 done, 2 already installed, 10 the launcher "
@@ -2543,7 +2576,8 @@ def _add_setup(sub, name):
     p.add_argument("--ia-account", default="",
                    help="An archive.org account to keep S3 keys from (Linux's setup)")
     p.add_argument("--from-backup", default="", metavar="BACKUP_ZIP",
-                   help="Set up from this backup (its password in the environment)")
+                   help="Restore this backup's site (its password in the environment; "
+                        "a hub's recovery key as `restore` takes it)")
     p.add_argument("--launcher", default=None,
                    help="The launcher that runs provision-post-install and "
                         "setup-bundled-plugins (default: this install's)")
@@ -2564,12 +2598,20 @@ def _run_setup(run):
         print("WARNING: --email is ignored: the admin's email is set the way the "
               "setup window sets it", file=sys.stderr)
         log("WARNING: setup: --email given and ignored")
+
+    def restore(password, zip_path):
+        # A backup's setup is the restore (issue #509): cmd_restore's
+        # install-from-backup rebuild, OnionPressCLI and all, with the hub
+        # recovery key main() took out of the environment. Only here is
+        # OnionPressCLI constructed for a setup.
+        return _cli(run).cmd_restore(password, zip_path, run.hub_recovery_key)
+
     return setup_logic.setup_from_terminal(
         data_dir=paths.data_dir, mac=mac,
         launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
         docker=Docker(paths), manager=_start_step_manager(paths), user=args.user,
         title=args.title, from_backup=args.from_backup, ia_account=args.ia_account,
-        log=log)
+        log=log, restore=restore)
 
 
 def _add_start_post_up(sub, name):
@@ -2789,6 +2831,9 @@ def _add_backup_metadata(sub, name):
                    help="JSON stage-hub-backup printed (empty for none)")
     p.add_argument("--hub-unchecked", action="store_true")
     p.add_argument("--without-host-secrets", action="store_true")
+    p.add_argument("--excludes-onion-key", action="store_true",
+                   help="No onion service key could be read: the archive carries none "
+                        "and a restore keeps the install's key (issue #519)")
     p.add_argument("--secrets-left-out", default="",
                    help="Space-separated names of the secrets left out")
 
@@ -2810,7 +2855,8 @@ def _run_backup_metadata(run):
         excludes_image_derivatives=a.excludes_image_derivatives,
         hub_fields=hub_fields, hub_unchecked=a.hub_unchecked,
         with_host_secrets=not a.without_host_secrets,
-        secrets_left_out=a.secrets_left_out.split())
+        secrets_left_out=a.secrets_left_out.split(),
+        excludes_onion_key=a.excludes_onion_key)
     print(json.dumps(metadata, indent=2))
     return 0
 

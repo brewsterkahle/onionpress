@@ -41,7 +41,6 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 log Image derivatives: rebuild pending — starting in the background
 docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
-fn start_onionheaven_activation_watcher
 docker container inspect onionpress-cloudflared
 detached py regenerate-derivatives
 rc=0

@@ -96,7 +96,7 @@ class TestStart(_Case):
 
 class TestStopAndRestart(_Case):
     STUBS = ("setup_db_passwords", "stop_heartbeat_client", "start_heartbeat_client",
-             "stop_container_log_capture", "stop_onionheaven_activation_watcher",
+             "stop_container_log_capture",
              "stop_onionheaven_farm", "write_status", "start_containers",
              "wait_for_services", "start_container_log_capture")
 
@@ -208,11 +208,13 @@ class TestBackup(_Case):
         self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
                          {"ok": True, "output": "/b/x.zip"})
 
-    def test_the_old_positional_password_and_path(self):
+    def test_the_old_positional_password_is_refused(self):
+        # Issue #504: nothing runs, the message names no password.
         r = self.l.run("backup", "oldpw", "/b/y.zip")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("fn create_backup oldpw /b/y.zip", self.l.calls())
-        self.assertIn("visible to other users", r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("create_backup", self.l.fn_calls())
+        self.assertIn("refused", r.stderr)
+        self.assertNotIn("oldpw", r.stderr + r.stdout)
 
     def test_user_equals_reaches_the_check(self):
         r = self.l.run("backup", "--check", "--user=bob", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
@@ -258,11 +260,12 @@ class TestRestore(_Case):
         self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--check", "--json")])
         self.assertNotIn("stop_heartbeat_client", self.l.fn_calls())
 
-    def test_the_old_positional_password(self):
+    def test_the_old_positional_password_is_refused(self):
         r = self.l.run("restore", "oldpw", "/b/x.zip")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip")])
-        self.assertIn("py-env oldpw", self.l.calls())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.l.py_calls(), [])
+        self.assertIn("refused", r.stderr)
+        self.assertNotIn("oldpw", r.stderr + r.stdout)
 
     def test_usage_and_a_missing_password(self):
         r = self.l.run("restore")

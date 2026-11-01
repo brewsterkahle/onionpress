@@ -392,11 +392,41 @@ class TestPostUp(Base):
         self.assertFalse(os.path.exists(staging))
         self.assertIn("Install-from-backup: complete (staging cleaned up)", self.lines)
 
-    def test_install_from_backup_is_the_macs(self):
+    def test_install_from_backup_on_linux_too(self):
+        """#508: a restore that failed past its import keeps the staging on
+        both platforms, and both platforms' starts import it again."""
+        staging = os.path.join(self.data, "staging")
+        os.makedirs(staging)
+        with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
+            f.write(staging + "\n")
+        _, order, _ = self.post_up(False)
+        self.assertIn(f"import-backup-artifacts --staging {staging}", order)
+        self.assertFalse(os.path.isdir(staging))
+
+    def test_the_import_makes_the_site_installed_for_the_rest_of_the_start(self):
+        """#507: start_core read "not installed" before the import put the
+        backup's database in; the image-derivative rebuild gated on that
+        and waited one more start."""
+        staging = os.path.join(self.data, "staging")
+        os.makedirs(staging)
+        with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
+            f.write(staging + "\n")
+        _, order, _ = self.post_up(False, installed=False)
+        self.assertIn(f"import-backup-artifacts --staging {staging}", order)
+        self.assertIn("detached regenerate-derivatives", order)
+        # A failed import changes nothing about it.
+        os.makedirs(staging, exist_ok=True)
+        with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
+            f.write(staging + "\n")
+        _, order, _ = self.post_up(False, installed=False, steps={"import-backup-artifacts": 1})
+        self.assertNotIn("detached regenerate-derivatives", order)
+
+    def test_a_marker_without_its_staging_is_ignored(self):
         with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
             f.write("/nowhere\n")
         _, order, _ = self.post_up(False)
         self.assertFalse([o for o in order if o.startswith("import-backup")])
+        self.assertTrue([m for m in self.lines if "marker present but staging missing" in m])
 
 
 class TestTimezones(Base):
@@ -451,7 +481,8 @@ class TestLaunchers(unittest.TestCase):
         for before in ("after_wordpress_installed", "hold_heartbeat_client_until_installed",
                        "note_if_lan_looks_local"):
             self.assertLess(body.index(before), post, before)
-        self.assertLess(post, body.index("start_onionheaven_activation_watcher"))
+        # Issue #504: no watcher for the onionheaven container (a core service).
+        self.assertNotIn("activation_watcher", text)
 
 
 if __name__ == "__main__":
