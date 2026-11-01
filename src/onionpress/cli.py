@@ -2537,6 +2537,31 @@ def _run_wait_for_services(run):
         return 0
 
 
+def _add_validate_oh_address(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Say whether an onion address is usable as this install's "
+             "OnionHeaven hub (the Settings dialog's check): JSON with "
+             "valid, status (invalid_format | self | hub | site | unreachable) "
+             "and message; exit 1 for invalid_format and self")
+    p.add_argument("address", nargs="?", default="", help="The hub's onion address")
+
+
+def _run_validate_oh_address(run):
+    # The launchers' _validate_oh_address() (issue #529): the probes run
+    # in the onionheaven container; no OnionPressCLI (the dialog asks
+    # this beside a live stack). The JSON is the whole answer.
+    from .onionheaven import validate_hub_address
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    try:
+        answer = validate_hub_address(run.args.address, Docker(paths), paths.data_dir)
+    except Exception as e:
+        answer = {"valid": True, "status": "unreachable",
+                  "message": f"Could not check this address: {e}"}
+    print(json.dumps(answer, separators=(",", ":")))
+    return 0 if answer["valid"] else 1
+
+
 def _add_is_onionheaven_hub(sub, name):
     p = sub.add_parser(
         name,
@@ -3042,6 +3067,7 @@ _COMMANDS = [
     ("install-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("setup-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),
+    ("validate-oh-address", _add_validate_oh_address, _run_validate_oh_address),
     ("using-local-images",
      _plain("Exit 0 when the stack points at images built on this machine "
             "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "

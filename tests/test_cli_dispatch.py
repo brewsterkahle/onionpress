@@ -471,6 +471,14 @@ ROWS = [
     Row("launcher-env", ["launcher-env"], "ports.resolve_at_start",
         mock.call(D(""), preset="10000", docker=ANY, log=ANY), rc=0,
         returns=ports.PortConfig.from_offset(10000), env={"ONIONPRESS_PORT_OFFSET": "10000"}),
+    # #529: the launchers' _validate_oh_address() is onionheaven's; the
+    # JSON is the answer, exit 1 for a refused address.
+    Row("validate-oh-address", ["validate-oh-address", ONION], "onionheaven.validate_hub_address",
+        mock.call(ONION, ANY, D("")), rc=0,
+        returns={"valid": True, "status": "hub", "message": "Valid OnionHeaven hub."}),
+    Row("validate-oh-address", ["validate-oh-address", "x"], "onionheaven.validate_hub_address",
+        mock.call("x", ANY, D("")), rc=1,
+        returns={"valid": False, "status": "invalid_format", "message": "no"}),
     Row("open-login", ["open-login", "http://localhost:8080/wp-admin/"], "launcher_ops.open_login",
         mock.call("http://localhost:8080/wp-admin/"), rc=0, returns=None),
     Row("verify-admin-password", ["verify-admin-password"], "backup.verify_wp_admin_password_any",

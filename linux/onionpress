@@ -1073,61 +1073,6 @@ daemon_offline() {
 
 # ─── Main ─────────────────────────────────────────────────────────────
 
-# ─── Validate OnionHeaven address ─────────────────────────────────────
-# Returns JSON: {"valid":true/false, "status":"hub"|"site"|"unreachable"|"self"|"invalid_format", "message":"..."}
-# Called by: WordPress settings page
-_validate_oh_address() {
-    local addr="$1"
-
-    # Format check: the whole value, as is_onion_address does. This was a
-    # length of 62 and `echo | grep '\.onion$'`, which tests each line on
-    # its own and passed any 62 characters ending in ".onion" (a clearnet
-    # host and path included) on to curl.
-    if ! is_onion_address "$addr"; then
-        echo '{"valid":false,"status":"invalid_format","message":"Address must be a valid 56-character .onion address."}'
-        return 1
-    fi
-
-    # Self check — compare against our own address
-    local our_address=""
-    our_address=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-    if [ -n "$our_address" ] && [ "$addr" = "$our_address" ]; then
-        echo '{"valid":false,"status":"self","message":"You cannot use your own onion address as the OnionHeaven hub."}'
-        return 1
-    fi
-
-    # Probe the OnionHeaven API endpoint (:8083/status)
-    local api_result
-    api_result=$(docker exec onionheaven curl -s --max-time 30 \
-        --socks5-hostname 127.0.0.1:9050 \
-        "http://${addr}:8083/status" 2>/dev/null) || true
-
-    if [ -n "$api_result" ] && echo "$api_result" | grep -q '"version"'; then
-        # Every node answers /status, but only a hub accepts registrations.
-        # Images from before that gate omit the field; they took them all.
-        if echo "$api_result" | grep -q '"accepting_registrations": *false'; then
-            echo '{"valid":true,"status":"site","message":"This address runs OnionPress but is not an OnionHeaven hub, so it will refuse registrations."}'
-            return 0
-        fi
-        echo '{"valid":true,"status":"hub","message":"Valid OnionHeaven hub."}'
-        return 0
-    fi
-
-    # API didn't respond — try the base address (port 80)
-    local http_code
-    http_code=$(docker exec onionheaven curl -s --max-time 30 \
-        -o /dev/null -w "%{http_code}" \
-        --socks5-hostname 127.0.0.1:9050 \
-        "http://${addr}/" 2>/dev/null) || true
-
-    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ]; then
-        echo '{"valid":true,"status":"site","message":"This address is reachable but is not running OnionHeaven yet."}'
-        return 0
-    fi
-
-    echo '{"valid":true,"status":"unreachable","message":"Could not reach this address over Tor. It may be offline or invalid."}'
-    return 0
-}
 
 # ─── `onionpress update`: a released package, checked ─────────────────
 
@@ -1853,7 +1798,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         validate-oh-address)
-            _validate_oh_address "$2"
+            # The Settings dialog's hub check (onionheaven.validate_hub_address,
+            # issue #529): JSON on stdout, exit 1 for a malformed or own address.
+            op_py --data-dir "$DATA_DIR" validate-oh-address "${2:-}"
             ;;
 
         upload-analytics)
