@@ -1310,7 +1310,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
                          f"{self.paths.config_file} to use the closest valid prefix.")
             return 2
 
-        if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE):
+        if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE, docker=self.docker):
             self.log("Tor image is missing or has no mkp224o; "
                      "skipping vanity generation")
             return 3
@@ -1323,6 +1323,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
             addr = generate_vanity_in_container(
                 prefix=prefix,
                 vanity_dir=vanity_dir,
+                docker=self.docker,
                 log_func=self.log,
             )
         finally:

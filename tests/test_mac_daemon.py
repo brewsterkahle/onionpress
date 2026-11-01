@@ -166,9 +166,16 @@ class FakeDocker:
                 return DockerResult(returncode=rc, stdout=text, stderr="")
         return DockerResult(returncode=1, stdout="", stderr="no such answer")
 
-    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False):
+    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
+            binary=False):
         self.calls.append((list(str(a) for a in args), input))
         return self._answer(args)
+
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """A real subprocess.Popen on this fake's binary and environment:
+        the log capture tests patch subprocess.Popen and read its argv."""
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
 
     def exec(self, container, command, timeout=30, check=False, input=None,
              quiet=False, user=None, extra_env=None):

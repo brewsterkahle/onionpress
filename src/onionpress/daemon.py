@@ -714,7 +714,7 @@ class Daemon(PortAttributes):
         except (OSError, ValueError):
             pass
         try:
-            pc = op_config.resolve_port_offset()
+            pc = op_config.resolve_port_offset(self._docker)
         except Exception as e:
             self.log(f"daemon: port detection failed ({e}); using the environment's offset")
             pc = op_config.PortConfig.from_offset(self.port_offset)
@@ -735,7 +735,7 @@ class Daemon(PortAttributes):
         """After the stack came up: the port Docker actually published,
         which can differ from the start-time snapshot (a stop/start that
         raced another process's allocation)."""
-        running_port = launcher_ops.get_running_wp_port()
+        running_port = launcher_ops.get_running_wp_port(self._docker)
         if running_port is None or running_port == self.wp_port:
             return
         pc = op_config.PortConfig.from_offset(running_port - 8080)
@@ -1699,10 +1699,10 @@ class Daemon(PortAttributes):
         if self.web_log_process is not None:
             return
         try:
-            self.web_log_process = subprocess.Popen(
-                [self._docker.docker_bin, "logs", "-f", "--tail", "100", "onionpress-wordpress"],
+            self.web_log_process = self._docker.popen(
+                ["logs", "-f", "--tail", "100", "onionpress-wordpress"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding="utf-8", errors="replace", env=self._docker.env)
+                encoding="utf-8", errors="replace")
             self.web_log_thread = threading.Thread(
                 target=self._web_log_reader_thread, args=(self.web_log_process,), daemon=True)
             self.web_log_thread.start()
@@ -1746,12 +1746,10 @@ class Daemon(PortAttributes):
         self._capture_supervisor_thread.start()
 
     def _capture_supervisor_loop(self):
-        docker_bin = self._docker.docker_bin
-        docker_env = self._docker.env
         logs_dir = os.path.join(self.app_support, "logs")
         while not self._capture_shutdown.is_set():
             try:
-                running = self._docker_ps_names(docker_bin, docker_env)
+                running = self._docker_ps_names()
                 desired = {}
                 specs = self._capture_specs()
                 for name in running:
@@ -1768,43 +1766,43 @@ class Daemon(PortAttributes):
                     entry = self._container_log_processes.get(container_name)
                     if entry is not None and entry["thread"].is_alive():
                         continue
-                    self._launch_capture_worker(container_name, rotating_log, docker_bin, docker_env)
+                    self._launch_capture_worker(container_name, rotating_log)
             except Exception as e:
                 self.log(f"Capture supervisor: {e}")
             self._capture_shutdown.wait(60)
 
-    def _docker_ps_names(self, docker_bin, docker_env):
+    def _docker_ps_names(self):
+        """The names `docker ps` shows (through the runner), or an empty
+        set when it did not answer."""
         try:
-            result = subprocess.run([docker_bin, "ps", "--format", "{{.Names}}"],
-                                    capture_output=True, text=True, encoding="utf-8",
-                                    errors="replace", timeout=10, env=docker_env)
+            result = self._docker.run(["ps", "--format", "{{.Names}}"], timeout=10, quiet=True)
         except Exception:
             return set()
-        if result.returncode != 0:
+        if not result.ok:
             return set()
         return {n.strip() for n in result.stdout.split() if n.strip()}
 
-    def _launch_capture_worker(self, container_name, rotating_log, docker_bin, docker_env):
+    def _launch_capture_worker(self, container_name, rotating_log):
         entry = {"thread": None, "proc": None, "last_ts": None}
         self._container_log_processes[container_name] = entry
         worker = threading.Thread(target=self._capture_worker,
-                                  args=(container_name, rotating_log, docker_bin, docker_env),
+                                  args=(container_name, rotating_log),
                                   daemon=True, name=f"capture-{container_name}")
         entry["thread"] = worker
         worker.start()
 
-    def _capture_worker(self, container_name, rotating_log, docker_bin, docker_env):
+    def _capture_worker(self, container_name, rotating_log):
         while not self._capture_shutdown.is_set():
             entry = self._container_log_processes.get(container_name)
             if entry is None:
                 return
             last_ts = entry.get("last_ts")
-            cmd = [docker_bin, "logs", "-f"]
+            cmd = ["logs", "-f"]
             cmd += ["--since", last_ts] if last_ts else ["--tail", "100"]
             cmd.append(container_name)
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                        text=True, encoding="utf-8", errors="replace", env=docker_env)
+                proc = self._docker.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          text=True, encoding="utf-8", errors="replace")
             except Exception:
                 time.sleep(10)
                 continue
@@ -1822,7 +1820,7 @@ class Daemon(PortAttributes):
                     proc.kill()
                 except Exception:
                     pass
-            if container_name not in self._docker_ps_names(docker_bin, docker_env):
+            if container_name not in self._docker_ps_names():
                 self._container_log_processes.pop(container_name, None)
                 return
             time.sleep(5)

@@ -11,8 +11,11 @@ in callers.
 Operations:
 - open_in_browser(url, prefer_tor)         — launch via xdg-open / open / torbrowser-launcher
 - login_target(base_url) / open_login(...) — auto-login without the token in any argv
-- tor_image_has_mkp224o(image)             — verify the tor image bundles mkp224o
+- tor_image_has_mkp224o(image, docker=…)   — verify the tor image bundles mkp224o
 - generate_vanity_in_container(...)        — docker run mkp224o, write to vanity-keys/
+
+Every docker call goes through the caller's onionpress.docker.Docker (issue
+#477): the functions below take it as *docker*.
 - get_admin_password(data_dir)             — read ~/.onionpress/wp-admin-password
 - run_launcher_restore(...)                — `onionpress restore`, and why it failed
 """
@@ -215,20 +218,17 @@ def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
         raise RuntimeError(f"failed to launch browser ({cmd[0]}): {e}") from e
 
 
-def tor_image_has_mkp224o(image: str = DEFAULT_TOR_IMAGE, docker=None) -> bool:
+def tor_image_has_mkp224o(image: str = DEFAULT_TOR_IMAGE, *, docker) -> bool:
     """Return True iff the tor container image is pulled AND contains mkp224o.
 
     Verifies via a `docker run --rm --entrypoint test` probe so we don't
     fall through to attempting vanity generation on an older image that
     predates the mkp224o build stage. Through *docker* (an
-    onionpress.docker.Docker: the status writer's, a test's fake) when
-    given, else `docker` from PATH.
+    onionpress.docker.Docker: the status writer's, the CLI's, a test's
+    fake).
     """
     def returncode(args, timeout):
-        if docker is not None:
-            return docker.run(args, timeout=timeout, quiet=True).returncode
-        return subprocess.run(["docker", *args], capture_output=True,
-                              timeout=timeout).returncode
+        return docker.run(args, timeout=timeout, quiet=True).returncode
 
     if returncode(["image", "inspect", image], 15) != 0:
         return False
@@ -245,6 +245,7 @@ def generate_vanity_in_container(
     prefix: str,
     vanity_dir: str,
     *,
+    docker,
     image: str = DEFAULT_TOR_IMAGE,
     jobs: Optional[int] = None,
     log_func=None,
@@ -254,7 +255,9 @@ def generate_vanity_in_container(
     Writes the key bundle into `vanity_dir/<addr>.onion/`. Returns the
     address (basename of the dir, including `.onion`) on success, None on
     failure. Caller is responsible for ensuring the dir is empty first if
-    a fresh key is required.
+    a fresh key is required. The container runs through *docker* (an
+    onionpress.docker.Docker), with no time limit: the search's length
+    depends on the prefix.
     """
     # Single source of truth — see config.validate_address_prefix(). This
     # used to be a bare `2 <= len(prefix) <= 6`, which allowed a 6-character
@@ -292,7 +295,7 @@ def generate_vanity_in_container(
     # create directory ... for key output" without it); nothing else. The
     # new key needs no network, and gets none.
     cmd = [
-        "docker", "run", "--rm", "--network", "none",
+        "run", "--rm", "--network", "none",
         "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE",
         "--security-opt", "no-new-privileges:true",
         "-v", f"{vanity_dir}:/out",
@@ -300,7 +303,7 @@ def generate_vanity_in_container(
         image,
         "-n", "1", "-j", str(jobs), "-d", "/out", prefix,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = docker.run(cmd, timeout=None, quiet=True)
     if log_func and proc.stdout:
         for line in proc.stdout.splitlines():
             log_func(f"mkp224o: {line}")

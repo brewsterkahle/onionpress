@@ -6,7 +6,6 @@ or, once our stack runs, read from the WordPress container's published port.
 """
 
 import socket
-import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
@@ -66,8 +65,10 @@ class PortAttributes:
         return self.ports.proxy_port
 
 
-def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int]:
-    """Read the host port our own WordPress container actually published.
+def get_running_wp_port(docker, container: str = "onionpress-wordpress") -> Optional[int]:
+    """Read the host port our own WordPress container actually published,
+    through *docker* (an onionpress.docker.Docker: the caller's runner, so
+    the lookup asks the daemon the rest of the app talks to).
 
     `detect_port_offset()` binds candidate ports to find one that's free —
     correct for allocation at first launch, wrong as a runtime lookup: once
@@ -84,14 +85,8 @@ def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int
     another user's — Docker containers are per-user via the docker socket
     each user's Colima VM exposes, so there is no cross-user leakage here).
     """
-    try:
-        result = subprocess.run(
-            ["docker", "port", container, "80"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        return None
-    if result.returncode != 0:
+    result = docker.run(["port", container, "80"], timeout=10, quiet=True)
+    if not result.ok:
         return None
     # Expected output: "0.0.0.0:8080" or "127.0.0.1:8080" (one line per
     # bound address; take the first).
@@ -144,8 +139,9 @@ def detect_port_offset() -> PortConfig:
         offset += 10000
 
 
-def resolve_port_offset() -> PortConfig:
-    """Return the port offset our own stack is actually using.
+def resolve_port_offset(docker) -> PortConfig:
+    """Return the port offset our own stack is actually using (the
+    running container's published port read through *docker*).
 
     detect_port_offset() allocates: it binds candidate ports and returns
     the first free one, which is correct before anything is running. Once
@@ -161,7 +157,7 @@ def resolve_port_offset() -> PortConfig:
     (e.g. a first-launch check before anything of ours exists) should call
     detect_port_offset() directly instead.
     """
-    running_port = get_running_wp_port()
+    running_port = get_running_wp_port(docker)
     if running_port is not None:
         return PortConfig.from_offset(running_port - 8080)
     return detect_port_offset()

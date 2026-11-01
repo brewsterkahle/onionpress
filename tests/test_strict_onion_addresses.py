@@ -584,8 +584,8 @@ class TestNativeMessagingHostAddress(unittest.TestCase):
     def test_get_onion_address(self):
         for content, want in [(SITE + "\n", SITE)] + [(v, None) for v in LOOSE]:
             with self.subTest(content=content), \
-                    mock.patch.object(native_messaging_host.subprocess, "run",
-                                      _Recorder(content)):
+                    mock.patch.object(native_messaging_host, "_docker",
+                                      return_value=FakeDocker(_Recorder(content))):
                 self.assertEqual(native_messaging_host.get_onion_address(), want)
 
 

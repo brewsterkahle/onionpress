@@ -15,7 +15,6 @@ import json
 import os
 import re
 import struct
-import subprocess
 import sys
 import time
 
@@ -61,13 +60,9 @@ def get_onion_address():
     well-formed v3 address, else None."""
     try:
         # Try reading from the hostname file via docker
-        docker_bin = _find_docker()
-        env = _docker_env()
-        result = subprocess.run(
-            [docker_bin, "exec", "onionpress-tor", "cat", HOSTNAME_FILE],
-            capture_output=True, text=True, timeout=5, env=env
-        )
-        if result.returncode == 0:
+        result = _docker().run(["exec", "onionpress-tor", "cat", HOSTNAME_FILE],
+                               timeout=5, quiet=True)
+        if result.ok:
             addr = result.stdout.strip()
             if ONION_ADDRESS_RE.fullmatch(addr):
                 return addr
@@ -79,14 +74,9 @@ def get_onion_address():
 def is_service_running():
     """Check if OnionPress containers are running."""
     try:
-        docker_bin = _find_docker()
-        env = _docker_env()
-        result = subprocess.run(
-            [docker_bin, "ps", "--filter", "name=onionpress-tor",
-             "--format", "{{.State}}"],
-            capture_output=True, text=True, timeout=5, env=env
-        )
-        return result.returncode == 0 and "running" in result.stdout.lower()
+        result = _docker().run(["ps", "--filter", "name=onionpress-tor",
+                                "--format", "{{.State}}"], timeout=5, quiet=True)
+        return result.ok and "running" in result.stdout.lower()
     except Exception:
         return False
 
@@ -104,14 +94,10 @@ def get_proxy_port():
     if env_port.isdigit():
         return int(env_port)
     try:
-        result = subprocess.run(
-            [_find_docker(), "port", "onionpress-wordpress", "80"],
-            capture_output=True, text=True, timeout=5, env=_docker_env()
-        )
+        result = _docker().run(["port", "onionpress-wordpress", "80"], timeout=5, quiet=True)
     except Exception:
         return DEFAULT_PROXY_PORT
-    return proxy_port_from_docker_port(result.stdout) if result.returncode == 0 \
-        else DEFAULT_PROXY_PORT
+    return proxy_port_from_docker_port(result.stdout) if result.ok else DEFAULT_PROXY_PORT
 
 
 def proxy_port_from_docker_port(output):
@@ -152,38 +138,19 @@ def write_extension_marker(browser):
         return False
 
 
-def _find_app_bundle():
-    """Walk up from this file to find the enclosing .app bundle."""
-    current = os.path.dirname(os.path.abspath(__file__))
-    for _ in range(10):
-        if current.endswith(".app") and os.path.isdir(os.path.join(current, "Contents", "MacOS")):
-            return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    return None
-
-
-def _find_docker():
-    """Find the docker binary."""
-    # Prefer the bundled docker in the app bundle
-    bundle = _find_app_bundle()
-    if bundle:
-        app_docker = os.path.join(bundle, "Contents", "Resources", "bin", "docker")
-        if os.path.exists(app_docker):
-            return app_docker
-    # Fall back to PATH
-    return "docker"
-
-
-def _docker_env():
-    """Return environment dict for docker commands."""
-    env = os.environ.copy()
-    colima_home = os.path.join(APP_SUPPORT, "colima")
-    env["DOCKER_HOST"] = f"unix://{colima_home}/default/docker.sock"
-    env["DOCKER_CONFIG"] = os.path.join(APP_SUPPORT, "docker-config")
-    return env
+def _docker():
+    """The app's docker runner (onionpress.docker.Docker over
+    resolve_paths(): the bundle's binary when there is one, this user's
+    Colima socket and docker config), built per call. The browser starts
+    this script by its path, outside the package, so the package's parent
+    folder goes on sys.path first; the runner and platform modules need
+    only the standard library."""
+    package_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if package_parent not in sys.path:
+        sys.path.insert(0, package_parent)
+    from onionpress.docker import Docker
+    from onionpress.platform import resolve_paths
+    return Docker(resolve_paths(data_dir=APP_SUPPORT))
 
 
 def handle_message(msg):

@@ -79,7 +79,8 @@ class FakeDocker:
         self.calls = []
         self.cp_target = None          # what `docker cp` leaves at the copy
         self.head_limits = []          # (file, bytes) of every bounded read
-        # The hand-off runs `docker exec -i` itself, on this binary.
+        # The hand-off runs `docker exec -i` through the runner's popen, on
+        # this binary.
         self.docker_bin = os.path.join(sandbox, "docker")
         with open(self.docker_bin, "w") as f:
             f.write('#!/bin/bash\n'
@@ -111,6 +112,12 @@ class FakeDocker:
     def exec(self, container, command, timeout=30, check=False, quiet=False, user=None):
         return self.run(["exec"] + (["-u", user] if user else []) + [container, *command],
                         timeout=timeout, check=check, quiet=quiet)
+
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """The backup hand-off: a real Popen on the stub binary above."""
+        self.calls.append([str(a) for a in args])
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
 
     def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
             binary=False):

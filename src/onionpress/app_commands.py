@@ -232,11 +232,10 @@ def _web_log_from_container(docker, lines, follow, out):
     out, as the daemon's wordpress-visitors capture has it."""
     if follow:
         try:
-            proc = subprocess.Popen(
-                [docker.docker_bin, "logs", "-f", "--tail", str(max(lines, 0)),
-                 WORDPRESS_CONTAINER],
+            proc = docker.popen(
+                ["logs", "-f", "--tail", str(max(lines, 0)), WORDPRESS_CONTAINER],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding="utf-8", errors="replace", env=getattr(docker, "env", None))
+                encoding="utf-8", errors="replace")
         except OSError as e:
             print(f"Could not read the web usage log: {e}", file=sys.stderr)
             return 1
@@ -282,13 +281,13 @@ def logs_command(paths, docker, os_name, kind, *, lines=200, follow=False, out=N
 # open site | admin | settings | onion
 # ---------------------------------------------------------------------------
 
-def wordpress_port():
+def wordpress_port(docker):
     """The published WordPress port: what the launcher exported, else the
-    running stack's (config.resolve_port_offset)."""
+    running stack's (config.resolve_port_offset, through *docker*)."""
     value = os.environ.get("ONIONPRESS_WP_PORT", "")
     if value.isdigit():
         return int(value)
-    return _config.resolve_port_offset().wp_port
+    return _config.resolve_port_offset(docker).wp_port
 
 
 def open_target(what, paths, docker):
@@ -301,7 +300,7 @@ def open_target(what, paths, docker):
         if not addr:
             raise RuntimeError(NO_ADDRESS_MSG)
         return shareable_url(addr, name), True
-    base = f"http://localhost:{wordpress_port()}"
+    base = f"http://localhost:{wordpress_port(docker)}"
     if what == "site":
         return (f"{base}/{name}/" if name else f"{base}/"), False
     if what == "admin":
