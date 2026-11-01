@@ -33,6 +33,7 @@ from .setup_logic import IA_PASSWORD_ENV as _IA_PASSWORD_ENV
 from .setup_logic import SETUP_PASSWORD_ENV as _SETUP_PASSWORD_ENV
 from .analytics_sharing import SHARING_CONFIG_KEY
 from .hub_backup import RECOVERY_KEY_ENV
+from .handle_action import LINUX_LAUNCHER
 from . import confirm as _confirm
 # Domain functions of onionheaven's (uninstall imports them from there),
 # kept under their old names here for the commands and for callers.
@@ -573,12 +574,71 @@ def _update_linux(paths, log, release, current, launcher, *, force, json_output)
         version=release.version, current=current)
 
 
+LINUX_BACKUPS_DIR = os.path.join(os.path.expanduser("~"), "OnionPress", "backups")
+
+
+def offer_backup_before_uninstall(docker, launcher, log, out=None, backups_dir=None):
+    """The Linux uninstall's backup offer at a terminal (the bash case's):
+    a backup first unless declined, the WordPress admin password asked and
+    checked (three tries) before anything destructive, the file in
+    ~/OnionPress/backups; with the containers down, the choice to go on
+    without one. (go_on, backup_path): a failed or declined step keeps
+    the install untouched (go_on False)."""
+    from .scrub import _prompt_and_validate_wp_password
+    out = out or sys.stdout
+    try:
+        choice = input("Create a backup before uninstalling? [Y/n] ")
+    except (EOFError, KeyboardInterrupt):
+        choice = "n"
+    if choice.strip().lower() in ("n", "no"):
+        return True, ""
+    if not docker.container_running("onionpress-wordpress"):
+        print("Containers are not running — cannot create backup.", file=out)
+        print("Start OnionPress first, or skip backup.", file=out)
+        print("", file=out)
+        try:
+            skip = input("Continue without backup? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            skip = ""
+        if skip.strip().lower() not in ("y", "yes"):
+            print("Cancelled.", file=out)
+            return False, ""
+        return True, ""
+    password = _prompt_and_validate_wp_password(
+        None, log=lambda m: print(m, file=out))
+    if not password:
+        print("Cancelled — install untouched.", file=out)
+        return False, ""
+    backups_dir = backups_dir or LINUX_BACKUPS_DIR
+    os.makedirs(backups_dir, exist_ok=True)
+    path = os.path.join(backups_dir, time.strftime("OnionPress-backup-%Y-%m-%d-%H-%M.zip"))
+    env = {**os.environ, BACKUP_PASSWORD_ENV: password}
+    try:
+        rc = subprocess.run([launcher, "backup", "-o", path], env=env, check=False).returncode
+    except OSError as e:
+        log(f"Uninstall: the backup could not be run: {e}")
+        rc = 1
+    if rc != 0:
+        # The password was checked: a different failure (disk full, a
+        # docker hiccup); never an uninstall without the backup.
+        print("Backup failed. Aborting uninstall — install untouched.", file=out)
+        return False, ""
+    print("", file=out)
+    print("IMPORTANT: Copy this file somewhere safe before continuing!", file=out)
+    print(f"  e.g.: scp {getpass.getuser()}@<this machine>:{path} .", file=out)
+    print("", file=out)
+    return True, path
+
+
 def cmd_uninstall(paths, docker, log, launcher, *, check: bool = False,
-                  json_output: bool = False, confirmed=frozenset()) -> int:
-    """`onionpress uninstall` on a Mac (onionpress.uninstall). The questions
-    ("hub-holds-key" when a hub may hold the key and OnionPress is not
-    running, then "uninstall") are answered with --confirmed, or at a
-    terminal here; a non-terminal run without them is refused."""
+                  json_output: bool = False, confirmed=frozenset(),
+                  os_name: str = "macos") -> int:
+    """`onionpress uninstall` (onionpress.uninstall, both platforms since
+    #529). The questions ("hub-holds-key" when a hub may hold the key and
+    OnionPress is not running, then "uninstall") are answered with
+    --confirmed, or at a terminal here; a non-terminal run without them is
+    refused. On Linux a terminal run then offers a backup first (not under
+    ONIONPRESS_YES=true, the launchers' -y: scrub's uninstall)."""
     from . import confirm as _confirm, uninstall as _uninstall
     confirmed = set(confirmed)
     interactive = sys.stdin is not None and sys.stdin.isatty()
@@ -621,14 +681,24 @@ def cmd_uninstall(paths, docker, log, launcher, *, check: bool = False,
             confirmed.add(e.what)
     if check:
         return _confirm.answer_ok(json_output, text="OK: nothing left to ask.", **facts)
+    backup_path = ""
+    if os_name == "linux" and interactive and os.environ.get("ONIONPRESS_YES") != "true":
+        go_on, backup_path = offer_backup_before_uninstall(docker, launcher, log)
+        if not go_on:
+            return 1
     remaining = _uninstall.run(paths, docker, log, launcher,
-                               out=sys.stderr if json_output else sys.stdout)
+                               out=sys.stderr if json_output else sys.stdout, os_name=os_name)
     if not json_output:
-        print("OnionPress has been uninstalled. Move OnionPress.app to the Trash.")
+        print("OnionPress has been uninstalled." + (
+            " Move OnionPress.app to the Trash." if os_name == "macos" else ""))
         if remaining:
             from . import onionheaven
             print("Note: " + onionheaven.describe_remaining(remaining))
-    return _confirm.answer_ok(json_output, remaining=remaining)
+        if backup_path:
+            print(f"\nYour backup is at: {backup_path}")
+            print(f"Use it to restore: onionpress restore {backup_path}")
+    return _confirm.answer_ok(json_output, remaining=remaining,
+                              **({"backup": backup_path} if backup_path else {}))
 
 
 class OnionPressCLI:
@@ -1356,13 +1426,18 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         return 0
 
     def cmd_reset(self, yes: bool = False, *, check: bool = False,
-                  json_output: bool = False, confirmed=frozenset()) -> int:
+                  json_output: bool = False, confirmed=frozenset(),
+                  os_name: str = "macos", launcher: str | None = None) -> int:
         """Reset OnionPress — wipe all data and start fresh.
 
         The questions ("hub-holds-key" when an OnionHeaven hub may hold the
         key and OnionPress is not running to ask it, then "reset") are
         answered with --confirmed, at a terminal here, or by --yes; a
         non-terminal run without them is refused (onionpress.confirm).
+        On Linux (#529) the wipe is followed by the launcher's start (the
+        stack, the wait, the daemon, which registers the new key) and the
+        hub state's reset in the onionheaven container, as the Linux
+        launcher's reset did; a Mac is started again from the menu.
         """
         from . import confirm as _confirm, onionheaven
         interactive = sys.stdin is not None and sys.stdin.isatty()
@@ -1458,8 +1533,20 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
             shutil.rmtree(vanity_dir)
 
         self.log("Removed keys, config, secrets, and logs")
-        print("\n  Reset complete. Run 'onionpress start' to start fresh.")
         self._remove_pid_lock()
+        if os_name == "linux":
+            print("\n  Reset complete. Everything wiped. Starting fresh containers...\n")
+            try:
+                subprocess.run([launcher or LINUX_LAUNCHER, "start"], check=False)
+            except OSError as e:
+                self.log(f"WARNING: the start after the reset failed: {e}")
+            if self.docker.container_running("onionheaven"):
+                self.log("Resetting OnionHeaven...")
+                onionheaven.reset_hub_state(self.docker, self.log)
+            self.log("OnionPress reset and restarted")
+            print("  Containers running. Run 'onionpress setup' to initialize WordPress.")
+        else:
+            print("\n  Reset complete. Run 'onionpress start' to start fresh.")
         return _confirm.answer_ok(json_output, remaining=remaining)
 
     # -- PID lock --
@@ -1898,9 +1985,13 @@ def _add_reset(sub, name):
 
 
 def _run_reset(run):
+    from .handle_action import default_launcher
     args = run.args
-    return _cli(run).cmd_reset(yes=args.yes, check=args.check, json_output=args.json,
-                               confirmed=_confirm.given(args))
+    cli = _cli(run)
+    os_name = detect_os().value
+    return cli.cmd_reset(yes=args.yes, check=args.check, json_output=args.json,
+                         confirmed=_confirm.given(args), os_name=os_name,
+                         launcher=default_launcher(cli.paths, os_name))
 
 
 def _add_update(sub, name):
@@ -1944,8 +2035,10 @@ def _run_update(run):
 def _add_uninstall(sub, name):
     p = sub.add_parser(
         name,
-        help="(macOS) Remove OnionPress: the onion address and key, the site, "
-             "the container VM and ~/.onionpress (asks first)")
+        help="Remove OnionPress: the onion address and key, the site, the "
+             "container VM (Mac) or the units, /opt/onionpress and the desktop "
+             "entries (Linux, with sudo; a backup offered first), and "
+             "~/.onionpress (asks first)")
     _confirm.add_arguments(p)
 
 
@@ -1957,12 +2050,10 @@ def _run_uninstall(run):
     paths = resolve_paths(data_dir=args.data_dir)
     log = _make_log_func(paths.log_file)
     os_name = detect_os().value
-    if os_name != "macos":
-        return _confirm.answer_error(
-            "onionpress uninstall is the Linux launcher's own command", args.json)
     return cmd_uninstall(paths, Docker(paths, log_func=log), log,
                          _ha.default_launcher(paths, os_name), check=args.check,
-                         json_output=args.json, confirmed=_confirm.given(args))
+                         json_output=args.json, confirmed=_confirm.given(args),
+                         os_name=os_name)
 
 
 # ---- Key import (issue #524) ----

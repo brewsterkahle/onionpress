@@ -102,12 +102,19 @@ class TestTrayDialogs(unittest.TestCase):
         self.assertIn("ui_client.typed_mismatch_message(typed, q.typed, action)", ask)
         self.assertIn("sealed-hub-data-left-out", confirm.QUESTIONS)
 
-    def test_the_uninstall_dialog_says_what_the_launcher_deletes(self):
+    def test_the_uninstall_asks_the_clis_questions_then_opens_the_terminal(self):
+        # #529: the questions (the hub, the typed DELETE) are the CLI's
+        # (`uninstall --check --json` through run_confirmed, each a dialog
+        # of _ask_question), and the answers go to the launcher's uninstall
+        # in the terminal as --confirmed flags.
         body = self._source("OnionPressTray")
         body = body[body.index("def _on_uninstall("):body.index("def _on_quit(")]
-        self.assertIn("ui_client.uninstall_warning(", body)
+        self.assertIn('ui_client.run_confirmed(\n            Launcher, ["uninstall", "--check", "--json"],', body)
+        self.assertIn("_ask_question(None, what, facts, action)", body)
+        self.assertIn('f"/opt/onionpress/onionpress uninstall {flags};"', body)
+        self.assertIn("flags = \" \".join(outcome.flags)", body)
         self.assertNotIn("Your data is preserved", body)
-        self.assertIn("/opt/onionpress/onionpress uninstall;", body)
+        self.assertNotIn("uninstall_warning(", body)
 
 
 class TestTrayReadsTheDaemonsState(unittest.TestCase):

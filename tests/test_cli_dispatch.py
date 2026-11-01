@@ -181,12 +181,16 @@ ROWS = [
     Row("restore", ["restore", "/b.zip", "--check", "--json"], "CLI().cmd_restore_check",
         mock.call("pw", "/b.zip", "", frozenset({"reset"}), True),
         env={cli.BACKUP_PASSWORD_ENV: "pw", confirm.CONFIRMED_ENV: "reset"}),
+    # The platform and this install's launcher (#529: Linux's tail restarts
+    # the stack through it).
     Row("reset", ["reset", "--yes"], "CLI().cmd_reset",
-        mock.call(yes=True, check=False, json_output=False, confirmed=frozenset())),
+        mock.call(yes=True, check=False, json_output=False, confirmed=frozenset(),
+                  os_name="linux", launcher="/stub/launcher")),
     Row("reset", ["reset", "--check", "--json", "--confirmed", "reset",
                   "--confirmed", "hub-holds-key"], "CLI().cmd_reset",
         mock.call(yes=False, check=True, json_output=True,
-                  confirmed=frozenset({"reset", "hub-holds-key"}))),
+                  confirmed=frozenset({"reset", "hub-holds-key"}),
+                  os_name="macos", launcher="/stub/launcher"), os_name="macos"),
     Row("smoke-test-wayback", ["smoke-test-wayback"], "CLI().cmd_smoke_test_wayback", mock.call()),
     Row("check-for-update", ["check-for-update", "--json", "--current", "1.2.3"],
         "CLI().cmd_check_for_update", mock.call(json_output=True, current="1.2.3")),
@@ -213,8 +217,14 @@ ROWS = [
     Row("uninstall", ["uninstall", "--check", "--json", "--confirmed", "uninstall"],
         "cli.cmd_uninstall",
         mock.call(ANY, ANY, ANY, "/stub/launcher", check=True, json_output=True,
-                  confirmed=frozenset({"uninstall"})),
+                  confirmed=frozenset({"uninstall"}), os_name="macos"),
         os_name="macos", check=positional_launcher),
+    # #529: Linux's uninstall is the CLI's too (onionpress.uninstall's
+    # Linux branch; the launcher's -y confirms through the environment).
+    Row("uninstall", ["uninstall"], "cli.cmd_uninstall",
+        mock.call(ANY, ANY, ANY, "/stub/launcher", check=False, json_output=False,
+                  confirmed=frozenset({"hub-holds-key", "uninstall"}), os_name="linux"),
+        env={confirm.CONFIRMED_ENV: "hub-holds-key uninstall"}),
 
     # ---- the Settings page's requests (issue #366) ----
     Row("handle-action", ["handle-action", "--json", "--confirmed", "address-change"],
@@ -754,12 +764,13 @@ class TestDispatch(unittest.TestCase):
         rc, _, _ = self._main(["verify-admin-password"], stdin="")
         self.assertEqual(rc, 1)
 
-    def test_the_mac_only_commands_elsewhere(self):
-        # `update` runs on both platforms since 2.6.2 (its rows above);
-        # `uninstall` is still the Linux launcher's own.
+    def test_uninstall_runs_on_both_platforms(self):
+        # `update` runs on both platforms since 2.6.2 (its rows above) and
+        # `uninstall` since #529 (onionpress.uninstall's Linux branch): off
+        # a terminal without its confirmations it is refused, on either.
         rc, out, _ = self._main(["uninstall", "--json"])
-        self.assertEqual(rc, confirm.EXIT_FAILED)
-        self.assertIn("Linux launcher", json.loads(out.strip().splitlines()[-1])["error"])
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertIn("--confirmed", json.loads(out.strip().splitlines()[-1])["error"])
 
     def test_unregister_refuses_a_bad_keep_address(self):
         with mock.patch.object(cli, "release_onionheaven") as rel:

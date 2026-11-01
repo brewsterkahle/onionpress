@@ -422,13 +422,18 @@ class TestUninstallCheck(unittest.TestCase):
         self.assertEqual((rc, ans), (0, {"ok": True, "remaining": []}))
         self.run_mock.assert_called_once()
 
-    def test_linux_has_its_own(self):
+    def test_linux_runs_the_same_protocol(self):
+        # #529: Linux's uninstall is the CLI's too (onionpress.uninstall's
+        # Linux branch); off a terminal it is refused without the
+        # confirmations, as on a Mac, and nothing is removed.
         out = io.StringIO()
         with mock.patch("onionpress.cli.detect_os", return_value=mock.Mock(value="linux")), \
+                mock.patch("onionpress.cli.Docker"), \
                 contextlib.redirect_stdout(out):
             rc = cli.main(["--data-dir", self.dir, "uninstall", "--json"])
-        self.assertEqual(rc, 1)
-        self.assertIn("Linux launcher", _last_json(out)["error"])
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertIn("--confirmed", _last_json(out)["error"])
+        self.run_mock.assert_not_called()
 
 
 class TestUninstallRun(unittest.TestCase):

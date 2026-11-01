@@ -1,6 +1,8 @@
-"""`onionpress uninstall` on a Mac (issue #366): what the menubar's
-Uninstall used to do in-process. Linux's launcher keeps its bash
-uninstall (sudo, systemd units, /opt/onionpress).
+"""`onionpress uninstall` (issue #366): what the menubar's Uninstall used
+to do in-process on a Mac and, since #529, what the Linux launcher's
+173-line bash case did (the systemd units, the tray, the containers and
+volumes, /opt/onionpress and the symlinks with sudo, the desktop entries,
+~/.onionpress).
 
 Two steps, as every destructive command (onionpress.confirm): `--check`
 asks "hub-holds-key" when an OnionHeaven hub may hold a copy of the onion
@@ -58,9 +60,111 @@ def check(paths, docker, log, confirmed):
     return {"running": running, "hubs": len(hubs)}
 
 
-def run(paths, docker, log, launcher, out=None):
+# Linux: the units an install may have (the current user units and the
+# legacy system ones of before #407), the package's paths, the per-user
+# desktop files.
+LINUX_INSTALL_DIR = "/opt/onionpress"
+LINUX_SYMLINKS = ("/usr/local/bin/onionpress", "/usr/local/bin/onionpress-tray")
+USER_UNITS = ("onionpress", "onionpress-daemon", "onionpress-heartbeat", "onionpress-watcher.timer")
+USER_UNIT_FILES = ("onionpress.service", "onionpress-daemon.service",
+                   "onionpress-heartbeat.service", "onionpress-watcher.service",
+                   "onionpress-watcher.timer")
+SYSTEM_UNITS = ("onionpress", "onionpress-heartbeat", "onionpress-watcher.timer")
+SYSTEM_UNIT_FILES = tuple(f"/etc/systemd/system/{f}" for f in
+                          ("onionpress.service", "onionpress-heartbeat.service",
+                           "onionpress-watcher.service", "onionpress-watcher.timer"))
+
+
+def _sh(argv, *, capture=True, timeout=120):
+    """Run *argv*, failures ignored (every step is best effort, as the
+    bash's `|| true`); *capture* False leaves the terminal to it (sudo's
+    password prompt)."""
+    try:
+        return subprocess.run(argv, capture_output=capture, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _remove_linux(paths, docker, log):
+    """The Linux launcher's uninstall after the hub release: the user
+    units stopped (the legacy system ones too), the tray and an orphaned
+    systemd-inhibit killed, the containers and every onionpress-* volume
+    removed (`compose down -v` skips the volumes the launcher made), the
+    units disabled and their files removed, the legacy system units and
+    /opt/onionpress and the symlinks with sudo, the per-user desktop
+    entries, icons and autostart, then ~/.onionpress."""
+    import getpass
+    user = getpass.getuser()
+    home = os.path.expanduser("~")
+    log("Uninstall: stopping user services...")
+    for unit in USER_UNITS:
+        _sh(["systemctl", "--user", "stop", unit])
+    for unit in SYSTEM_UNITS:
+        _sh(["sudo", "systemctl", "stop", unit], capture=False)
+    log("Uninstall: killing the tray...")
+    _sh(["pkill", "-u", user, "-f", "onionpress-tray"])
+    _sh(["pkill", "-u", user, "-f", "systemd-inhibit.*OnionPress"])
+    log("Uninstall: removing containers and volumes...")
+    if paths.docker_dir:
+        files = [os.path.join(paths.docker_dir, "docker-compose.yml"),
+                 os.path.join(paths.docker_dir, "docker-compose.cloudflare.yml")]
+        try:
+            docker.compose(["down", "-v"], compose_files=files, timeout=300)
+        except Exception as e:
+            log(f"Uninstall: compose down failed (continuing): {e}")
+    try:
+        r = docker.run(["volume", "ls", "-q", "--filter", "name=onionpress-"], timeout=30, quiet=True)
+        for vol in (r.stdout.split() if r.ok else []):
+            docker.run(["volume", "rm", vol], timeout=60, quiet=True)
+    except Exception as e:
+        log(f"Uninstall: volume removal failed (continuing): {e}")
+    log("Uninstall: disabling user services...")
+    for unit in USER_UNITS:
+        _sh(["systemctl", "--user", "disable", unit])
+    for name in USER_UNIT_FILES:
+        try:
+            os.remove(os.path.join(home, ".config", "systemd", "user", name))
+        except OSError:
+            pass
+    _sh(["systemctl", "--user", "daemon-reload"])
+    log("Uninstall: disabling and removing legacy system services...")
+    for unit in SYSTEM_UNITS:
+        _sh(["sudo", "systemctl", "disable", unit], capture=False)
+    _sh(["sudo", "rm", "-f", *SYSTEM_UNIT_FILES], capture=False)
+    _sh(["sudo", "systemctl", "daemon-reload"], capture=False)
+    log(f"Uninstall: removing {LINUX_INSTALL_DIR}...")
+    _sh(["sudo", "rm", "-rf", LINUX_INSTALL_DIR], capture=False)
+    log("Uninstall: removing the /usr/local/bin symlinks...")
+    _sh(["sudo", "rm", "-f", *LINUX_SYMLINKS], capture=False)
+    log("Uninstall: removing the desktop entries, icons and autostart...")
+    apps = os.path.join(home, ".local", "share", "applications")
+    icons = os.path.join(home, ".local", "share", "icons", "hicolor")
+    for path in (os.path.join(home, ".config", "autostart", "onionpress-tray.desktop"),
+                 os.path.join(apps, "onionpress.desktop"),
+                 os.path.join(apps, "onionpress-tray.desktop")):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    for root, _dirs, names in os.walk(icons):
+        for name in names:
+            if name.startswith("onionpress"):
+                try:
+                    os.remove(os.path.join(root, name))
+                except OSError:
+                    pass
+    if shutil.which("gtk-update-icon-cache"):
+        _sh(["gtk-update-icon-cache", "-t", "-f", icons])
+    if shutil.which("update-desktop-database"):
+        _sh(["update-desktop-database", apps])
+    if os.path.exists(paths.data_dir):
+        shutil.rmtree(paths.data_dir)
+        log("Uninstall: data directory removed")
+
+
+def run(paths, docker, log, launcher, out=None, os_name="macos"):
     """Uninstall. Returns what may remain on a hub (release_onionheaven's
-    list: [] when nothing)."""
+    list: [] when nothing). *os_name* picks the platform's removal."""
     from .onionheaven import release_onionheaven
     # The daemon first: its heartbeat carries the key, so it must not put
     # the key back on a hub after the /unregister below. Its launchd agent
@@ -80,6 +184,10 @@ def run(paths, docker, log, launcher, out=None):
                                             log_func=log, out=out)
     except Exception as e:
         log(f"Uninstall: OnionHeaven unregister failed (continuing): {e}")
+
+    if os_name == "linux":
+        _remove_linux(paths, docker, log)
+        return remaining
 
     log("Uninstall: stopping services...")
     try:

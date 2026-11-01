@@ -527,44 +527,7 @@ after_wordpress_installed() {
     bind_wordpress_port_for_install_state true
 }
 
-# Verify a WP admin password without making a backup. Used by scrub/
-# uninstall to pre-validate the password BEFORE any destructive work —
-# otherwise the backup verifies mid-script and the user can end up
-# in a half-uninstalled state on a bad password. The CLI's own
-# check calls it too.
-#
-# Stdin: the password (never argv, never spliced into PHP).
-# Returns 0 if valid, non-zero otherwise.
-verify_wp_admin_password() {
-    op_py verify-admin-password
-}
 
-# Prompt for + validate a WP admin password. Sets PROMPTED_WP_PASS on
-# success. Retries up to 3 times; returns 1 if user gives up.
-prompt_and_validate_wp_password() {
-    local prompt="${1:-WordPress admin password: }"
-    local attempt
-    PROMPTED_WP_PASS=""
-    for attempt in 1 2 3; do
-        local pw
-        read -r -s -p "$prompt" pw
-        echo ""
-        if [ -z "$pw" ]; then
-            echo "  (empty — aborting)"
-            return 1
-        fi
-        if printf '%s' "$pw" | verify_wp_admin_password; then
-            PROMPTED_WP_PASS="$pw"
-            return 0
-        fi
-        echo "  Password does not match any WordPress admin account."
-        if [ "$attempt" -lt 3 ]; then
-            echo "  ($((3 - attempt)) more attempt$([ $attempt -lt 2 ] && echo s) remaining)"
-        fi
-    done
-    echo "  Too many bad attempts — aborting."
-    return 1
-}
 
 # Backup passwords are handed over in ONIONPRESS_BACKUP_PASSWORD, never on a
 # command line: other local users can read any process's argv (ps,
@@ -1708,71 +1671,17 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         reset)
-            # Wipe everything: WordPress, database, Tor state, keys, config, secrets.
-            # After reset + start + setup, restore from backup to get data back.
-            if [ "$ONIONPRESS_YES" != "true" ]; then
-                echo ""
-                echo "  This will ERASE everything: WordPress, database, Tor state,"
-                echo "  onion address keys, config, and secrets."
-                echo ""
-                echo "  To preserve your data, run 'onionpress backup' first."
-                echo ""
-                echo "  Press Enter to continue or Ctrl+C to cancel..."
-                read -r
-            fi
-
-            # The onion service key goes with the reset: OnionHeaven hubs
-            # that may hold a copy are asked to delete it first, while it
-            # can still sign the request.
-            if ! onionheaven_release reset; then
-                echo "Cancelled."
-                exit 1
-            fi
-
-            log "Resetting OnionPress (full wipe)..."
-
-            # Stop everything
+            # Wipe everything: WordPress, database, Tor state, keys, config,
+            # secrets (onionpress.cli reset, issue #366: it asks first, with
+            # --check --json / --confirmed for a UI and --yes for scripts,
+            # and asks the OnionHeaven hubs that may hold the key to delete
+            # it while the key can still sign), then on Linux (#529) this
+            # launcher's start and the hub state's reset, as this case did
+            # in bash. ONIONPRESS_YES=true (the global -y) still means --yes.
             setup_db_passwords 2>/dev/null || true
-            stop_containers 2>/dev/null || true
-
-            # Remove all Docker volumes
-            cd "$DOCKER_DIR"
-            log "Removing Docker volumes..."
-            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
-                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 && log "Removed volume: $vol" || log "WARNING: Failed to remove volume: $vol"
-            done
-
-            # Wipe data directory (keep directory structure). The
-            # OnionHeaven registration record stays when a hub may still
-            # hold a key: it is what says what remains on which hub.
-            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
-            rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
-            if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then
-                rm -f "$DATA_DIR/onionheaven-registration.json"
-            fi
-            rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
-            rm -rf "$DATA_DIR/shared/vanity-keys/"
-            log "Removed keys, config, secrets, and logs"
-
-            echo ""
-            echo "  Reset complete. Everything wiped. Starting fresh containers..."
-            echo ""
-
-            # Start fresh containers
-            setup_db_passwords
-            start_containers
-            wait_for_services
-
-            # Clean OnionHeaven state in the shared persistent volume
-            if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
-                log "Resetting OnionHeaven..."
-                reset_onionheaven_in_container >> "$LOG_FILE" || true
-            fi
-            # The daemon registers the new key (a fresh config says yes).
-            start_daemon
-
-            log "OnionPress reset and restarted"
-            echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
+            reset_args=("${@:2}")
+            [ "${ONIONPRESS_YES:-}" != "true" ] || reset_args+=(--yes)
+            op_py --data-dir "$DATA_DIR" reset "${reset_args[@]}"
             ;;
 
         validate-oh-address)
@@ -1806,181 +1715,16 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         uninstall)
-            echo ""
-            echo "OnionPress Uninstaller"
-            echo "======================"
-            echo ""
-            echo "CRITICAL WARNING"
-            echo ""
-            echo "Uninstalling will PERMANENTLY DELETE:"
-            echo "  - Your onion address and private key"
-            echo "  - All WordPress content and data"
-            echo "  - Database and configuration"
-            echo "  - Systemd services"
-            echo "  - /opt/onionpress installation"
-            echo ""
-            echo "Your site CANNOT BE RECOVERED unless you have a backup."
-            echo ""
-
-            if [ "$ONIONPRESS_YES" != "true" ]; then
-                # Offer backup first (like Mac version)
-                read -r -p "Create a backup before uninstalling? [Y/n] " backup_choice
-                if [ "$backup_choice" != "n" ] && [ "$backup_choice" != "N" ]; then
-                    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
-                        # Pre-validate the WP admin password BEFORE any
-                        # destructive work. Without this, a typo'd password
-                        # makes the backup error out mid-script, leaving
-                        # the user in a "Fix it or Ctrl-C" limbo. Three
-                        # tries; abort cleanly on failure — install stays
-                        # intact.
-                        if ! prompt_and_validate_wp_password \
-                                "WordPress admin password (for backup): "; then
-                            echo "Cancelled — install untouched."
-                            exit 1
-                        fi
-                        mkdir -p "$HOME/OnionPress/backups"
-                        bp_path="$HOME/OnionPress/backups/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
-                        # The shared CLI's backup (it prints where it saved);
-                        # the password in the environment, never on argv.
-                        if ONIONPRESS_BACKUP_PASSWORD="$PROMPTED_WP_PASS" op_py --data-dir "$DATA_DIR" backup -o "$bp_path"; then
-                            echo ""
-                            echo "IMPORTANT: Copy this file somewhere safe before continuing!"
-                            echo "  e.g.: scp $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}'):$bp_path ."
-                            echo ""
-                        else
-                            # Password was already validated, so this is
-                            # a different kind of failure (disk full,
-                            # docker hiccup). Bail rather than risk an
-                            # uninstall without a backup.
-                            echo "Backup failed. Aborting uninstall — install untouched."
-                            exit 1
-                        fi
-                    else
-                        echo "Containers are not running — cannot create backup."
-                        echo "Start OnionPress first, or skip backup."
-                        echo ""
-                        read -r -p "Continue without backup? [y/N] " skip_backup
-                        if [ "$skip_backup" != "y" ] && [ "$skip_backup" != "Y" ]; then
-                            echo "Cancelled."
-                            exit 0
-                        fi
-                    fi
-                fi
-                # No separate "type DELETE" gate — the sudo password
-                # prompt that comes next is the actual "are you sure"
-                # moment. Mac's uninstall doesn't have a DELETE prompt
-                # either.
-            fi
-
-            echo ""
-
-            # OnionHeaven hubs that may hold a copy of the onion service key
-            # are asked to delete it before anything is removed: the key in
-            # the tor container signs the request; onionheaven_release says
-            # what happened. The daemon is stopped first (no /offline: the
-            # /unregister is what the hub must hear), so no /online follows.
-            op_py --data-dir "$DATA_DIR" daemon stop --no-offline >/dev/null 2>&1 || true
-            if ! onionheaven_release uninstall; then
-                echo "Cancelled — install untouched."
-                exit 1
-            fi
-
-            USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
-            AUTOSTART_DIR="$HOME/.config/autostart"
-            APPS_DIR="$HOME/.local/share/applications"
-            ICONS_DIR="$HOME/.local/share/icons"
-
-            echo "Stopping user services..."
-            # Current installs use user-level systemd; legacy installs used
-            # system-level, or the heartbeat and watcher units of before
-            # #407. Stop all — whichever doesn't exist is a no-op.
-            systemctl --user stop onionpress-daemon 2>/dev/null || true
-            systemctl --user stop onionpress-heartbeat 2>/dev/null || true
-            systemctl --user stop onionpress-watcher.timer 2>/dev/null || true
-            systemctl --user stop onionpress 2>/dev/null || true
-            sudo systemctl stop onionpress-heartbeat 2>/dev/null || true
-            sudo systemctl stop onionpress-watcher.timer 2>/dev/null || true
-            sudo systemctl stop onionpress 2>/dev/null || true
-
-            echo "Killing tray process..."
-            # The tray runs in the user session, not via systemd — it has
-            # to be killed explicitly or the icon stays until logout.
-            pkill -u "$(whoami)" -f onionpress-tray 2>/dev/null || true
-            # Also kill any orphaned systemd-inhibit child (PREVENT_SLEEP)
-            # left behind if the daemon was force-killed earlier.
-            pkill -u "$(whoami)" -f "systemd-inhibit.*OnionPress" 2>/dev/null || true
-
-            echo "Removing containers and volumes..."
-            setup_db_passwords 2>/dev/null || true
-            cd "$DOCKER_DIR" 2>/dev/null && docker compose "${COMPOSE_WITH_CF[@]}" down -v 2>/dev/null || true
-
-            # `compose down -v` only removes volumes Compose created.
-            # Volumes pre-created by the launcher via `docker volume
-            # create` (onion-keys, tor-state, and the older arti-state and
-            # tor-keys names) are treated as
-            # external and skipped — leaving the onion private key
-            # behind across a supposed "PERMANENTLY DELETE" uninstall.
-            # Sweep all onionpress-* volumes by name filter.
-            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
-                docker volume rm "$vol" 2>/dev/null || true
-            done
-
-            echo "Disabling user services..."
-            systemctl --user disable onionpress 2>/dev/null || true
-            systemctl --user disable onionpress-daemon 2>/dev/null || true
-            systemctl --user disable onionpress-heartbeat 2>/dev/null || true
-            systemctl --user disable onionpress-watcher.timer 2>/dev/null || true
-            rm -f "$USER_SYSTEMD_DIR/onionpress.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-daemon.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-heartbeat.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-watcher.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
-            systemctl --user daemon-reload 2>/dev/null || true
-
-            echo "Disabling and removing legacy system services..."
-            sudo systemctl disable onionpress 2>/dev/null || true
-            sudo systemctl disable onionpress-heartbeat 2>/dev/null || true
-            sudo systemctl disable onionpress-watcher.timer 2>/dev/null || true
-            sudo rm -f /etc/systemd/system/onionpress.service \
-                       /etc/systemd/system/onionpress-heartbeat.service \
-                       /etc/systemd/system/onionpress-watcher.service \
-                       /etc/systemd/system/onionpress-watcher.timer
-            sudo systemctl daemon-reload
-
-            echo "Removing /opt/onionpress..."
-            sudo rm -rf /opt/onionpress
-
-            echo "Removing /usr/local/bin symlinks..."
-            sudo rm -f /usr/local/bin/onionpress /usr/local/bin/onionpress-tray
-
-            echo "Removing per-user desktop entries, icons, and autostart..."
-            rm -f "$AUTOSTART_DIR/onionpress-tray.desktop"
-            rm -f "$APPS_DIR/onionpress.desktop" "$APPS_DIR/onionpress-tray.desktop"
-            # Hicolor icons may live under several size dirs (512x512, scalable).
-            find "$ICONS_DIR/hicolor" -type f -name 'onionpress*' \
-                -delete 2>/dev/null || true
-            # Refresh caches so the launcher / icon theme drop stale entries.
-            command -v gtk-update-icon-cache >/dev/null 2>&1 && \
-                gtk-update-icon-cache -t -f "$ICONS_DIR/hicolor" >/dev/null 2>&1 || true
-            command -v update-desktop-database >/dev/null 2>&1 && \
-                update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
-
-            echo "Removing data directory ($DATA_DIR)..."
-            rm -rf "$DATA_DIR"
-
-            echo ""
-            echo "OnionPress has been uninstalled."
-            if [ "${ONIONHEAVEN_RELEASE_RC:-0}" -ne 0 ]; then
-                echo ""
-                echo "Note: an OnionHeaven hub may still hold a copy of your onion service"
-                echo "key (see the warning above). Ask the hub's operator to remove it if"
-                echo "you need it gone."
-            fi
-            if [ -n "${bp_path:-}" ] && [ -f "${bp_path:-}" ]; then
-                echo ""
-                echo "Your backup is at: $bp_path"
-                echo "Use it to restore: onionpress restore $bp_path"
-            fi
+            # Remove OnionPress (onionpress.uninstall's Linux branch, #529):
+            # asks first (--check --json and --confirmed for the tray, or at
+            # this terminal: the hub that may hold the key, then DELETE),
+            # offers a backup, takes the key back off the OnionHeaven hubs,
+            # stops the units and the tray, removes the containers and
+            # volumes, /opt/onionpress and the symlinks (sudo), the desktop
+            # entries and ~/.onionpress. ONIONPRESS_YES=true (-y; scrub's
+            # uninstall) answers every question and skips the backup offer.
+            [ "${ONIONPRESS_YES:-}" != "true" ] || export ONIONPRESS_CONFIRMED="hub-holds-key uninstall"
+            op_py --data-dir "$DATA_DIR" uninstall "${@:2}"
             ;;
 
         reset-onionheaven)

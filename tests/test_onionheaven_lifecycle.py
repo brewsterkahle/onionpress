@@ -799,34 +799,41 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
     def test_linux_uninstall_sends_the_real_unregister(self):
         text = _read("linux/onionpress")
         # The old one: unsigned, to a port nothing listens on in the tor
-        # container, before the heartbeat client was stopped.
+        # container, before the heartbeat client was stopped. Since #529
+        # the uninstall is the CLI's on Linux too (onionpress.uninstall):
+        # the release comes after the daemon stop and before anything is
+        # removed, and the backup offer (cmd_uninstall) before the run.
         self.assertNotIn("127.0.0.1:9077/unregister", text)
         branch = _case_branch(text, "uninstall")
-        self.assert_before(branch, "onionheaven_release uninstall",
-                           "Stopping user services", "uninstall")
-        self.assert_before(branch, "onionheaven_release uninstall",
-                           'docker volume rm "$vol"', "uninstall")
-        self.assert_before(branch, 'op_py --data-dir "$DATA_DIR" backup -o "$bp_path"',
-                           "onionheaven_release uninstall", "uninstall: the backup first")
-        self.assertIn("ONIONHEAVEN_RELEASE_RC", branch[branch.index("has been uninstalled"):])
+        self.assertIn('op_py --data-dir "$DATA_DIR" uninstall "${@:2}"', branch)
+        self.assertNotIn("onionheaven_release", branch)
+        run = _read("src/onionpress/uninstall.py")
+        body = run[run.index("def run("):]
+        self.assert_before(body, "stop_agent(", "release_onionheaven(", "uninstall.run")
+        self.assert_before(body, "release_onionheaven(", "_remove_linux(", "uninstall.run")
+        cmd = _read("src/onionpress/cli.py")
+        cmd = cmd[cmd.index("def cmd_uninstall("):cmd.index("class OnionPressCLI")]
+        self.assert_before(cmd, "offer_backup_before_uninstall(", "_uninstall.run(", "cmd_uninstall")
 
     def test_resets_keep_the_record_when_a_hub_may_hold_a_key(self):
-        # The Mac launcher's reset is the CLI's (cmd_reset, below).
-        mac = _read("app/MacOS/onionpress")
-        self.assertRegex(_case_branch(mac, "reset"),
-                         r'bundled_python -m onionpress\.cli --data-dir "\$DATA_DIR" reset ')
-        for rel, label in (("linux/onionpress", "reset"),
-                           ("app/MacOS/onionpress", "scrub")):
-            with self.subTest(rel=rel, label=label):
-                branch = _case_branch(_read(rel), label)
-                self.assert_before(branch, f"onionheaven_release {label}",
-                                   "stop_containers", label)
-                self.assert_before(branch, f"onionheaven_release {label}",
-                                   'docker volume rm "$vol"', label)
-                self.assertIn('if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then\n'
-                              '                rm -f "$DATA_DIR/onionheaven-registration.json"',
-                              branch)
-                self.assertEqual(branch.count("onionheaven-registration.json"), 1)
+        # Both launchers' reset is the CLI's (cmd_reset, below), and the
+        # Mac's scrub is onionpress.scrub's reset in place (#529): the
+        # hubs are asked before the containers stop and the volumes go,
+        # and the record stays when one keeps the key.
+        for rel, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
+                            ("linux/onionpress", "op_py")):
+            with self.subTest(rel=rel):
+                text = _read(rel)
+                self.assertRegex(_case_branch(text, "reset"),
+                                 rf'{re.escape(runner)} --data-dir "\$DATA_DIR" reset ')
+                self.assertNotIn("onionheaven_release reset", text)
+        self.assertIn('scrub "${@:2}"', _case_branch(_read("app/MacOS/onionpress"), "scrub"))
+        src = _read("src/onionpress/scrub.py")
+        body = src[src.index("def phase_reset_in_place("):src.index("def phase_verify_mac(")]
+        self.assert_before(body, 'release_onionheaven("scrub"', '[launcher, "stop"]', "scrub")
+        self.assert_before(body, 'release_onionheaven("scrub"', '"volume", "rm"', "scrub")
+        self.assertIn("if not remaining:", body)
+        self.assertEqual(body.count("onionheaven-registration.json"), 1)
 
     def test_cli_reset_keeps_the_record_too(self):
         src = _read("src/onionpress/cli.py")

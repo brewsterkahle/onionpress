@@ -1917,6 +1917,43 @@ def peer_claim_fields(app, secret_key_bytes, public_key_raw, content_addr, hc_ad
 
 
 # ---------------------------------------------------------------------------
+# A hub's state after a reset (the Linux launcher's reset_onionheaven_in_container)
+# ---------------------------------------------------------------------------
+
+RESET_HUB_SCRIPT = (
+    "import json, sys\n"
+    'sys.path.insert(0, "/")\n'
+    "from onionheaven_common import reset_onionheaven\n"
+    'print(json.dumps({"reset": True, **reset_onionheaven()}))\n'
+)
+
+
+def reset_hub_state(docker, log=None):
+    """Clean the onionheaven container's stress-test entries and refresh its
+    takeover workers (onionheaven_common.reset_onionheaven, run inside the
+    container: the registry is its volume's); real entries and their keys
+    stay. The container's JSON answer as a dict, or None when it could
+    not be run (logged)."""
+    try:
+        r = docker.exec("onionheaven", ["python3", "-c", RESET_HUB_SCRIPT], timeout=120, quiet=True)
+    except Exception as e:
+        if log:
+            log(f"WARNING: OnionHeaven reset failed: {e}")
+        return None
+    if not r.ok:
+        if log:
+            log(f"WARNING: OnionHeaven reset failed (rc={r.returncode}): {(r.stderr or '').strip()}")
+        return None
+    try:
+        answer = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        answer = None
+    if log:
+        log(f"OnionHeaven reset: {r.stdout.strip() or 'done'}")
+    return answer if isinstance(answer, dict) else None
+
+
+# ---------------------------------------------------------------------------
 # The Settings dialog's hub check (the launchers' validate-oh-address)
 # ---------------------------------------------------------------------------
 
