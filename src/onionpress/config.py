@@ -406,6 +406,29 @@ ADDRESS_PREFIX_MAX = 5
 ADDRESS_PREFIX_CHARS = "a-z2-7"
 
 
+def prefix_for_address(address: str, current_prefix: str = "") -> str:
+    """The ADDRESS_PREFIX that follows *address* (a key import, a restore of
+    another address): the configured prefix's length (#116), 3 when there
+    is none, held to the ADDRESS_PREFIX_MIN-MAX characters the startup
+    check allows. The one rule: the launchers' set_address_prefix_for had
+    two (cap 5 on the Mac, none on Linux) and the restore a third."""
+    length = len(current_prefix)
+    if length < ADDRESS_PREFIX_MIN:
+        length = 3
+    length = min(length, ADDRESS_PREFIX_MAX)
+    return address.split(".")[0][:length]
+
+
+def follow_address_prefix(config_file: str, address: str, log) -> str:
+    """Write the ADDRESS_PREFIX that follows *address* (prefix_for_address)
+    into *config_file*, so the startup prefix check does not flag a
+    mismatch after a key import. Returns it."""
+    prefix = prefix_for_address(address, read_value(config_file, "ADDRESS_PREFIX", ""))
+    write_value(config_file, "ADDRESS_PREFIX", prefix)
+    log(f"Updated ADDRESS_PREFIX to '{prefix}' to match imported key")
+    return prefix
+
+
 def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
     """Validate an onion address prefix.
 

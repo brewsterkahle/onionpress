@@ -19,6 +19,7 @@ Nothing here talks to Docker: subprocess is mocked, or `docker` is a stub.
 """
 import base64
 import importlib.util
+import io
 import json
 import os
 import re
@@ -485,8 +486,8 @@ class TestConfigSetTokenOnStdin(unittest.TestCase):
 
 
 class TestKeyImportKeyOnStdin(unittest.TestCase):
-    """The key-import path: menubar -> Mac launcher -> key_manager.py, and
-    the Linux launcher -> key_manager.py."""
+    """The key-import path: the Settings page or menubar -> the launcher ->
+    `onionpress import-key -` (the key on stdin, never argv)."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="import-argv-test-")
@@ -521,66 +522,35 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(
             out_dir, self.addr, "ks_hs_id.ed25519_expanded_private")))
 
-    # The key import's own helpers (replace_onion_key and what it calls),
-    # where the launcher has them.
-    HELPERS = ("is_onion_address", "vanity_key_dir", "docker_volume_state",
-               "replace_onion_key", "set_address_prefix_for")
-
-    def _run_import(self, rel, function, wrapper, call):
-        data_dir = os.path.join(self.tmpdir, rel.replace("/", "_"))
-        argv_log = os.path.join(self.tmpdir, "argv.log")
-        # No Docker: every `docker` (the launcher's and key_manager.py's
-        # own reads of the tor container) is a stub that fails, except the
-        # volume listing, which says there are none.
-        bin_dir = os.path.join(self.tmpdir, "bin")
-        os.makedirs(bin_dir, exist_ok=True)
-        with open(os.path.join(bin_dir, "docker"), "w") as f:
-            f.write('#!/bin/sh\n[ "$1 $2" = "volume ls" ] && exit 0\nexit 1\n')
-        os.chmod(os.path.join(bin_dir, "docker"), 0o755)
-        text = _read(rel)
-        helpers = "".join(_shell_function(rel, n) + "\n" for n in self.HELPERS
-                          if re.search(r"^" + n + r"\(\)", text, re.M))
-        script = (
-            "set -e\n"
-            "log() { :; }\n"
-            "sed() { :; }\n"  # ADDRESS_PREFIX is test_address_prefix.py's
-            "stop_containers() { :; }\n"
-            # Nothing registered with an OnionHeaven hub (that path is
-            # tests/test_onionheaven_lifecycle.py's).
-            "onionheaven_release() { :; }\n"
-            "start_heartbeat_client() { :; }\n"
-            f'{wrapper}() {{ printf "%s\\n" "$*" >> "$ARGV_LOG"; "$PY" "$@"; }}\n'
-            + helpers + _shell_function(rel, function) + "\n" + call + "\n"
-        )
-        out = subprocess.run(
-            ["bash", "-c", script], input=self.key_b32 + "\n",
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ, "ARGV_LOG": argv_log, "PY": sys.executable,
-                 "KEY": self.key_b32, "DATA_DIR": data_dir,
-                 "PATH": bin_dir + os.pathsep + os.environ["PATH"],
-                 "LOG_FILE": os.path.join(self.tmpdir, "log"),
-                 "SCRIPTS_DIR": os.path.dirname(KEY_MANAGER)})
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(
-            data_dir, "shared", "vanity-keys", self.addr, "hostname")),
-            out.stdout + out.stderr)
-        with open(argv_log) as f:
-            argv_lines = f.read()
-        self.assertIn("key_manager.py import-key -", argv_lines)
-        self.assertNotIn(self.key_b32, argv_lines)
-
-    def test_mac_launcher_import_key_dash(self):
-        self._run_import("app/MacOS/onionpress", "import_key", "bundled_python",
-                         "import_key -")
-
-    def test_linux_launcher_import_key(self):
-        self._run_import("linux/onionpress", "import_key", "python3",
-                         'import_key "$KEY"')
-
-    def test_linux_launcher_replace_onion_key(self):
-        """What the Settings page's import-key-file runs."""
-        self._run_import("linux/onionpress", "replace_onion_key",
-                         "python3", 'replace_onion_key "$KEY"')
+    def test_the_launchers_pass_the_dash_on_and_the_cli_reads_stdin(self):
+        """Both launchers hand "$@" to `onionpress import-key` untouched
+        (issue #524: no key_manager.py run with the key in a variable),
+        so `-` reaches key_import.run, which reads the key from stdin."""
+        for rel in ("app/MacOS/onionpress", "linux/onionpress"):
+            with self.subTest(rel=rel):
+                text = _read(rel)
+                m = re.search(r"^import_key\(\)\s*\{.*?^\}", text, re.DOTALL | re.M)
+                self.assertIsNotNone(m)
+                self.assertIn('import-key "$@"', m.group(0))
+                self.assertNotIn("$key_b32", m.group(0))
+        from onionpress import key_import
+        data_dir = os.path.join(self.tmpdir, "data")
+        argv = []
+        stdin = io.StringIO(self.key_b32 + "\n")
+        args = types.SimpleNamespace(key="-", file=None, check=True, json=True, confirmed=[])
+        containers = mock.Mock()
+        containers.volume_state.return_value = 1
+        out = io.StringIO()
+        with mock.patch.object(subprocess, "run", side_effect=lambda a, *k, **kw: argv.append(a)), \
+                mock.patch.object(subprocess, "Popen", side_effect=lambda a, *k, **kw: argv.append(a)):
+            rc = key_import.run(args, paths=types.SimpleNamespace(data_dir=data_dir),
+                                docker=mock.Mock(), containers=containers,
+                                log=lambda m: None, release=lambda r: [], linux=True,
+                                interactive=False, environ={}, out=out, stdin=stdin)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(json.loads(out.getvalue().splitlines()[-1]),
+                         {"ok": True, "address": self.addr})
+        self.assertEqual(argv, [])
 
     def test_handle_action_passes_key_on_stdin(self):
         """The Settings page's key goes to the launcher's import-key on

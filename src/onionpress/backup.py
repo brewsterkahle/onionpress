@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from onionpress import backup_crypto, derivatives, hub_backup, key_manager, wp_files
-from onionpress.config import (DEFAULTS, SECRET_CONFIG_KEYS, load_secrets,
+from onionpress.config import (DEFAULTS, prefix_for_address, SECRET_CONFIG_KEYS, load_secrets,
                                read_config, read_value, redact_config,
                                write_value)
 
@@ -1889,9 +1889,9 @@ def match_config_to_restored_address(config_path, onion_address, username, log_f
         if line.strip().startswith('ADDRESS_PREFIX='):
             old_prefix = line.strip().split('=', 1)[1]
             if not addr_base.startswith(old_prefix):
-                plen = min(max(len(old_prefix), 3), 6)
-                lines[i] = f'ADDRESS_PREFIX={addr_base[:plen]}\n'
-                log_func(f"Restore: updated ADDRESS_PREFIX to {addr_base[:plen]}")
+                new_prefix = prefix_for_address(addr_base, old_prefix)
+                lines[i] = f'ADDRESS_PREFIX={new_prefix}\n'
+                log_func(f"Restore: updated ADDRESS_PREFIX to {new_prefix}")
             found_prefix = True
         elif line.strip().startswith('ONIONNAME=') and username:
             lines[i] = f'ONIONNAME={username}\n'

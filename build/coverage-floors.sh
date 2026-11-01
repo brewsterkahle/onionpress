@@ -36,6 +36,7 @@ src/onionpress/daemon.py 81
 src/onionpress/launcher_ops.py 84
 src/onionpress/scrub.py 90
 src/onionpress/key_manager.py 87
+src/onionpress/key_import.py 85
 src/onionpress/updater.py 89
 src/onionpress/start.py 86
 src/onionpress/bundled_plugins.py 95
