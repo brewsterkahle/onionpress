@@ -1583,11 +1583,11 @@ function onionpress_settings_page() {
             }
         }
         ?>
-        <?php // What the host puts in a backup made here: on a Mac never the onion service key (src/onionpress/backup.py, ONION_KEY_LEFT_OUT_NOTE); Linux keeps it for now. ?>
-        <?php if ( $current_platform === 'linux' ) : ?>
-        <p class="description">Create a password-protected backup of your database, wp-content, Tor keys, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
-        <?php else : ?>
+        <?php // What the host puts in a backup made here: never the onion service key, on either platform (src/onionpress/backup.py, ONION_KEY_LEFT_OUT_NOTE; cli.cmd_settings_page_backup, issue #406). ?>
         <p class="description">Create a password-protected backup of your database, wp-content, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
+        <?php if ( $current_platform === 'linux' ) : ?>
+        <p class="description">A backup made here does not contain your onion address's key: it passes through WordPress, and the key never does. Restoring it keeps the onion address of the site it is restored onto. To move your address to another machine, run <code>onionpress backup</code> on the computer running OnionPress.</p>
+        <?php else : ?>
         <p class="description">A backup made here does not contain your onion address's key: it passes through WordPress, and the key never does. Restoring it keeps the onion address of the site it is restored onto. To move your address to another machine, use Backup&hellip; in the OnionPress menu.</p>
         <?php endif; ?>
         <?php // A backup made here is handed to WordPress: no host secrets in it (src/onionpress/backup.py, TUNNEL_TOKEN_KEY). ?>

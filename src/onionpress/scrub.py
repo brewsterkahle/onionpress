@@ -1,11 +1,10 @@
 """Full-lifecycle test: backup → uninstall → install → restore → verify.
 
 Ported from the `scrub)` case in linux/onionpress (originally ~300 lines
-of bash). The heavy phases (create_backup, restore_backup, start_
-containers) still go through the bash launcher's subcommands because
-those wrap sizeable bash state machines that haven't been ported yet —
-this module just owns the orchestration glue, sudo keep-alive, and
-the verify checks.
+of bash). The heavy phases (the backup and restore, now the CLI's own
+cmd_backup / cmd_restore; start_containers) go through the launcher's
+subcommands; this module owns the orchestration glue, sudo keep-alive,
+and the verify checks.
 
 Mac doesn't have scrub yet; this module is Linux-only for now.
 """

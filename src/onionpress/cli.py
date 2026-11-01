@@ -721,6 +721,19 @@ class OnionPressCLI:
     def cmd_restore(self, password: str, backup_path: str,
                     hub_recovery_key: str = "", *, confirmed=frozenset(),
                     json_output: bool = False) -> int:
+        """Restore from a backup via install-from-backup (_restore). On Linux
+        the heartbeat client unit, which holds the current key, is stopped
+        before the restore asks the OnionHeaven hubs to delete their copy
+        and started again after it, with the restored key
+        (heartbeat_unit.paused: the one platform seam, issue #406)."""
+        from . import heartbeat_unit
+        with heartbeat_unit.paused(detect_os().value, self.log):
+            return self._restore(password, backup_path, hub_recovery_key,
+                                 confirmed=confirmed, json_output=json_output)
+
+    def _restore(self, password: str, backup_path: str,
+                 hub_recovery_key: str = "", *, confirmed=frozenset(),
+                 json_output: bool = False) -> int:
         """Restore from a backup via install-from-backup: tear the install down
         to a clean state and rebuild it directly from the backup (key + DB +
         content), instead of overwriting a live install in place. No vanity
@@ -1578,16 +1591,15 @@ def _settings_page_log(data_dir: str):
 
 def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
                              json_output: bool = False) -> int:
-    """`onionpress settings-page-backup <zip>` (a Mac; Linux's launcher
-    runs its bash create_backup --without-hub-data --without-host-secrets).
-    Handed to WordPress by handle-action, and the password came from
-    there: refused on an OnionHeaven hub or OnionHome, or a node that
+    """`onionpress settings-page-backup <zip>` (both launchers' case, issue
+    #406). Handed to WordPress by handle-action, and the password came
+    from there: refused on an OnionHeaven hub or OnionHome, or a node that
     could not be checked (exit 3, SettingsPageBackupRefused's message), and
     never a hub's registry or registrants' keys, nor the Cloudflare tunnel
     token or any other config WordPress is not shown
     (backup.TUNNEL_TOKEN_KEY), nor the site's own onion service key
     (backup.ONION_KEY_LEFT_OUT_NOTE, the answer's "note": the app's
-    Backup... has it)."""
+    Backup... and `onionpress backup` have it)."""
     from . import confirm as _confirm
     from .backup import (create_backup, get_admin_username, served_onion_address,
                          SettingsPageBackupRefused, ONION_KEY_LEFT_OUT_NOTE)
@@ -1611,27 +1623,48 @@ def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
 
 def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
                               json_output: bool, confirmed) -> int:
-    """`onionpress settings-page-restore <zip>` (a Mac; Linux's launcher
-    runs its bash restore_backup --from-settings-page): the in-place
-    backup.restore_from_backup with through_wordpress=True, never the
-    install-from-backup `restore` (issue #341). The file and its password
-    came through WordPress: refused on an OnionHeaven hub or OnionHome (or
-    a node that could not be checked), and for a backup holding a hub's
-    keys or OnionHome's name registry; neither volume is written. A backup
-    of another address replaces this one only with --confirmed
-    address-change (the handler asks the person at the Mac first: exit 3,
-    {"error", "confirm": "address-change", "current", "new"}); one without a key
-    keeps it. Before the key changes, the OnionHeaven hubs that may hold
-    the current one are asked to delete it, while it can still sign."""
-    from . import confirm as _confirm
-    from .backup import restore_from_backup, SettingsPageRestoreRefused
+    """`onionpress settings-page-restore <zip>` (both launchers' case, issue
+    #406): the in-place backup.restore_from_backup with
+    through_wordpress=True, never the install-from-backup `restore` (issue
+    #341). The file and its password came through WordPress: refused on
+    an OnionHeaven hub or OnionHome (or a node that could not be checked),
+    and for a backup holding a hub's keys or OnionHome's name registry;
+    neither volume is written. A backup of another address replaces this
+    one only with --confirmed address-change on a Mac (the handler asks the
+    person at the Mac first: exit 3, {"error", "confirm": "address-change",
+    "current", "new"}) and never on Linux, which has no one to ask
+    (backup.ADDRESS_CHANGE_REFUSED_MSG, exit 3); one without a key keeps
+    it. Before the key changes, the OnionHeaven hubs that may hold the
+    current one are asked to delete it, while it can still sign; on Linux
+    the heartbeat client unit that holds it is stopped first and started
+    again after (heartbeat_unit)."""
+    from . import confirm as _confirm, heartbeat_unit
+    from .backup import (restore_from_backup, SettingsPageRestoreRefused,
+                         ADDRESS_CHANGE_REFUSED_MSG)
     log = _settings_page_log(data_dir)
+    linux = detect_os() == OS.LINUX
+    heartbeat_stopped = False
 
     def confirm_address_change(current, new):
+        if linux:
+            # No one at this host to ask (the Mac asks the person at the
+            # Mac): the page never changes the address. `onionpress
+            # restore` on the host does it.
+            log(f"Restore: refused (the Settings page's restore): the backup "
+                f"is of {new}, not of this site's {current or 'address'}")
+            raise SettingsPageRestoreRefused(ADDRESS_CHANGE_REFUSED_MSG)
         _confirm.require("address-change", confirmed, current=current, new=new)
         return True
 
     def before_key_change(restored_address):
+        nonlocal heartbeat_stopped
+        if linux:
+            # The heartbeat client holds the key about to be replaced: stopped
+            # before the hubs are asked to let go of it, or its next beat
+            # would put it back (started again below; the handler's restart
+            # after a success stops and starts it once more).
+            heartbeat_unit.stop(log)
+            heartbeat_stopped = True
         try:
             release_onionheaven("restore", keep_address=restored_address,
                                 data_dir=data_dir, log_func=log, out=sys.stderr)
@@ -1651,6 +1684,9 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
     except Exception as e:
         log(f"Settings page restore failed: {e}")
         return _confirm.answer_error(e, json_output)
+    finally:
+        if heartbeat_stopped:
+            heartbeat_unit.start(log)
     return _confirm.answer_ok(json_output)
 
 

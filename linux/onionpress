@@ -672,8 +672,8 @@ after_wordpress_installed() {
 
 # Verify a WP admin password without making a backup. Used by scrub/
 # uninstall to pre-validate the password BEFORE any destructive work —
-# otherwise create_backup verifies mid-script and the user can end up
-# in a half-uninstalled state on a bad password. create_backup's own
+# otherwise the backup verifies mid-script and the user can end up
+# in a half-uninstalled state on a bad password. The CLI's own
 # check calls it too.
 #
 # Stdin: the password (never argv, never spliced into PHP).
@@ -807,31 +807,6 @@ EOF
         log "ERROR: Secrets file not found at $secrets_file"
         exit 1
     fi
-}
-
-# Run a MariaDB client in onionpress-db: db_client <password> <client> [args...]
-# The password goes in on stdin and reaches the client as MYSQL_PWD. As
-# -p<password> it would sit in the process list, where ps shows every
-# user's command lines.
-db_client() {
-    local db_pass="$1"
-    shift
-    printf '%s\n' "$db_pass" | docker exec -i onionpress-db \
-        sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
-}
-
-# Import a restored dump into the wordpress DB: db_import <password> <sql_file>
-# onionpress.cli db-import, backup.db_import (Phase 4, #120): the one
-# implementation, what the Mac's restores run too. The password is the
-# first stdin line (reaches the client as MYSQL_PWD, never argv: ps shows
-# every user's command lines); the dump is streamed after it into a client
-# run --sandbox --binary-mode --local-infile=0, so nothing in a crafted
-# dump can run anything but SQL in the db container, and a client too old
-# for --sandbox is refused rather than imported into unsandboxed. The
-# pipeline's status is the Python's (exit 1 on any failure, one ERROR line
-# on stderr).
-db_import() {
-    printf '%s\n' "$1" | op_py --data-dir "$DATA_DIR" db-import --sql-file "$2"
 }
 
 # ─── Key import ──────────────────────────────────────────────────────
@@ -1715,580 +1690,12 @@ wait_for_services() {
 }
 
 # ─── Backup & Restore ─────────────────────────────────────────────────
-
-# Print file $2 of key volume $1 (a path inside the volume) for a backup:
-# root in a throwaway container from the stack's tor image (KEY_HELPER_IMAGE)
-# with DAC_OVERRIDE alone (the files are debian-tor's, or arti's, in 0700
-# folders), the volume read-only, no network. Fails, without running
-# anything, when the volume does not exist: `docker run -v` would create it,
-# and an empty onionpress-onion-keys passes for an installed key (or, beside
-# onionpress-arti-state, for a migrated one) at the next start.
-key_volume_cat() {
-    local vol="$1" path="$2" state=0
-    docker_volume_state "$vol" || state=$?
-    [ "$state" -eq 0 ] || return 1
-    docker run --rm \
-        --network none \
-        --cap-drop ALL \
-        --cap-add DAC_OVERRIDE \
-        --security-opt no-new-privileges:true \
-        -v "$vol:/src:ro" \
-        --entrypoint cat \
-        "$KEY_HELPER_IMAGE" "/src/$path"
-}
-
-create_backup() {
-    # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
-    # Usage: create_backup <password> <output_path> [--without-hub-data] [--without-host-secrets]
-    # --without-hub-data: for a backup handed to WordPress (the Settings
-    # page's download), whose password came from there too. Refused on an
-    # OnionHeaven hub or OnionHome, or when that could not be checked
-    # (return 3, BACKUP_REFUSAL says why:
-    # backup.settings_page_backup_refusal), and never a hub's registry or
-    # registrants' keys. Without it, a hub's are in, sealed to its recovery
-    # key when one is set up (backup.stage_hub_backup).
-    # --without-host-secrets: for that backup too. Its config is cut to what
-    # WordPress's status page shows (no Cloudflare tunnel token, image
-    # overrides, bind host...), the healthcheck onion service's key (a start
-    # makes a new one) is left out, and metadata.json says so
-    # (backup.TUNNEL_TOKEN_KEY).
-    local password="$1"
-    local output_path="$2"
-    local with_hub_data="yes" with_host_secrets="yes"
-    local staging
-    BACKUP_REFUSAL=""
-
-    local opt
-    for opt in "${@:3}"; do
-        case "$opt" in
-            --without-hub-data) with_hub_data="no" ;;
-            --without-host-secrets) with_host_secrets="no" ;;
-            *) echo "ERROR: create_backup: unknown option: $opt" >&2
-               return 1 ;;
-        esac
-    done
-
-    if [ -z "$password" ]; then
-        echo "ERROR: Password is required" >&2
-        return 1
-    fi
-
-    # Verify password matches a WordPress admin account before creating backup
-    # (backup contains Tor private keys — only WP admins should be able to export them).
-    # The password reaches the verifier on stdin and is never part of any PHP
-    # source, so no character in it can change the code that runs.
-    log "Backup: verifying WordPress admin password..."
-    if ! printf '%s' "$password" | verify_wp_admin_password; then
-        log "ERROR: Password does not match any WordPress admin account"
-        echo "ERROR: Password does not match any WordPress admin account" >&2
-        return 1
-    fi
-    log "Backup: password verified"
-
-    # The onion address, for metadata.json. The tor container writes this
-    # file, and a restore refuses a backup whose metadata holds anything
-    # but a whole address — so refuse now, before any work and while the
-    # site is still here. No address at all (tor not running) stays empty
-    # as before: the restore takes the address from the key.
-    local onion_addr
-    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
-    if [ -n "$onion_addr" ] && ! is_onion_address "$onion_addr"; then
-        log "ERROR: Backup: the tor container's onion address is not a valid v3 address — no backup made"
-        echo "ERROR: The onion address the tor container reports is not a valid v3 .onion address; no backup was made." >&2
-        return 1
-    fi
-
-    # The Settings page's backup carries this node's own onion service key
-    # to WordPress: refused on an OnionHeaven hub or OnionHome, before
-    # anything is copied (not on status.json's server_active, the status
-    # page's view, which fails open). Fails closed: no address, a container
-    # that does not answer, or a helper that fails, and it is refused too.
-    # Only exit 3 says why on stdout; any other failure (a crash, an older
-    # CLI) gets the words of backup.UNVERIFIED_BACKUP_REFUSED_MSG, which the
-    # Mac shows for the same case (a test keeps the two equal).
-    if [ "$with_hub_data" = "no" ]; then
-        local refusal="" refusal_rc=0
-        refusal=$(op_py --data-dir "$DATA_DIR" settings-page-backup-check --address "$onion_addr" 2>>"$LOG_FILE") || refusal_rc=$?
-        if [ "$refusal_rc" -ne 0 ]; then
-            if [ "$refusal_rc" -ne 3 ] || [ -z "$refusal" ]; then
-                refusal="OnionPress could not check whether this node is an OnionHeaven hub or OnionHome (its containers did not answer), and a backup made here goes through WordPress. Nothing was backed up: try again once OnionPress is running, or back up from the OnionPress app (Backup... in its menu) or with onionpress backup."
-            fi
-            BACKUP_REFUSAL="$refusal"
-            log "Backup: refused (the Settings page's backup): $refusal"
-            return 3
-        fi
-    fi
-
-    # The key reads below run from the stack's tor image; a backup without
-    # the keys it could have held is not made.
-    if ! ensure_key_helper_image; then
-        log "ERROR: Backup: no tor image to read the onion service keys with — no backup made"
-        echo "ERROR: The tor image is not available to read the onion service keys; no backup was made." >&2
-        return 1
-    fi
-
-    staging=$(mktemp -d -t onionpress-backup-XXXXXX)
-    trap "rm -rf '$staging'" RETURN
-
-    # 1. Extract Tor keys (both PEM and C Tor formats), from the user's
-    # vanity-keys folder or else out of the volumes (key_volume_cat).
-    log "Backup: extracting Tor keys..."
-    mkdir -p "$staging/tor-keys"
-
-    # PEM key (ks_hs_id.ed25519_expanded_private)
-    local arti_key
-    arti_key=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
-    if [ -n "$arti_key" ]; then
-        cp "$arti_key" "$staging/tor-keys/"
-    else
-        # Try extracting from the key volume — the current name first, then the
-        # pre-2026-09-25 one for an install backed up before its first start
-        # on this version migrated it.
-        key_volume_cat onionpress-onion-keys wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
-            || key_volume_cat onionpress-arti-state state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
-            || true
-        if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
-            rm -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
-            log "WARNING: No PEM key found"
-        fi
-    fi
-
-    # C Tor format keys (hs_ed25519_secret_key, hs_ed25519_public_key)
-    local ctor_key
-    ctor_key=$(find "$DATA_DIR/shared/vanity-keys" -name "hs_ed25519_secret_key" 2>/dev/null | head -1)
-    if [ -n "$ctor_key" ]; then
-        cp "$ctor_key" "$staging/tor-keys/"
-        # Also grab public key if present
-        local ctor_pub="${ctor_key%secret_key}public_key"
-        [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
-    else
-        # Try extracting from the tor-state volume
-        key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_secret_key > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
-        if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
-            rm -f "$staging/tor-keys/hs_ed25519_secret_key"
-            log "WARNING: No C Tor secret key found"
-        else
-            key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
-            [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
-            key_volume_cat onionpress-tor-state hidden_service/wordpress/hostname > "$staging/tor-keys/hostname" 2>/dev/null || true
-            [ ! -s "$staging/tor-keys/hostname" ] && rm -f "$staging/tor-keys/hostname"
-        fi
-    fi
-
-    # The restore takes the PEM and nothing else. A key Tor minted itself
-    # (a first start that could not seed one, issue #519) exists only in C
-    # Tor's form: derive the PEM from it, as the Mac's backup does; no key
-    # at all is no backup, not an archive no restore accepts.
-    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] \
-       && [ -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
-        if python3 "$SCRIPTS_DIR/key_manager.py" ctor-to-arti "$staging/tor-keys" >>"$LOG_FILE" 2>&1 \
-           && [ -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
-            log "Backup: onion service key PEM derived from C Tor's key files"
-        else
-            log "WARNING: could not derive the onion service key PEM from C Tor's key files"
-        fi
-    fi
-    rm -f "$staging/tor-keys/hostname"
-    # No key at all: the archive says so (metadata excludes_onion_key, as
-    # the Mac page's backup does), and a restore keeps the install's own
-    # key and address; an archive with no PEM and no such word failed
-    # every restore ("Backup is missing ks_hs_id.ed25519_expanded_private").
-    local keyless_backup=no
-    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
-        keyless_backup=yes
-        rm -rf "$staging/tor-keys"
-        mkdir -p "$staging/tor-keys"
-        log "WARNING: Backup: no onion service key could be read (the PEM in onionpress-onion-keys, or C Tor's key in onionpress-tor-state): this backup carries none, and a restore of it keeps the key and address of the install it is restored onto"
-        echo "WARNING: No onion service key could be read: this backup carries none (a restore of it keeps the target install's address). See $LOG_FILE." >&2
-    fi
-
-    # The healthcheck onion service's key is never backed up, as on the
-    # Mac: a start makes a new one and the heartbeat gives the hub its
-    # address (one restore path, one secret fewer in every backup).
-
-    # 2. Dump WordPress database
-    log "Backup: exporting database..."
-    mkdir -p "$staging/database"
-    local db_pass="${WORDPRESS_DB_PASSWORD:-}"
-    if [ -z "$db_pass" ]; then
-        setup_db_passwords
-        db_pass="$WORDPRESS_DB_PASSWORD"
-    fi
-    db_client "$db_pass" mariadb-dump -u wordpress wordpress > "$staging/database/wordpress.sql" 2>>"$LOG_FILE"
-    if [ $? -ne 0 ] || [ ! -s "$staging/database/wordpress.sql" ]; then
-        log "ERROR: Database export failed"
-        return 1
-    fi
-
-    # 3. Copy wp-content from container. Read there as www-data (root's
-    #    docker cp followed a wp-content link www-data can plant to any
-    #    folder in the container) and unpacked here as plain files and
-    #    folders: a link planted in the container would point at a host
-    #    path, where zip would store the host file and the pruning and
-    #    marker below would follow it (pack-backup sweeps the tree again).
-    log "Backup: copying wp-content (themes, plugins, uploads)..."
-    if ! op_py stage-wp-content --dest "$staging/wp-content" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: could not copy wp-content out of the container"
-        return 1
-    fi
-
-    # 3b. Drop the regenerable image derivatives (-WxH sizes, -scaled) —
-    #     about half of a media-heavy uploads/ (issue #257). The Python
-    #     helper holds the one classification both platforms use (a file is
-    #     a derivative only when its base image sits beside it). The marker
-    #     it leaves in uploads/ rides along in the archive so the restore
-    #     knows to rebuild the sizes. A helper failure keeps the full copy.
-    local pruned excludes_derivatives="false"
-    if pruned=$(op_py prune-image-derivatives --uploads-dir "$staging/wp-content/uploads" 2>>"$LOG_FILE"); then
-        log "Backup: pruned ${pruned% *} regenerable image derivative(s) — the restore rebuilds them"
-        mkdir -p "$staging/wp-content/uploads"
-        echo "OnionPress: this backup carries original images only; the resized copies (-WxH, -scaled) are rebuilt after a restore by wp media regenerate --only-missing. Removed on completion." \
-            > "$staging/wp-content/uploads/.onionpress-regenerate-derivatives"
-        excludes_derivatives="true"
-    else
-        log "WARNING: derivative pruning failed — backing up uploads in full"
-    fi
-
-    # 4. Save config. A backup handed to WordPress (--without-host-secrets)
-    #    gets only what WordPress's status page shows anyway; the names of
-    #    the secrets that were set go into metadata.json, so a restore can
-    #    say what to enter again (backup.write_wordpress_safe_config).
-    local secrets_left_out=""
-    if [ -f "$DATA_DIR/config" ]; then
-        log "Backup: saving config..."
-        if [ "$with_host_secrets" = "yes" ]; then
-            cp "$DATA_DIR/config" "$staging/config"
-        elif ! secrets_left_out=$(op_py wordpress-safe-config --config "$DATA_DIR/config" \
-                --dest "$staging/config" 2>>"$LOG_FILE"); then
-            log "ERROR: could not write the config for a backup handed to WordPress"
-            return 1
-        fi
-    fi
-
-    # 5. OnionHeaven registry + keys, if this instance is an OnionHeaven hub
-    #    (its volume holds registrants' keys or a registry with a row): a
-    #    consistent copy of the registry and keys/, as plain files, nothing
-    #    else from there (backup.stage_hub_data, shared with the Mac). It
-    #    used to take every node with an onionheaven container, and copied
-    #    registry.db without its write-ahead log.
-    #    Sealed to the hub's recovery key when one is set up
-    #    (onionheaven.sealed: read into memory, never a file in the clear),
-    #    else a plain onionheaven/ under the password, with a warning every
-    #    time (backup.stage_hub_backup). It prints the metadata fields.
-    #    Never in a backup handed to WordPress (--without-hub-data), which a
-    #    hub refused above.
-    #    No answer (4) is never "not a hub": the backup goes ahead without
-    #    the hub data and says so (the log, metadata.json's
-    #    onionheaven_data_unchecked, and backup.HUB_DATA_UNCHECKED_NOTE on
-    #    the terminal, a test keeps the words equal).
-    local hub_rc=0 hub_fields="" hub_unchecked="false"
-    if [ "$with_hub_data" = "yes" ]; then
-        hub_fields=$(op_py --data-dir "$DATA_DIR" stage-hub-backup --staging "$staging" 2>>"$LOG_FILE") || hub_rc=$?
-        case "$hub_rc" in
-            0) ;;
-            3) ;;   # not a hub
-            4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not"
-               hub_unchecked="true"
-               echo "WARNING: OnionPress could not check whether this node is an OnionHeaven hub (its onionheaven container did not answer, or could not read the hub registry), so this backup holds no hub registry or registrants' keys. If this is a hub, make another backup once OnionPress is running." >&2 ;;
-            *) log "ERROR: could not back up the OnionHeaven data (see above)"
-               return 1 ;;
-        esac
-    fi
-    if [ "$hub_rc" -ne 0 ]; then
-        hub_fields=""
-        rm -rf "$staging/onionheaven" "$staging/onionheaven.sealed"
-    fi
-    case "$hub_fields" in
-        *'"onionheaven_data": "unsealed"'*)
-            echo "WARNING: this OnionHeaven hub has no backup recovery key: its registrants' onion service keys are in this backup protected only by its password. Set one up with: onionpress hub-recovery-key create" >&2 ;;
-    esac
-
-    # 6. Write metadata (onion_addr was read and checked at the top)
-    local has_onionheaven="false"
-    { [ -d "$staging/onionheaven" ] || [ -f "$staging/onionheaven.sealed" ]; } && has_onionheaven="true"
-
-    log "Backup: writing metadata..."
-    local meta_flags=()
-    [ "$has_onionheaven" = "true" ] && meta_flags+=(--has-onionheaven)
-    [ "$excludes_derivatives" = "true" ] && meta_flags+=(--excludes-image-derivatives)
-    [ "$hub_unchecked" = "true" ] && meta_flags+=(--hub-unchecked)
-    [ "$with_host_secrets" = "no" ] && meta_flags+=(--without-host-secrets)
-    [ "$keyless_backup" = "yes" ] && meta_flags+=(--excludes-onion-key)
-    if ! op_py --data-dir "$DATA_DIR" backup-metadata \
-            --onion-address "$onion_addr" --version "$ONIONPRESS_VERSION" \
-            --hub-fields "$hub_fields" --secrets-left-out "$secrets_left_out" \
-            ${meta_flags[@]+"${meta_flags[@]}"} > "$staging/metadata.json" 2>>"$LOG_FILE"; then
-        log "ERROR: could not write the backup's metadata"
-        return 1
-    fi
-
-    # 7. Zip and encrypt — backup format 2, written by the shared Python
-    #    helper so both platforms produce the one format (not `zip -P`,
-    #    whose ZipCrypto cipher is weak). It stamps backup_format into
-    #    metadata.json. The password goes over stdin, not argv.
-    log "Backup: creating encrypted archive..."
-    if ! printf '%s' "$password" | op_py pack-backup --staging "$staging" --output "$output_path" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: creating the encrypted archive failed"
-        return 1
-    fi
-
-    local size
-    size=$(du -h "$output_path" | cut -f1)
-    log "Backup: complete ($size) -> $output_path"
-}
-
-restore_backup() {
-    # Restores from a password-protected backup zip.
-    # Usage: restore_backup <password> <zip_path> [--from-settings-page]
-    # --from-settings-page: the file and its password came through
-    # WordPress. Refused before anything is touched (return 3, the reason
-    # as the last line of stdout): on an OnionHeaven hub or OnionHome, or a
-    # node that could not be checked (backup.settings_page_restore_node_refusal,
-    # before the upload is opened); a backup holding an OnionHeaven hub's
-    # registrants' keys or OnionHome's name registry
-    # (backup.settings_page_restore_refusal); a backup of another onion
-    # address than the one the tor container serves
-    # (backup.ADDRESS_CHANGE_REFUSED_MSG: no one at this host is asked, so
-    # the page never changes the address; onionpress restore does). A
-    # backup without a key (a Mac Settings page backup) keeps this site's
-    # address. The hub data volume is never written.
-    local password="$1"
-    local zip_path="$2"
-    local from_settings_page="false"
-    local staging
-
-    case "${3:-}" in
-        "") ;;
-        --from-settings-page) from_settings_page="true" ;;
-        *) echo "ERROR: restore_backup: unknown option: $3" >&2
-           return 1 ;;
-    esac
-
-    if [ -z "$password" ] || [ -z "$zip_path" ]; then
-        echo "ERROR: Password and zip path are required" >&2
-        return 1
-    fi
-    if [ ! -f "$zip_path" ]; then
-        echo "ERROR: Backup file not found: $zip_path" >&2
-        return 1
-    fi
-
-    # The Settings page's restore, before the upload is opened: never on an
-    # OnionHeaven hub or OnionHome, nor on a node whose containers do not
-    # say (fails closed, as the page's backup). The address the tor
-    # container serves is what that check asks about, and what a backup of
-    # another address would replace (refused below). Only exit 3 says why;
-    # any other failure gets backup.UNVERIFIED_RESTORE_REFUSED_MSG's words
-    # (a test keeps them equal).
-    local current_address=""
-    if [ "$from_settings_page" = "true" ]; then
-        current_address=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-        is_onion_address "$current_address" || current_address=""
-        local node_refusal="" node_rc=0
-        node_refusal=$(op_py --data-dir "$DATA_DIR" settings-page-restore-node-check --address "$current_address" 2>>"$LOG_FILE") || node_rc=$?
-        if [ "$node_rc" -ne 0 ]; then
-            if [ "$node_rc" -ne 3 ] || [ -z "$node_refusal" ]; then
-                node_refusal="OnionPress could not check whether this node is an OnionHeaven hub or OnionHome (its containers did not answer), and a restore made here comes through WordPress. Nothing was restored: try again once OnionPress is running, or restore from the OnionPress app (Restore... in its menu) or with onionpress restore."
-            fi
-            log "Restore: refused (the Settings page's restore): $node_refusal"
-            echo "$node_refusal"
-            return 3
-        fi
-    fi
-
-    staging=$(mktemp -d -t onionpress-restore-XXXXXX)
-    trap "rm -rf '$staging'" RETURN
-
-    # Extract — either backup format (format 2 needs the Python decoder;
-    # format 1 ZipCrypto zips still go through unzip inside it).
-    log "Restore: extracting backup archive..."
-    if ! printf '%s' "$password" | op_py extract-backup --archive "$zip_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)"
-        return 1
-    fi
-
-    # Verify metadata exists
-    local metadata_file="$staging/metadata.json"
-    if [ ! -f "$metadata_file" ]; then
-        metadata_file="$staging/./metadata.json"
-    fi
-    if [ ! -f "$metadata_file" ]; then
-        log "ERROR: Not a valid OnionPress backup (no metadata.json)"
-        return 1
-    fi
-
-    # The Settings page's restore: refused before anything is touched.
-    if [ "$from_settings_page" = "true" ]; then
-        local refusal="" refusal_rc=0
-        refusal=$(op_py settings-page-restore-check --staging "$staging" 2>>"$LOG_FILE") || refusal_rc=$?
-        if [ "$refusal_rc" -ne 0 ]; then
-            [ -n "$refusal" ] || refusal="Could not check the backup; nothing was restored."
-            log "Restore: refused (the Settings page's restore): $refusal"
-            echo "$refusal"
-            return 3
-        fi
-    fi
-
-    # metadata.json and the key files are whoever made the backup file's (a
-    # password proves nothing about that). backup-address checks them and
-    # prints the address the key belongs to, or nothing if the backup has no
-    # key; that address names a directory and goes into config below, so it
-    # is never read from metadata.json. Refused before anything is touched.
-    local onion_address
-    if ! onion_address=$(op_py backup-address --staging "$staging" 2>>"$LOG_FILE") \
-        || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
-        log "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)"
-        return 1
-    fi
-    log "Restore: backup from ${onion_address:-a backup without a key}"
-
-    # The Settings page never changes this site's address: a backup of
-    # another one is refused, before anything is touched. Nobody at this
-    # host is asked (the Mac asks the person at the Mac); onionpress
-    # restore on the host does it. A backup without a key keeps this one.
-    if [ "$from_settings_page" = "true" ] && [ -n "$onion_address" ] \
-            && [ "$onion_address" != "$current_address" ]; then
-        local change_refusal="Not restored: this backup is of another onion address, and a restore from this page never replaces this site's address. Restore it on the computer running OnionPress: onionpress restore <backup file>"
-        log "Restore: refused (the Settings page's restore): the backup is of $onion_address, not of this site's $current_address"
-        echo "$change_refusal"
-        return 3
-    fi
-
-    # 1. Restore Tor keys — copy whatever formats the backup has to vanity-keys.
-    #    start_containers() will derive C Tor keys from the PEM if needed.
-    local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
-    local ctor_secret="$staging/tor-keys/hs_ed25519_secret_key"
-    local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
-    if { [ -f "$arti_key" ] || [ -f "$ctor_secret" ]; } && [ -n "$onion_address" ]; then
-        # The backup's key replaces the one Tor serves now: OnionHeaven hubs
-        # that may hold a copy of that one (not of the backup's own address,
-        # which stays) are asked to delete it first, while it can still
-        # sign the request. The caller starts the heartbeat client again.
-        ONIONPRESS_YES=true onionheaven_release restore "$onion_address"
-        log "Restore: writing Tor keys..."
-        # Mark the key volume for removal on next start (can't remove now — containers may be running)
-        touch "$DATA_DIR/.import-key-pending"
-        rm -rf "$DATA_DIR/shared/vanity-keys/"
-
-        local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
-        mkdir -p "$addr_dir"
-        [ -f "$arti_key" ] && cp "$arti_key" "$addr_dir/"
-        [ -f "$ctor_secret" ] && cp "$ctor_secret" "$addr_dir/"
-        [ -f "$ctor_public" ] && cp "$ctor_public" "$addr_dir/"
-        echo "$onion_address" > "$addr_dir/hostname"
-
-        # Update ADDRESS_PREFIX in config to match restored address
-        local addr_base="${onion_address%.onion}"
-        if [ -f "$DATA_DIR/config" ]; then
-            local old_prefix
-            old_prefix=$(config_value ADDRESS_PREFIX)
-            if [ -n "$old_prefix" ]; then
-                local prefix_len=${#old_prefix}
-                local new_prefix="${addr_base:0:$prefix_len}"
-                sed -i "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$new_prefix/" "$DATA_DIR/config"
-                log "Restore: updated ADDRESS_PREFIX to $new_prefix"
-            fi
-        fi
-        log "Restore: Tor keys written for $onion_address"
-    elif [ -n "$current_address" ]; then
-        # A backup without a key (a Mac Settings page backup): the site
-        # keeps its key and address, which the settings below are held to
-        # and the Settings page shows.
-        onion_address="$current_address"
-        log "Restore: the backup holds no onion service key; this site keeps its address $onion_address"
-    else
-        log "WARNING: No Tor keys in backup — skipping key restore"
-    fi
-
-    # A healthcheck key in the backup (Linux backups through 2.5.x) is not
-    # restored: a start makes a new one, as on the Mac. A key an older
-    # restore staged for the next start goes too.
-    if [ -d "$staging/tor-keys/healthcheck" ]; then
-        log "Restore: the backup's healthcheck key left out (a start makes a new one)"
-    fi
-    rm -rf "$DATA_DIR/shared/healthcheck-keys"
-
-    # 2. Restore database
-    local sql_file="$staging/database/wordpress.sql"
-    if [ -f "$sql_file" ]; then
-        log "Restore: importing database..."
-        local db_pass="${WORDPRESS_DB_PASSWORD:-}"
-        if [ -z "$db_pass" ]; then
-            setup_db_passwords
-            db_pass="$WORDPRESS_DB_PASSWORD"
-        fi
-        db_import "$db_pass" "$sql_file" 2>>"$LOG_FILE"
-        if [ $? -ne 0 ]; then
-            log "ERROR: Database import failed"
-            return 1
-        fi
-        log "Restore: database imported"
-    else
-        log "WARNING: No database dump in backup — skipping"
-    fi
-
-    # 3. Restore wp-content
-    local wpcontent_dir="$staging/wp-content"
-    if [ -d "$wpcontent_dir" ]; then
-        log "Restore: copying wp-content (themes, plugins, uploads)..."
-        # As www-data, not docker cp + chown -R as root: both followed
-        # links www-data can plant in wp-content (wp-content itself too).
-        if ! op_py put-wp-tree --merge --src "$wpcontent_dir" \
-                --dest /var/www/html/wp-content 2>>"$LOG_FILE"; then
-            log "ERROR: could not copy wp-content into the WordPress container"
-            return 1
-        fi
-        log "Restore: wp-content restored"
-        # Resized images the backup left out (#257) are rebuilt in the
-        # background by the start that follows this restore; the marker
-        # survives interruptions until the rebuild completes.
-        date -u +%Y-%m-%dT%H:%M:%SZ > "$DATA_DIR/.regenerate-derivatives-pending"
-        log "Restore: scheduled rebuild of resized images"
-    else
-        log "WARNING: No wp-content in backup — skipping"
-    fi
-
-    # 4. Restore the backup's user preferences. The backup's config is its
-    #    author's: every other key keeps this install's value
-    #    (backup.RESTORABLE_CONFIG), never a straight copy.
-    log "Restore: restoring settings..."
-    op_py restore-config --staging "$staging" --config "$DATA_DIR/config" \
-        --address "$onion_address" 2>>"$LOG_FILE" \
-        || log "WARNING: could not restore settings from the backup"
-
-    # 5. Restore OnionHeaven registry + keys (if present in backup), through
-    #    the onionheaven container: the registry by SQLite's .restore, never
-    #    a copy over the one in use, whose -wal SQLite would apply to it
-    #    (backup.restore_hub_data, shared with the Mac). Never from the
-    #    Settings page (what passed the check above is a registry alone, as
-    #    every node's backup through 2.5.2 carries one).
-    if grep -q '"excludes_onionheaven_data": true' "$metadata_file" 2>/dev/null; then
-        log "Restore: NOTE — this backup of an OnionHeaven hub was made from the Settings page and holds neither the hub's registry nor its registrants' keys; this restore leaves the hub data as it is. Restore those from a backup made in the OnionPress app or with onionpress backup."
-    fi
-    if [ -d "$staging/onionheaven" ] && { [ -s "$staging/onionheaven/registry.db" ] || [ -d "$staging/onionheaven/keys" ]; }; then
-        if [ "$from_settings_page" = "true" ]; then
-            log "Restore: the backup's OnionHeaven data left out: the Settings page's restore never writes the hub data"
-        elif docker inspect onionheaven >/dev/null 2>&1; then
-            log "Restore: restoring OnionHeaven registry and keys..."
-            if op_py restore-hub-data --src "$staging/onionheaven" >>"$LOG_FILE" 2>&1; then
-                log "Restore: OnionHeaven data restored"
-            else
-                log "WARNING: could not restore the OnionHeaven data (see above)"
-            fi
-        else
-            log "WARNING: Backup contains OnionHeaven data but onionheaven container is not running — skipping"
-            echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2
-        fi
-    fi
-    # A hub's registry and keys sealed to its recovery key: this path has no
-    # key (onionpress restore and the app's Restore... ask for it).
-    if [ -e "$staging/onionheaven.sealed" ]; then
-        log "Restore: this backup's OnionHeaven registry and registrants' keys are sealed to the hub's recovery key and were not restored; restore them with: onionpress hub-recovery-key restore <backup file>"
-    fi
-
-    log "Restore: complete (from $onion_address)"
-    echo "$onion_address"
-}
+# The backup and both restores are the shared Python's (issue #406):
+# onionpress backup (cli.cmd_backup → backup.create_backup), restore
+# (cmd_restore, install-from-backup), settings-page-backup and
+# settings-page-restore (cmd_settings_page_backup / _restore). The
+# cases below delegate; the heartbeat client is stopped and started
+# around a restore by the CLI (onionpress.heartbeat_unit).
 
 # ─── Write status (on-demand) ────────────────────────────────────────
 
@@ -3652,71 +3059,15 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         backup)
-            # backup [-o|--output <path>] [--check] [--json] [--user <login>];
-            # the password comes from read_backup_password. The old `backup
-            # <password> [output_path]` is refused (issue #504). --check is the
-            # check/confirm protocol's (onionpress.confirm, issue #375): the
-            # shared CLI verifies the password as the owner's and names the
-            # file, making no backup; the tray asks that first and then runs
-            # the backup at the named path. The backup itself stays
-            # create_backup's (bash); --json adds its answer's last line.
-            setup_db_passwords
-            shift
-            local backup_path="" backup_check=no backup_json=no
-            local -a backup_pos=() backup_check_flags=()
-            while [ $# -gt 0 ]; do
-                case "$1" in
-                    -o|--output)
-                        backup_path="${2:-}"
-                        shift
-                        if [ $# -gt 0 ]; then shift; fi
-                        ;;
-                    --output=*) backup_path="${1#--output=}"; shift ;;
-                    --check) backup_check=yes; shift ;;
-                    --json) backup_json=yes; backup_check_flags+=(--json); shift ;;
-                    --user)
-                        backup_check_flags+=(--user "${2:-}")
-                        shift
-                        if [ $# -gt 0 ]; then shift; fi
-                        ;;
-                    --user=*) backup_check_flags+=(--user "${1#--user=}"); shift ;;
-                    # An unknown flag must not become the legacy password.
-                    -?*) echo "ERROR: backup: unknown option $1" >&2; exit 2 ;;
-                    *) backup_pos+=("$1"); shift ;;
-                esac
-            done
-            if [ "${#backup_pos[@]}" -gt 2 ]; then
-                echo "ERROR: backup: too many arguments" >&2
-                exit 2
-            fi
-            if [ -n "${backup_pos[1]:-}" ]; then
-                backup_path="${backup_pos[1]}"
-            fi
-            read_backup_password "${backup_pos[0]:-}"
-            if [ "$backup_check" = yes ]; then
-                # Changes nothing: the CLI's answer is the whole result
-                # ({"ok": true, "filename", "output", ...} or {"error"}).
-                if [ -n "$backup_path" ]; then
-                    backup_check_flags+=(-o "$backup_path")
-                fi
-                ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" backup --check "${backup_check_flags[@]}"
-                exit $?
-            fi
-            if [ -z "$BACKUP_PASS" ]; then
-                echo "Usage: $0 backup [-o|--output <path>] [--check] [--json] [--user <login>]"
-                echo "Creates a password-protected backup of your OnionPress site."
-                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
-                exit 1
-            fi
-            if [ -z "$backup_path" ]; then
-                mkdir -p "$HOME/OnionPress/backups"
-                backup_path="$HOME/OnionPress/backups/onionpress-$(date +%Y-%m-%d)-$$.zip"
-            fi
-            create_backup "$BACKUP_PASS" "$backup_path"
-            echo "Backup saved to: $backup_path"
-            if [ "$backup_json" = yes ]; then
-                python3 -I -c 'import json, sys; print(json.dumps({"ok": True, "output": sys.argv[1]}))' "$backup_path"
-            fi
+            # backup [-o|--output <path>] [--check] [--json] [--user <login>].
+            # The shared CLI (cli.cmd_backup → backup.create_backup, the
+            # Mac's) reads the password (must match a WordPress administrator)
+            # from ONIONPRESS_BACKUP_PASSWORD, stdin or a no-echo prompt and
+            # refuses the old `backup <password> [output_path]` (issue #504);
+            # --check verifies the password and names the file, making no
+            # backup (the tray asks that first). Issue #406.
+            shift  # drop "backup"
+            op_py --data-dir "$DATA_DIR" backup "$@"
             ;;
 
         restore)
@@ -3783,17 +3134,15 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # .import-key-pending, no manual stop/start).
             # The exit status is the caller's only sign of a refused or
             # failed restore (the tray and the menubar check it).
-            # The heartbeat client holds the current key: it is stopped
+            # The heartbeat client holds the current key: the CLI stops it
             # before the restore asks the OnionHeaven hubs to delete their
             # copy (a backup of another address replaces the key), and
-            # started again after, with the restored one.
-            stop_heartbeat_client
+            # starts it again after, with the restored one
+            # (onionpress.heartbeat_unit, issue #406).
             if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
-                start_heartbeat_client
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
             fi
-            start_heartbeat_client
             echo "Done! OnionPress rebuilt from backup."
             ;;
 
@@ -3852,55 +3201,34 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         settings-page-backup)
-            # The Settings page's backup (handle-action create-backup):
-            # handed to WordPress, and the password came from there
+            # The Settings page's backup (handle-action create-backup), the
+            # shared CLI's (cli.cmd_settings_page_backup, the Mac's; issue
+            # #406): handed to WordPress, and the password came from there
             # (ONIONPRESS_BACKUP_PASSWORD), so never a hub's registry or
-            # registrants' keys (--without-hub-data), nor the Cloudflare
-            # tunnel token or any other config WordPress is not shown
-            # (--without-host-secrets); refused on an OnionHeaven hub or
-            # OnionHome, or a node that could not be checked (exit 3, the
-            # reason on stdout). Usage: settings-page-backup <output.zip>
+            # registrants' keys, the Cloudflare tunnel token or any other
+            # config WordPress is not shown, nor the site's own onion
+            # service key; refused on an OnionHeaven hub or OnionHome, or a
+            # node that could not be checked (exit 3, the reason in the
+            # answer). Usage: settings-page-backup <output.zip> [--json]
             setup_db_passwords
-            read_backup_password
-            if [ -z "$BACKUP_PASS" ] || [ -z "${2:-}" ]; then
-                echo "ERROR: settings-page-backup <output.zip>, the password in ONIONPRESS_BACKUP_PASSWORD" >&2
-                exit 1
-            fi
-            spb_rc=0
-            create_backup "$BACKUP_PASS" "$2" --without-hub-data --without-host-secrets 2>>"$LOG_FILE" || spb_rc=$?
-            if [ "$spb_rc" -eq 3 ]; then
-                printf '%s\n' "$BACKUP_REFUSAL"
-                exit 3
-            fi
-            exit "$spb_rc"
+            op_py --data-dir "$DATA_DIR" settings-page-backup "${@:2}"
             ;;
 
         settings-page-restore)
-            # The Settings page's restore (handle-action restore-backup):
-            # restore_backup --from-settings-page, in place, on the copy the
-            # handler made of the upload. The file and its password
-            # (ONIONPRESS_BACKUP_PASSWORD) came through WordPress: a backup
-            # holding an OnionHeaven hub's keys or OnionHome's name registry
-            # is refused, the hub data is never written, and a backup of
-            # another address is refused (no one at this host to ask; the
-            # Mac asks). Exit 3 with the reason as the last line of stdout;
-            # the handler restarts OnionPress after a success. The handler's
-            # --json and --confirmed are the Mac's: ignored here.
+            # The Settings page's restore (handle-action restore-backup), the
+            # shared CLI's (cli.cmd_settings_page_restore, the Mac's; issue
+            # #406): backup.restore_from_backup in place with
+            # through_wordpress=True, never the install-from-backup
+            # `restore`. The file and its password (ONIONPRESS_BACKUP_PASSWORD)
+            # came through WordPress: a backup holding an OnionHeaven hub's
+            # keys or OnionHome's name registry is refused, the hub data is
+            # never written, and on Linux a backup of another address is
+            # refused (no one at this host to ask; the Mac asks). Exit 3
+            # with the reason in the answer; the handler restarts OnionPress
+            # after a success. The heartbeat client is stopped and started
+            # around the key change by the CLI (onionpress.heartbeat_unit).
             setup_db_passwords
-            read_backup_password
-            if [ -z "$BACKUP_PASS" ] || [ -z "${2:-}" ]; then
-                echo "ERROR: settings-page-restore <backup.zip>, the password in ONIONPRESS_BACKUP_PASSWORD" >&2
-                exit 1
-            fi
-            spr_rc=0
-            spr_out=$(restore_backup "$BACKUP_PASS" "$2" --from-settings-page 2>>"$LOG_FILE") || spr_rc=$?
-            if [ "$spr_rc" -ne 0 ]; then
-                # restore_backup stopped it (it held the old key)
-                start_heartbeat_client
-                [ "$spr_rc" -ne 3 ] || printf '%s\n' "$spr_out" | tail -n 1
-                exit "$spr_rc"
-            fi
-            printf '%s\n' "$spr_out" | tail -n 1
+            op_py --data-dir "$DATA_DIR" settings-page-restore "${@:2}"
             ;;
 
         settings-page-update-check)
@@ -3999,7 +3327,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Full lifecycle test — backup, uninstall, install, restore,
             # verify. Ported from ~300 lines of bash to src/onionpress/
             # scrub.py for the phase orchestration + structured verify
-            # checks. Heavy phases (create_backup, restore_backup, the
+            # checks. Heavy phases (the backup, the restore, the
             # install.sh run) still go through bash subcommands; the
             # Python module is the orchestration glue, sudo keep-alive,
             # and verify checks.
@@ -4034,7 +3362,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
                         # Pre-validate the WP admin password BEFORE any
                         # destructive work. Without this, a typo'd password
-                        # makes create_backup error out mid-script, leaving
+                        # makes the backup error out mid-script, leaving
                         # the user in a "Fix it or Ctrl-C" limbo. Three
                         # tries; abort cleanly on failure — install stays
                         # intact.
@@ -4045,8 +3373,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                         fi
                         mkdir -p "$HOME/OnionPress/backups"
                         bp_path="$HOME/OnionPress/backups/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
-                        if create_backup "$PROMPTED_WP_PASS" "$bp_path"; then
-                            echo "Backup saved to: $bp_path"
+                        # The shared CLI's backup (it prints where it saved);
+                        # the password in the environment, never on argv.
+                        if ONIONPRESS_BACKUP_PASSWORD="$PROMPTED_WP_PASS" op_py --data-dir "$DATA_DIR" backup -o "$bp_path"; then
                             echo ""
                             echo "IMPORTANT: Copy this file somewhere safe before continuing!"
                             echo "  e.g.: scp $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}'):$bp_path ."
