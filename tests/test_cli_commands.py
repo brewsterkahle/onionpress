@@ -30,7 +30,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from onionpress import cli, confirm, hub_backup, onionheaven  # noqa: E402
+from onionpress import cli, confirm, hub_backup, onionheaven, updater  # noqa: E402
 from onionpress.backup import (  # noqa: E402
     HUB_DATA_NOT_RESTORED_NOTE, HUB_DATA_RESTORED_LOG, ONION_KEY_LEFT_OUT_NOTE,
     SettingsPageBackupRefused, SettingsPageRestoreRefused, sealed_skipped_message,
@@ -324,19 +324,30 @@ class TestHubContext(Sandbox):
 # check-for-update, update, uninstall
 # ---------------------------------------------------------------------------
 
+def _release(result, assets=("OnionPress.dmg", "onionpress.deb", "SHA256SUMS")):
+    """An updater.Release from the (data, version) pairs these tests
+    describe releases with."""
+    data, version = result
+    return updater.Release(f"v{version}", version, data, list(assets))
+
+
 class TestCheckForUpdateReport(Sandbox):
 
-    def _report(self, result, *, others=(), offsets=(), json_output=False, log_lines=()):
-        def check(current, log=None):
-            for line in log_lines:
-                log(line)
-            return result
-        with mock.patch("onionpress.updater.check_for_update", side_effect=check), \
-                mock.patch("onionpress.updater.detect_other_instances",
-                           return_value=list(others)), \
+    def _report(self, result, *, others=(), offsets=(), json_output=False, error=None,
+                os_name="macos"):
+        """*result* is (data, version) or None (up to date: the release is
+        the installed 2.5.0); *error* is what the lookup failed with."""
+        if error is not None:
+            find = mock.patch("onionpress.updater.find_release",
+                              side_effect=updater.UpdateError(error))
+        else:
+            find = mock.patch("onionpress.updater.find_release",
+                              return_value=_release(result or ({}, "2.5.0")))
+        with find, mock.patch("onionpress.updater.detect_other_instances",
+                              return_value=list(others)), \
                 mock.patch("onionpress.updater.detect_active_offsets",
                            return_value=list(offsets)) as active:
-            rc = cli.check_for_update_report("2.5.0", self.log, json_output)
+            rc = cli.check_for_update_report("2.5.0", self.log, json_output, os_name=os_name)
         self.assertEqual(rc, 0)
         self.active = active
         return self.out.getvalue()
@@ -346,6 +357,7 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertIn("Installed: 2.5.0", text)
         self.assertIn("Update available: 2.6.0  (published 2026-10-01)", text)
         self.assertIn("\nFixes.\n", text)
+        self.assertIn("Run 'onionpress update' to install it.", text)
         self.assertNotIn("other users", text)
 
     def test_long_notes_are_cut(self):
@@ -355,19 +367,20 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertIn("published ?", text)
 
     def test_up_to_date(self):
-        self.assertIn("Already up to date.", self._report(None))
+        self.assertIn("Already up to date (release v2.5.0).", self._report(None))
 
     def test_a_failed_check_is_never_up_to_date(self):
-        text = self._report(None, log_lines=["Update check failed: no network"])
+        text = self._report(None, error="no network")
         self.assertIn("Update check failed: no network", text)
         self.assertNotIn("up to date", text)
         self.out.truncate(0)
         self.out.seek(0)
-        self._report(None, json_output=True, log_lines=["Update check failed: no network"])
+        self._report(None, json_output=True, error="no network")
         doc = json.loads(self.out.getvalue())
-        self.assertEqual(doc["error"], "Update check failed: no network")
+        self.assertEqual(doc["error"], "no network")
         self.assertIsNone(doc["latest"])
         self.assertFalse(doc["update_available"])
+        self.assertFalse(doc["installable"])
         self.assertTrue(any("failed" in m for m in self.logged))
 
     def test_the_json_report(self):
@@ -378,6 +391,8 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertEqual(doc["current"], "2.5.0")
         self.assertEqual(doc["latest"], "2.6.0")
         self.assertTrue(doc["update_available"])
+        self.assertTrue(doc["installable"])
+        self.assertIsNone(doc["install_problem"])
         self.assertEqual(doc["release_url"],
                          "https://github.com/brewsterkahle/onionpress/releases/tag/v2.6.0")
         self.assertIsNone(doc["error"])
@@ -385,6 +400,27 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertEqual(doc["active_offsets"], [10000])
         self.assertEqual(doc["port_offset"], 10000)
         self.assertRegex(doc["checked_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_release_the_platform_cannot_install(self):
+        # The Mac wants a .dmg and SHA256SUMS; Linux its .deb and the sums.
+        with mock.patch("onionpress.updater.find_release",
+                        return_value=_release(({}, "2.6.0"), assets=("onionpress.deb",))), \
+                mock.patch("onionpress.updater.detect_other_instances", return_value=[]):
+            cli.check_for_update_report("2.5.0", self.log, True, os_name="macos")
+            mac = json.loads(self.out.getvalue())
+            self.out.truncate(0)
+            self.out.seek(0)
+            cli.check_for_update_report("2.5.0", self.log, True, os_name="linux")
+            linux = json.loads(self.out.getvalue())
+            self.out.truncate(0)
+            self.out.seek(0)
+            cli.check_for_update_report("2.5.0", self.log, False, os_name="linux")
+            text = self.out.getvalue()
+        self.assertEqual((mac["update_available"], mac["installable"]), (True, False))
+        self.assertIn("has no .dmg", mac["install_problem"])
+        self.assertEqual((linux["update_available"], linux["installable"]), (True, False))
+        self.assertIn("publishes no SHA256SUMS", linux["install_problem"])
+        self.assertIn("cannot install it: release v2.6.0 publishes no SHA256SUMS", text)
 
     def test_offsets_are_asked_only_with_other_users(self):
         os.environ["ONIONPRESS_PORT_OFFSET"] = "not-a-number"
@@ -436,8 +472,9 @@ class TestCmdUpdate(Sandbox):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         p = self.stack.enter_context
-        self.check = p(mock.patch("onionpress.updater.check_for_update",
-                                  return_value=self.release))
+        # GitHub's answer: the release (newer), or the installed 2.5.0.
+        self.check = p(mock.patch("onionpress.updater.find_release",
+                                  return_value=_release(self.release)))
         self.install = p(mock.patch("onionpress.updater.download_and_install",
                                     return_value="2.6.0"))
         self.others = p(mock.patch("onionpress.updater.detect_other_instances",
@@ -449,27 +486,57 @@ class TestCmdUpdate(Sandbox):
         self.start_agent = p(mock.patch("onionpress.daemon.start_agent"))
 
     def _update(self, **kw):
-        return cli.cmd_update(self.paths, self.log, **kw)
+        return cli.cmd_update(self.paths, self.log, os_name="macos", **kw)
+
+    def up_to_date(self):
+        self.check.return_value = _release(({}, "2.5.0"))
 
     def test_check_reports_the_bundles_version(self):
         with mock.patch("onionpress.cli.check_for_update_report", return_value=0) as report:
-            self.assertEqual(self._update(check=True, json_output=True), 0)
-        report.assert_called_once_with("2.5.0", self.log, True)
+            self.assertEqual(self._update(check=True, json_output=True, pre=True), 0)
+        report.assert_called_once_with("2.5.0", self.log, True, version=None, pre=True,
+                                       os_name="macos")
         self.install.assert_not_called()
 
     def test_without_a_plist_the_running_version_is_the_current_one(self):
         os.remove(os.path.join(self.app, "Contents", "Info.plist"))
-        self.check.return_value = None
+        self.check.return_value = _release(({}, cli.__version__))
         self.assertEqual(self._update(json_output=True), 0)
         self.assertEqual(self.answer()["current"], cli.__version__)
 
+    def test_a_lookup_failure_installs_nothing(self):
+        self.check.side_effect = updater.UpdateError("GitHub's answer did not describe a release.")
+        self.assertEqual(self._update(yes=True, json_output=True), 1)
+        self.assertIn("did not describe a release. Nothing was installed.", self.answer()["error"])
+        self.install.assert_not_called()
+
+    def test_a_release_without_a_dmg_installs_nothing(self):
+        self.check.return_value = _release(self.release, assets=("SHA256SUMS",))
+        self.assertEqual(self._update(yes=True, json_output=True), 1)
+        self.assertIn("has no .dmg. Nothing was installed.", self.answer()["error"])
+        self.install.assert_not_called()
+
+    def test_force_installs_a_release_that_is_not_newer(self):
+        self.up_to_date()
+        self.assertEqual(self._update(yes=True, json_output=True), 0)
+        self.install.assert_not_called()
+        self.assertEqual(self._update(yes=True, force=True, json_output=True), 0)
+        self.install.assert_called_once()
+        self.assertEqual(self.install.call_args.args[1], "2.5.0")
+
+    def test_a_chosen_version_reaches_the_lookup(self):
+        self._update(yes=True, version="2.6.0", pre=True)
+        self.check.assert_called_with("2.6.0", True, log=self.log)
+
     def test_up_to_date(self):
-        self.check.return_value = None
+        self.up_to_date()
         self.assertEqual(self._update(), 0)
-        self.assertIn("Installed: 2.5.0\nChecking GitHub for updates...\nAlready up to date.",
+        self.assertIn("Installed: 2.5.0\nChecking GitHub for updates...\nAlready up to date "
+                      "(OnionPress 2.5.0; release v2.5.0). Nothing to install.\n"
+                      "To install v2.5.0 anyway: onionpress update --version 2.5.0 --force",
                       self.out.getvalue())
         self.assertEqual(self._update(json_output=True), 0)
-        self.assertEqual(self.answer(), {"ok": True, "update_available": False,
+        self.assertEqual(self.answer(), {"ok": True, "update_available": False, "latest": "2.5.0",
                                          "current": "2.5.0"})
 
     def test_off_a_terminal_an_update_needs_yes(self):

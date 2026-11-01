@@ -199,7 +199,17 @@ ROWS = [
 
     # ---- the Mac bundle's own: no OnionPressCLI setup ----
     Row("update", ["update", "--check", "--yes", "--json"], "cli.cmd_update",
-        mock.call(ANY, ANY, check=True, yes=True, json_output=True), os_name="macos"),
+        mock.call(ANY, ANY, check=True, yes=True, json_output=True, version=None, pre=False,
+                  force=False, from_checkout=False, launcher=None), os_name="macos"),
+    # One updater on both platforms: Linux's launcher delegates to the same
+    # subcommand (with --launcher for its apt-get and checkout leaves).
+    Row("update", ["update", "--version", "2.6.0", "--pre", "--force", "--launcher", "/opt/l"],
+        "cli.cmd_update",
+        mock.call(ANY, ANY, check=False, yes=False, json_output=False, version="2.6.0",
+                  pre=True, force=True, from_checkout=False, launcher="/opt/l")),
+    Row("update", ["update", "--from-checkout"], "cli.cmd_update",
+        mock.call(ANY, ANY, check=False, yes=False, json_output=False, version=None,
+                  pre=False, force=False, from_checkout=True, launcher=None)),
     Row("uninstall", ["uninstall", "--check", "--json", "--confirmed", "uninstall"],
         "cli.cmd_uninstall",
         mock.call(ANY, ANY, ANY, "/stub/launcher", check=True, json_output=True,
@@ -682,11 +692,8 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(rc, 1)
 
     def test_the_mac_only_commands_elsewhere(self):
-        # `update` is the Linux launcher's own (the .deb's checked
-        # install), so the Python CLI has no Linux branch: help, exit 1.
-        rc, out, _ = self._main(["update"])
-        self.assertEqual(rc, 1)
-        self.assertIn("usage: onionpress", out)
+        # `update` runs on both platforms since 2.6.2 (its rows above);
+        # `uninstall` is still the Linux launcher's own.
         rc, out, _ = self._main(["uninstall", "--json"])
         self.assertEqual(rc, confirm.EXIT_FAILED)
         self.assertIn("Linux launcher", json.loads(out.strip().splitlines()[-1])["error"])

@@ -184,6 +184,43 @@ class TestDelegations(_Case):
         self.assertEqual(self.l.py_calls(), [f"{self.dd()} config list --json"])
 
 
+class TestUpdate(_Case):
+    """`update` is the Python's (one updater on both platforms); the
+    launcher keeps the two install leaves it calls back."""
+    STUBS = ("update_install_deb", "update_from_checkout")
+
+    def test_update_delegates_with_this_launcher(self):
+        for argv, want in ((("update",), "update --launcher {l}"),
+                           (("update", "--check", "--json"), "update --launcher {l} --check --json"),
+                           (("update", "--version", "2.6.0", "--pre", "--force"),
+                            "update --launcher {l} --version 2.6.0 --pre --force"),
+                           (("update", "--from-checkout"), "update --launcher {l} --from-checkout")):
+            with self.subTest(argv=argv):
+                r = self.l.run(*argv)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.l.py_calls(), [f"{self.dd()} {want.format(l=self.l.script)}"])
+                self.assertEqual(self.l.fn_calls(), [])
+
+    def test_yes_reaches_the_python(self):
+        # The global -y filter takes --yes out of argv: it comes back.
+        r = self.l.run("update", "-y")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} update --launcher {self.l.script} --yes"])
+        r = self.l.run("update", "--check", env={"ONIONPRESS_YES": "true"})
+        self.assertEqual(self.l.py_calls(),
+                         [f"{self.dd()} update --launcher {self.l.script} --check --yes"])
+
+    def test_the_leaves_run_the_bash(self):
+        r = self.l.run("update-install-deb", "/tmp/x/onionpress.deb", "--force")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.calls(), ["fn update_install_deb /tmp/x/onionpress.deb --force"])
+        r = self.l.run("update-from-checkout")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.calls(), ["fn update_from_checkout"])
+        r = self.l.run("update-install-deb", "/x.deb", env={"STUB_RC_UPDATE_INSTALL_DEB": "1"})
+        self.assertEqual(r.returncode, 1)
+
+
 class TestBackup(_Case):
     """`backup` is the CLI's, as the Mac's (issue #406): every argument
     passed on, the password left in the environment for the CLI to read

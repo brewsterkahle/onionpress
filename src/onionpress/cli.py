@@ -245,44 +245,39 @@ class _LogRecorder:
         self._log(msg)
 
 
-def check_for_update_report(current: str, log, json_output: bool = False) -> int:
-    """Check GitHub for a newer release. Always exits 0.
+def check_for_update_report(current: str, log, json_output: bool = False, *,
+                            version: str = None, pre: bool = False,
+                            os_name: str = None) -> int:
+    """Check GitHub for a newer release (updater.check_release: the
+    latest, or *version*; *pre* allows a pre-release). Always exits 0.
 
     On any failure (network down, GitHub rate-limited, parse error) the
     JSON output carries an ``error`` field and ``update_available`` is
-    false — callers render that to the user instead of crashing. The
-    report also names the other macOS users running OnionPress
-    (``other_instances``, ``active_offsets``, this install's
-    ``port_offset``): the shared bundle is replaced for everyone.
+    false — callers render that to the user instead of crashing.
+    ``installable`` says whether `onionpress update` on this platform
+    could install the release (its package and SHA256SUMS are published;
+    else ``install_problem`` says what is missing). The report also names
+    the other macOS users running OnionPress (``other_instances``,
+    ``active_offsets``, this install's ``port_offset``): the shared
+    bundle is replaced for everyone.
     """
     from datetime import datetime, timezone
     from . import updater
 
-    # ``updater.check_for_update`` conflates "up to date" and "error":
-    # both return ``None``. Capture the log to recover the distinction
-    # without touching updater.py.
-    error_msg = None
-
-    def capture_log(msg: str) -> None:
-        nonlocal error_msg
-        if "failed" in msg.lower():
-            error_msg = msg
-        log(msg)
-
-    result = updater.check_for_update(current, log=capture_log)
-
-    if result is not None:
-        release_data, latest = result
-        update_available = True
-        release_url = f"https://github.com/brewsterkahle/onionpress/releases/tag/v{latest}"
-        release_notes = (release_data.get("body") or "").strip()
-        published_at = release_data.get("published_at")
+    os_name = os_name or detect_os().value
+    c = updater.check_release(current, log=log, version=version, pre=pre, os_name=os_name)
+    error_msg = c.error
+    update_available = c.release is not None and c.newer
+    latest = c.release.version if c.release is not None else None
+    install_problem = c.install_problem if update_available else None
+    if update_available:
+        release_url = f"https://github.com/{updater.RELEASE_REPO}/releases/tag/{c.release.tag}"
+        release_notes = (c.release.data.get("body") or "").strip()
+        published_at = c.release.data.get("published_at")
     else:
-        update_available = False
         release_url = None
         release_notes = None
         published_at = None
-        latest = None if error_msg else current
 
     others = updater.detect_other_instances()
     try:
@@ -293,6 +288,8 @@ def check_for_update_report(current: str, log, json_output: bool = False) -> int
         "current": current,
         "latest": latest,
         "update_available": update_available,
+        "installable": update_available and install_problem is None,
+        "install_problem": install_problem,
         "release_url": release_url,
         "release_notes": release_notes,
         "published_at": published_at,
@@ -318,8 +315,13 @@ def check_for_update_report(current: str, log, json_output: bool = False) -> int
                        else release_notes[:800] + "\n... (truncated)")
             print()
             print(snippet)
+        if install_problem:
+            print(f"An update is available, but 'onionpress update' cannot install it: "
+                  f"{install_problem}")
+        else:
+            print("Run 'onionpress update' to install it.")
     else:
-        print("Already up to date.")
+        print(f"Already up to date (release {c.release.tag}).")
     if others:
         print()
         print("Note: other users are running OnionPress:")
@@ -345,50 +347,105 @@ def _bundle_owner_hint(install_path: str) -> str:
     return hint
 
 
-def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
-               json_output: bool = False, app_path: str = None) -> int:
-    """`onionpress update` on a Mac: a new release from GitHub, installed
-    by the staged bundle swap (updater.download_and_install: the new
-    bundle is copied beside the old one and renamed into place last, since
-    this very process runs out of the bundle being replaced). The menubar
-    relaunches after. --check only reports (check_for_update_report, with
-    the other users running OnionPress); without --yes a terminal is asked
-    and a non-terminal refused. The answer: {"ok": true, "version"} or
-    {"error", "permission_denied"} (another account owns the bundle)."""
-    import plistlib
-    from . import confirm as _confirm, updater
-    app_path = app_path or os.environ.get("ONIONPRESS_APP_PATH") or paths.app_bundle
-    current = __version__
-    try:
-        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
-            current = plistlib.load(f).get("CFBundleShortVersionString", current)
-    except (OSError, ValueError):
-        pass
-    if check:
-        return check_for_update_report(current, log, json_output)
+# What `onionpress update --from-checkout` needs and refuses.
+FROM_CHECKOUT_LINUX_ONLY_MSG = ("--from-checkout installs a git checkout on Linux "
+                                "(linux/install-tree.sh); a Mac's bundle is built from one.")
+FROM_CHECKOUT_ALONE_MSG = "--from-checkout takes no other option."
+# The install leaves the Linux launcher keeps (bash): the apt-get install
+# of a checked package and a developer's checkout.
+UPDATE_INSTALL_DEB_VERB = "update-install-deb"
+UPDATE_FROM_CHECKOUT_VERB = "update-from-checkout"
+UPDATE_TOOLS_LINUX = ("dpkg-deb", "apt-get", "sudo")
 
+
+def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
+               json_output: bool = False, app_path: str = None, version: str = None,
+               pre: bool = False, force: bool = False, from_checkout: bool = False,
+               launcher: str = None, os_name: str = None) -> int:
+    """`onionpress update` on both platforms: a release from GitHub (the
+    latest, or --version X.Y.Z; --pre allows a pre-release), installed
+    once it is newer than the installed version (--force for a reinstall
+    or a downgrade) and its package matches the release's SHA256SUMS
+    (updater.check_release, fetch_deb / download_and_install).
+
+    The install step is the platform's. A Mac's bundle is replaced by the
+    staged bundle swap (updater.download_and_install: the new bundle is
+    copied beside the old one and renamed into place last, since this
+    very process runs out of the bundle being replaced; the menubar
+    relaunches after). On Linux the checked onionpress.deb goes to the
+    launcher's `update-install-deb` leaf (sudo apt-get install, then the
+    launcher's update_finish restarts the site); --from-checkout, for
+    developers, is the launcher's `update-from-checkout` leaf alone.
+
+    --check only reports (check_for_update_report); without --yes a
+    terminal is asked and a non-terminal refused. The answer: {"ok": true,
+    "version"} or {"error", "permission_denied"} (another account owns
+    the Mac bundle)."""
+    from . import confirm as _confirm, updater
+    os_name = os_name or detect_os().value
+    mac = os_name == "macos"
+    if from_checkout:
+        if mac:
+            return _confirm.answer_error(FROM_CHECKOUT_LINUX_ONLY_MSG, json_output, code=2)
+        if check or force or pre or yes or version is not None:
+            return _confirm.answer_error(FROM_CHECKOUT_ALONE_MSG, json_output, code=2)
+        launcher = launcher or _linux_launcher(paths)
+        rc = subprocess.run([launcher, UPDATE_FROM_CHECKOUT_VERB]).returncode
+        if rc != 0:
+            return _confirm.answer_error(
+                f"installing from the checkout failed (exit {rc}); see {paths.log_file}.",
+                json_output, code=rc)
+        return _confirm.answer_ok(json_output, from_checkout=True)
+
+    if mac:
+        app_path = app_path or os.environ.get("ONIONPRESS_APP_PATH") or paths.app_bundle
+    current = updater.installed_version(os_name, app_path=app_path)
+    if check:
+        return check_for_update_report(current, log, json_output, version=version, pre=pre,
+                                       os_name=os_name)
+
+    log("Checking for OnionPress updates...")
     if not json_output:
         print(f"Installed: {current}")
         print("Checking GitHub for updates...")
-    result = updater.check_for_update(current, log=log)
-    if not result:
-        return _confirm.answer_ok(json_output, text="Already up to date.",
-                                  update_available=False, current=current)
-    release_data, latest = result
+    c = updater.check_release(current, log=log, version=version, pre=pre, os_name=os_name)
+    if c.error:
+        return _confirm.answer_error(f"{c.error} Nothing was installed.", json_output)
+    release = c.release
+    latest = release.version
+    if not c.newer and not force:
+        log(f"update: {current} is up to date (release {release.tag})")
+        return _confirm.answer_ok(
+            json_output,
+            text=(f"Already up to date (OnionPress {current}; release {release.tag}). "
+                  f"Nothing to install.\n"
+                  f"To install {release.tag} anyway: onionpress update --version {latest} --force"),
+            update_available=False, current=current, latest=latest)
+    if c.install_problem:
+        log(f"ERROR: update: {c.install_problem}")
+        return _confirm.answer_error(f"{c.install_problem} Nothing was installed.", json_output)
+    if not mac:
+        problem = _linux_update_problem()
+        if problem:
+            log(f"ERROR: update: {problem}")
+            return _confirm.answer_error(f"{problem} Nothing was installed.", json_output)
+        launcher = launcher or _linux_launcher(paths)
+
     if not json_output:
-        print(f"Update available: {latest}  (published {release_data.get('published_at', '?')})")
-        notes = (release_data.get("body") or "").strip()
+        print(f"Update available: {latest}  (published {release.data.get('published_at', '?')})")
+        notes = (release.data.get("body") or "").strip()
         if notes:
             print()
             print(notes if len(notes) <= 800 else notes[:800] + "\n... (truncated)")
             print()
-        others = updater.detect_other_instances()
-        if others:
-            print("Note: other users are running OnionPress:")
-            for o in others:
-                print(f"  - {o['user']} (pid {o['pid']})")
-            print("Updating replaces the shared app bundle for everyone.")
-            print()
+        if mac:
+            others = updater.detect_other_instances()
+            if others:
+                print("Note: other users are running OnionPress:")
+                for o in others:
+                    print(f"  - {o['user']} (pid {o['pid']})")
+                print("Updating replaces the shared app bundle for everyone.")
+                print()
     if not yes:
         if sys.stdin is None or not sys.stdin.isatty():
             return _confirm.answer_error(
@@ -401,6 +458,10 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
         if reply not in ("y", "yes"):
             print("Aborted.")
             return 0
+
+    if not mac:
+        return _update_linux(paths, log, release, current, launcher, force=force,
+                             json_output=json_output)
 
     log(f"Update: downloading and installing v{latest}...")
     if not json_output:
@@ -426,7 +487,7 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
                             port_offset=os.environ.get("ONIONPRESS_PORT_OFFSET"))
 
     try:
-        updater.download_and_install(release_data, latest, app_path, log=log,
+        updater.download_and_install(release.data, latest, app_path, log=log,
                                      before_swap=_stop_daemon, after_swap=_start_daemon)
     except PermissionError as e:
         log(f"Auto-update failed (permission denied): {e}")
@@ -446,6 +507,69 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
         json_output,
         text=f"Installed v{latest}. Quit and relaunch OnionPress to use the new version.",
         version=latest, current=current)
+
+
+def _linux_launcher(paths):
+    from . import handle_action as _ha
+    return _ha.default_launcher(paths, "linux")
+
+
+def _linux_update_problem():
+    """Why a Linux release install cannot go ahead here: this OnionPress
+    runs from another tree than the package installs, or a tool the
+    install needs is missing. None when it can."""
+    from . import updater
+    install_dir = os.environ.get("ONIONPRESS_INSTALL_DIR") or updater.RELEASE_INSTALL_DIR
+    if install_dir != updater.RELEASE_INSTALL_DIR:
+        return (f"this OnionPress runs from {install_dir}; the release package installs "
+                f"{updater.RELEASE_INSTALL_DIR}.")
+    import shutil as _shutil
+    for tool in UPDATE_TOOLS_LINUX:
+        if _shutil.which(tool) is None:
+            return f"{tool} is not installed; it is needed to install a release."
+    return None
+
+
+def _update_linux(paths, log, release, current, launcher, *, force, json_output):
+    """Linux's install: the release's onionpress.deb and SHA256SUMS into a
+    folder of this user's own (mkdtemp: mode 700), checked
+    (updater.fetch_deb), then the launcher's `update-install-deb` leaf
+    (sudo apt-get install, then update_finish). The folder goes either
+    way."""
+    import tempfile
+    from . import confirm as _confirm, updater
+    log(f"Downloading {updater.RELEASE_DEB} and {updater.RELEASE_SUMS} of {release.tag}...")
+    if not json_output:
+        print(f"Downloading OnionPress {release.version}...")
+    try:
+        tmp = tempfile.mkdtemp(prefix="onionpress-update.")
+    except OSError as e:
+        return _confirm.answer_error(
+            f"could not make a temporary folder ({e}). Nothing was installed.", json_output)
+    try:
+        try:
+            deb_path, _ = updater.fetch_deb(release, tmp, log=log)
+        except updater.UpdateError as e:
+            log(f"ERROR: update: {e}")
+            return _confirm.answer_error(f"{e} Nothing was installed.", json_output)
+        if not json_output:
+            print(f"Checked: {updater.RELEASE_DEB} matches the sha256 in the release's "
+                  f"{updater.RELEASE_SUMS}.")
+            print(f"Installing OnionPress {release.version} (sudo apt-get install)...")
+        log(f"Installing {release.tag} with apt-get ({launcher} {UPDATE_INSTALL_DEB_VERB})...")
+        argv = [launcher, UPDATE_INSTALL_DEB_VERB, deb_path] + (["--force"] if force else [])
+        # The leaf's sudo may ask for a password: the terminal is its.
+        rc = subprocess.run(argv).returncode
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(tmp, ignore_errors=True)
+    if rc != 0:
+        log(f"ERROR: update: {UPDATE_INSTALL_DEB_VERB} exited {rc}")
+        return _confirm.answer_error(
+            f"installing the package failed. Check {paths.log_file} for details.", json_output)
+    return _confirm.answer_ok(
+        json_output, text=f"Installed OnionPress {release.version}.",
+        version=release.version, current=current)
 
 
 def cmd_uninstall(paths, docker, log, launcher, *, check: bool = False,
@@ -1795,27 +1919,39 @@ def _run_reset(run):
 def _add_update(sub, name):
     p = sub.add_parser(
         name,
-        help="(macOS) Check GitHub for a new release and install it, replacing "
-             "the app bundle (--check to only check, --yes to skip the prompt)")
+        help="Check GitHub for a new OnionPress release and install it: a Mac's "
+             "app bundle is replaced (the staged swap); on Linux the release's "
+             "onionpress.deb is installed with sudo apt-get once it matches the "
+             "release's SHA256SUMS (--check to only check, --yes to skip the prompt)")
     p.add_argument("--check", action="store_true", help="Only check; install nothing")
     p.add_argument("--yes", "-y", action="store_true",
                    help="Install without prompting (scripts, the menubar)")
     p.add_argument("--json", action="store_true",
                    help="Answer with one JSON object on the last line")
+    p.add_argument("--version", metavar="X.Y.Z", default=None,
+                   help="That release instead of the latest")
+    p.add_argument("--pre", action="store_true",
+                   help="Allow a pre-release (without --version: the newest release, "
+                        "pre-release or not)")
+    p.add_argument("--force", action="store_true",
+                   help="Install even when the release is not newer (a reinstall or a downgrade)")
+    p.add_argument("--from-checkout", action="store_true",
+                   help="(Linux, for developers) install a git checkout instead of a release "
+                        "($HOME/tmp/onionpress, $HOME/onionpress or /opt/onionpress-src), "
+                        "unchecked beyond git; takes no other option")
+    p.add_argument("--launcher", default=None,
+                   help="(Linux) the launcher whose install steps run (the .deb's by default)")
 
 
 def _run_update(run):
-    # On Linux `update` is the launcher's own (the .deb's checked install):
-    # onionpress's help, exit 1, after OnionPressCLI's setup as before.
-    if detect_os() != OS.MACOS:
-        _cli(run)
-        return run.help()
-    # Replaces the bundle this process runs from: no OnionPressCLI setup,
-    # nothing but the updater.
+    # Replaces the bundle this process runs from (a Mac) or the package it
+    # runs from (Linux): no OnionPressCLI setup, nothing but the updater.
     args = run.args
     paths = resolve_paths(data_dir=args.data_dir)
     return cmd_update(paths, _make_log_func(paths.log_file), check=args.check,
-                      yes=args.yes, json_output=args.json)
+                      yes=args.yes, json_output=args.json, version=args.version,
+                      pre=args.pre, force=args.force, from_checkout=args.from_checkout,
+                      launcher=args.launcher)
 
 
 def _add_uninstall(sub, name):

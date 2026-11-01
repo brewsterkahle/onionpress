@@ -57,15 +57,35 @@
   section above GitHub's generated PR list and refuses a version without
   one; the tree's version must have one. `TestReleaseHistory` in
   `tests/test_release_sha256sums.py`.
-- `onionpress update` (Linux) installs only a release `.deb` matching its
-  `SHA256SUMS` line, of the tag's version, newer than installed; the
-  Settings page's update only checks (anything in WordPress can request
-  it). `tests/test_linux_release_update.py`.
+- **`onionpress update` is one updater on both platforms: `cli.cmd_update`
+  over `updater.py`** (`find_release`/`check_release`: the latest, or
+  `--version X.Y.Z`; `--pre` allows a pre-release; a draft, a tag that is
+  not `v` + a release version, or an answer for another tag is refused;
+  `version_newer` compares numbers, `--force` reinstalls or downgrades).
+  Both launchers' `update` cases delegate; the Linux launcher keeps only
+  the install leaves the Python calls back, `update-install-deb` and
+  `update-from-checkout`. No second lookup, comparator or `SHA256SUMS`
+  parser anywhere. `tests/test_linux_release_update.py`,
+  `tests/test_cli_dispatch.py`.
+- On Linux `updater.fetch_deb` installs only a release `.deb` matching
+  its `SHA256SUMS` line, the onionpress package of the tag's version,
+  newer than installed (`/opt/onionpress/VERSION`), downloaded from the
+  release's own URL into a 0700 folder; then `sudo apt-get install -y
+  --no-remove` in the leaf and `update_finish` (`pull --policy missing`).
+  Off a terminal it needs `--yes` (the launcher's `-y` filter passes it
+  on). `tests/test_linux_release_update.py`.
+- The Settings page's update only checks, on both platforms (anything in
+  WordPress can request it): `handle_action._update` runs `update --check
+  --json`, keeps the answer five minutes in `update-check.json` (GitHub
+  allows 60 lookups an hour) and writes `update-result.json` with
+  `installable` and how to install. `TestUpdate` in
+  `tests/test_handle_action.py`.
 - The Mac update mounts a DMG only if it matches the release's `SHA256SUMS`.
   `DmgChecksumTest` in `tests/test_updater_staged_swap.py`.
-- Update-check curl passes `--cacert /etc/ssl/cert.pem` only where it
-  exists; `--json` always exits 0 and reports `error`, which UIs show as
-  failure. `tests/test_update_check_ca_bundle.py`.
+- Every curl in `updater.py` is `_curl_argv` (`--fail`, HTTPS only,
+  `--cacert /etc/ssl/cert.pem` only where it exists); `--check --json`
+  always exits 0 and reports `error`, which UIs show as failure.
+  `tests/test_update_check_ca_bundle.py`.
 - **What goes into `/opt/onionpress` is one list: `linux/install-tree.sh`**
   (the .deb, `install.sh`, `update --from-checkout`). It refuses links and
   special files; `--from-checkout` takes only a clean, non-world-writable
