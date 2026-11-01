@@ -110,6 +110,40 @@ class TestTrayDialogs(unittest.TestCase):
         self.assertIn("/opt/onionpress/onionpress uninstall;", body)
 
 
+class TestTrayReadsTheDaemonsState(unittest.TestCase):
+    """The tray's Status poller reads daemon-state.json through
+    daemon_client.read_state, as the menubar does (#523), never
+    status.json itself."""
+
+    def setUp(self):
+        self.tray = _read(TRAY)
+
+    def test_the_poller_is_a_view_of_the_state_file(self):
+        self.assertIn("from onionpress import daemon_client  # noqa: E402", self.tray)
+        self.assertIn("STATE_FILE = daemon_client.state_path(DATA_DIR)", self.tray)
+        self.assertIn("state = daemon_client.read_state(DATA_DIR)", self.tray)
+        self.assertIn('status = state.get("status") if state else None', self.tray)
+        for gone in ("STATUS_FILE", "status.json\")", "json.load", "import json", '"error_message"'):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, self.tray)
+        tree = ast.parse(self.tray)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "open":
+                self.assertFalse(node.args and isinstance(node.args[0], ast.Name)
+                                 and node.args[0].id.endswith("FILE"),
+                                 f"line {node.lineno}: the tray opens a status file itself")
+
+    def test_the_states_it_shows(self):
+        # The writer's `state` is the daemon's display state: "stuck" and
+        # "offline" are shown as starting, not as stopped.
+        self.assertIn('STARTING_STATES = ("starting", "stuck", "offline")', self.tray)
+        for reader in ("_update_icon", "_update_status_line", "_maybe_announce", "_maybe_show_setup"):
+            with self.subTest(reader=reader):
+                body = self.tray[self.tray.index(f"    def {reader}("):]
+                body = body[:body.index("\n    def ", 10)]
+                self.assertIn("STARTING_STATES", body)
+
+
 class TestLinuxLauncherBackupCheck(unittest.TestCase):
     """`onionpress backup --check --json [--user U]` on Linux is the shared
     CLI's check, the password in the environment; without --check the

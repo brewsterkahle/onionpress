@@ -570,7 +570,8 @@ class TestSettingsPageOnlyChecks(_Harness):
         # The shared handler (onionpress.handle_action) runs the launcher's
         # settings-page-update-check on Linux, which only reports.
         handler = _read("src/onionpress/handle_action.py")
-        update = handler[handler.index("def _update(host):"):handler.index("# -- recent logs")]
+        update = handler[handler.index("def _update(host):"):]
+        update = update[:update.index("\n# ----")]
         self.assertIn('if host.os_name != "macos":', update)
         self.assertIn('host.run_launcher(["settings-page-update-check"]', update)
         self.assertLess(update.index('["settings-page-update-check"]'), update.index("return"))

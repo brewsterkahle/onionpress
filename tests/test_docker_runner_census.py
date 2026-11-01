@@ -44,7 +44,7 @@ REVIEWED = {
     "src/onionpress/handle_action.py": 1,
     "src/onionpress/hub_backup.py": 6,
     "src/onionpress/key_manager.py": 5,
-    "src/onionpress/launcher_ops.py": 3,
+    "src/onionpress/launcher_ops.py": 2,
     "src/onionpress/multisite.py": 6,
     # Started by the browser, outside the app's package: it cannot import
     # the runner.

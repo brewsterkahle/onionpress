@@ -19,8 +19,10 @@
 """OnionPress tray app for Ubuntu / Linux desktops.
 
 A thin presentation layer around the bash launcher: the widgets only.
-Polls ~/.onionpress/status.json every 2 seconds and reflects state via
-the AppIndicator. Every action is `/opt/onionpress/onionpress <subcommand>`
+Polls the daemon's state file (~/.onionpress/daemon-state.json, written
+by `onionpress write-status` until the daemon runs on Linux, #407; read
+through onionpress.daemon_client as the Mac menubar reads it) every 2
+seconds and reflects state via the AppIndicator. Every action is `/opt/onionpress/onionpress <subcommand>`
 run through the UIs' shared client (src/onionpress/ui_client.py, issue
 #526: the Mac menubar runs the same code), so the headless / SSH-only
 path remains the single source of truth.
@@ -40,7 +42,6 @@ if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
     sys.exit(0)
 
 import fcntl
-import json
 import logging
 import logging.handlers
 import signal
@@ -65,6 +66,7 @@ from gi.repository import Gtk, GLib, AyatanaAppIndicator3 as AppIndicator, Notif
 # The .deb installs the package beside this script (linux/install-tree.sh):
 # a tray without it is a broken install, not a degraded mode.
 from onionpress import config as _op_config  # noqa: E402
+from onionpress import daemon_client  # noqa: E402
 from onionpress import launcher_ops  # noqa: E402
 from onionpress import setup_logic as _setup_logic  # noqa: E402
 from onionpress import ui_client  # noqa: E402
@@ -73,7 +75,9 @@ from onionpress import ui_client  # noqa: E402
 # ─── Constants ──────────────────────────────────────────────────────────
 
 DATA_DIR = os.path.expanduser("~/.onionpress")
-STATUS_FILE = os.path.join(DATA_DIR, "status.json")
+# The daemon's state file (one status writer for both platforms, #523):
+# its "status" is status.json's content, the fields read below.
+STATE_FILE = daemon_client.state_path(DATA_DIR)
 PIDFILE = os.path.join(DATA_DIR, "tray.pid")
 TRAY_LOG = os.path.join(DATA_DIR, "tray.log")
 ASSETS_DIR = os.path.join(INSTALL_DIR, "assets")
@@ -107,6 +111,10 @@ APP_ICON_PATH = os.path.join(INSTALL_DIR, "app-icon.png")
 
 POLL_INTERVAL_SEC = 2
 NOTIFY_DEBOUNCE_SEC = 60
+# status.json's `state` is the daemon's display state (daemon_client):
+# "running", "stopped", or one of these, the containers up but the site
+# not reachable yet (or no longer).
+STARTING_STATES = ("starting", "stuck", "offline")
 
 
 
@@ -147,11 +155,19 @@ def acquire_single_instance_lock() -> Optional[int]:
     return fd
 
 
-# ─── 2. Status reader (host-side status.json poller) ────────────────────
+# ─── 2. Status reader (the daemon's state file, polled) ─────────────────
+
+def _read_status() -> Optional[dict]:
+    """status.json's content from the daemon's state file, or None."""
+    state = daemon_client.read_state(DATA_DIR)
+    status = state.get("status") if state else None
+    return status if isinstance(status, dict) else None
+
 
 class Status:
-    """Owns the latest status.json snapshot. Polls every POLL_INTERVAL_SEC
-    seconds via GLib so callbacks fire on the GTK main thread.
+    """Owns the latest status snapshot (the daemon's state file's
+    "status"). Polls every POLL_INTERVAL_SEC seconds via GLib so
+    callbacks fire on the GTK main thread.
     """
 
     def __init__(self, on_change):
@@ -164,7 +180,6 @@ class Status:
         self.bootstrap_pct = 0
         self.uptime_seconds = 0
         self.containers = {}
-        self.error_message = None
         self.wp_port = 8080
         self.raw = {}
         self._mtime = 0.0
@@ -173,18 +188,16 @@ class Status:
 
     def _poll(self) -> bool:
         try:
-            mtime = os.path.getmtime(STATUS_FILE)
+            mtime = os.path.getmtime(STATE_FILE)
         except OSError:
             return True
         if mtime == self._mtime:
             return True
         self._mtime = mtime
 
-        try:
-            with open(STATUS_FILE) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log(f"status.json read failed: {e}")
+        data = _read_status()
+        if data is None:
+            log("the daemon's state file holds no status")
             return True
 
         old = (self.state, self.wp_installed, self.onboarded,
@@ -199,7 +212,6 @@ class Status:
         self.bootstrap_pct = int(data.get("bootstrap_pct", 0))
         self.uptime_seconds = int(data.get("uptime_seconds", 0))
         self.containers = dict(data.get("containers", {}))
-        self.error_message = data.get("error_message")
         # wp_port reflects the launcher's port-offset detection so the
         # tray opens the right localhost URL on multi-user / port-conflict
         # installs (e.g. system tor on 9050 pushes WP to 18080).
@@ -1184,21 +1196,11 @@ class SetupDialog:
 
     def _status_wp_installed(self) -> bool:
         # The tray's Status snapshot lives on a different thread; this
-        # helper reads the raw dict to avoid races during provisioning.
-        try:
-            import json as _json
-            with open(STATUS_FILE) as f:
-                return bool(_json.load(f).get("wp_installed"))
-        except Exception:
-            return False
+        # helper reads the file to avoid races during provisioning.
+        return bool((_read_status() or {}).get("wp_installed"))
 
     def _status_onion_address(self) -> str:
-        try:
-            import json as _json
-            with open(STATUS_FILE) as f:
-                return _json.load(f).get("onion_address", "") or ""
-        except Exception:
-            return ""
+        return (_read_status() or {}).get("onion_address", "") or ""
 
     # ── Thread-safe UI helpers ────────────────────────────────────────
 
@@ -1335,7 +1337,7 @@ class OnionPressTray:
         state = self.status.state
         if state == "running" and not self.status.serving_from_wayback:
             self.indicator.set_icon_full(ICON_RUNNING, "OnionPress running")
-        elif state == "starting":
+        elif state in STARTING_STATES:
             self.indicator.set_icon_full(ICON_STARTING, "OnionPress starting")
         else:
             self.indicator.set_icon_full(ICON_STOPPED, "OnionPress stopped")
@@ -1354,7 +1356,7 @@ class OnionPressTray:
                 label = f"● {ui_client.short_onion(self.status.onion_address)}"
             else:
                 label = "● OnionPress is running"
-        elif self.status.state == "starting":
+        elif self.status.state in STARTING_STATES:
             if self.status.bootstrap_pct and self.status.bootstrap_pct < 100:
                 label = f"Starting… (Tor {self.status.bootstrap_pct}%)"
             elif not self.status.wp_installed:
@@ -1369,7 +1371,8 @@ class OnionPressTray:
         self.menu_status.set_label(label)
 
     def _maybe_announce(self):
-        if not self._announced_starting and self.status.state in ("starting", "running"):
+        if not self._announced_starting and (
+                self.status.state == "running" or self.status.state in STARTING_STATES):
             if not self.status.wp_installed:
                 self._announced_starting = True
                 if is_raspberry_pi():
@@ -1411,7 +1414,7 @@ class OnionPressTray:
         # installed. SetupDialog's _provision branches on wp_installed
         # to either install_fresh_wordpress (new path) or
         # provision_existing_wordpress (legacy auto-bootstrap path).
-        if self.status.state not in ("running", "starting"):
+        if self.status.state != "running" and self.status.state not in STARTING_STATES:
             return
         self._setup_shown = True
         self._show_setup_dialog()

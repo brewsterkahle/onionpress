@@ -2412,24 +2412,14 @@ def _run_wordpress_status(run):
     return 0
 
 
-def _add_linux_status(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Print the Linux launcher's status.json from the probes it "
-             "gathered (named fields; see linux_status.FIELDS)")
-    p.add_argument("--field", action="append", default=[], metavar="NAME=VALUE",
-                   help="One probe result; repeatable")
-
-
-def _run_linux_status(run):
-    from . import linux_status
-    try:
-        fields = linux_status.parse_fields(run.args.field)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    print(json.dumps(linux_status.build(fields), indent=2))
-    return 0
+def _run_write_status(run):
+    # The Linux launcher's write_status() (issue #523): the daemon's two
+    # status documents from one pass (onionpress.status_writer, the one
+    # writer for both platforms), logged in the launcher's format. Every
+    # 30 s beside a live stack, so no OnionPressCLI setup; always 0.
+    from . import status_writer
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    return status_writer.run_once(paths, _launcher_log_func())
 
 
 # ---- the launchers' start steps (Phase 4, #120) ----
@@ -3223,7 +3213,14 @@ _COMMANDS = [
      _plain("Read status JSON on stdin and print the fields the WordPress "
             "container may see"),
      _run_wordpress_status),
-    ("linux-status", _add_linux_status, _run_linux_status),
+    ("write-status",
+     _plain("Write the status documents from one pass over the stack: "
+            "daemon-state.json and ~/.onionpress/status.json, and, while "
+            "the stack runs, status.json, version, config-current.json and "
+            "recent-logs.txt in the shared volume (the Linux launcher's "
+            "write_status; the Mac daemon writes them itself); always "
+            "exits 0"),
+     _run_write_status),
     ("retire-old-onionheaven-containers",
      _plain("Before the first `compose up`: remove every onionpress-tor, "
             "onionheaven and onionheaven-(poll|takeover)-N that does not "

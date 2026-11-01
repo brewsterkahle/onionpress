@@ -182,6 +182,32 @@ def _make_format1_backup(root, metadata, name="legacy.zip"):
     return out
 
 
+class TestBackupMetadata(unittest.TestCase):
+    def test_plain_backup(self):
+        from datetime import datetime, timezone
+        from onionpress.backup import linux_backup_metadata
+        m = linux_backup_metadata(
+            "a.onion", "2.6.0", excludes_image_derivatives=True,
+            now=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc))
+        self.assertEqual(m, {
+            "onion_address": "a.onion", "backup_date": "2026-01-02T03:04:05Z",
+            "onionpress_version": "2.6.0", "platform": "linux",
+            "has_onionheaven": False, "excludes_image_derivatives": True})
+
+    def test_hub_and_wordpress_fields(self):
+        from onionpress.backup import linux_backup_metadata
+        m = linux_backup_metadata(
+            "", "1", has_onionheaven=True,
+            hub_fields={"onionheaven_data": "sealed", "other": 1},
+            hub_unchecked=True, with_host_secrets=False,
+            secrets_left_out=["CLOUDFLARE_TUNNEL_TOKEN"])
+        self.assertEqual(m["onionheaven_data"], "sealed")
+        self.assertNotIn("other", m)
+        self.assertIs(m["onionheaven_data_unchecked"], True)
+        self.assertIs(m["excludes_host_secrets"], True)
+        self.assertEqual(m["secret_config_left_out"], ["CLOUDFLARE_TUNNEL_TOKEN"])
+
+
 class TestOnionAddressRule(unittest.TestCase):
 
     def test_accepts_derived_addresses(self):
