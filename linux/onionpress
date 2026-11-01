@@ -1672,9 +1672,12 @@ main() {
             PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -I -B -c "
 import sys
 sys.path[:0] = sys.argv.pop(1).split(':')
+from onionpress.docker import Docker
+from onionpress.platform import resolve_paths
 from onionpress.setup_logic import provision_interactive
-sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.argv[1:]) else 1)
-" "$ONIONPRESS_PYTHONPATH" "${@:2}"
+sys.exit(0 if provision_interactive(docker=Docker(resolve_paths(data_dir=sys.argv.pop(1))),
+                                    adopt_existing='--adopt-existing' in sys.argv[1:]) else 1)
+" "$ONIONPRESS_PYTHONPATH" "$DATA_DIR" "${@:2}"
             ;;
 
         provision-post-install)

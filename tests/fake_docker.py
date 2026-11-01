@@ -54,7 +54,7 @@ class FakeDocker:
             return DockerResult(0, b"" if binary else "", b"" if binary else "")
         if isinstance(ans, DockerResult):
             return ans
-        if isinstance(ans, subprocess.CompletedProcess):
+        if hasattr(ans, "returncode"):      # a CompletedProcess, or a Mock shaped like one
             return DockerResult(ans.returncode, ans.stdout if ans.stdout is not None else "",
                                 ans.stderr if ans.stderr is not None else "")
         if isinstance(ans, bool):
@@ -145,3 +145,16 @@ def over_binary(docker_bin, env=None, log_func=None):
     d._docker_bin = docker_bin
     d._env = dict(os.environ if env is None else env)
     return d
+
+
+def no_docker(test):
+    """A FakeDocker that fails *test* on any call: for the paths that must
+    refuse before they look at a container."""
+    return FakeDocker(lambda argv, **kw: test.fail(f"docker called: {argv}"))
+
+
+def on_path(log_func=None):
+    """A real Docker running `docker` from PATH with this process's
+    environment: for the harnesses that put a stub docker script on PATH
+    (the environment keeps the no-docker DOCKER_HOST a test run sets)."""
+    return over_binary("docker", log_func=log_func)

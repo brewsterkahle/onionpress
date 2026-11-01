@@ -89,11 +89,11 @@ class TestAnswers(Base):
 
 
 class FakeDocker:
-    docker_bin = "docker"
+    """What setup_from_terminal asks of its Docker: container_running (the
+    wp-cli calls go through the patched _run_wp)."""
 
     def __init__(self, installed=False, running=True, tor=True):
         self.installed, self.running, self.tor = installed, running, tor
-        self.env = {}
 
     def container_running(self, name):
         return self.tor
@@ -115,7 +115,7 @@ class TestFlow(Base):
         with mock.patch.dict(os.environ, env or {}), \
              mock.patch.object(setup_logic, "_run_wp", side_effect=wp), \
              mock.patch.object(setup_logic, "install_fresh_wordpress", self.install), \
-             mock.patch.object(setup_logic.onion_hostname, "read_served_address_with",
+             mock.patch.object(setup_logic.onion_hostname, "read_served_address",
                                return_value=ADDR), \
              mock.patch("onionpress.onionheaven.release_onionheaven") as release:
             self.release = release
@@ -228,8 +228,7 @@ class TestFlow(Base):
                                side_effect=lambda b, args, **k: calls.append((args, k)) or
                                mock.Mock(returncode=0)):
             self.assertTrue(setup_logic.save_archive_login(
-                "me@example.org", "pw", docker_bin="docker", docker_env=None,
-                log=self.logs.append))
+                "me@example.org", "pw", docker=FakeDocker(), log=self.logs.append))
         self.assertEqual([(a, k["input"]) for a, k in calls], [
             (("option", "update", "onionpress_archive_s3_access"), "AK"),
             (("option", "update", "onionpress_archive_s3_secret"), "SK")])

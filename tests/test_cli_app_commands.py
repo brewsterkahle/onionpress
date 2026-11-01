@@ -307,7 +307,7 @@ class TestOpen(Sandbox):
                 mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
             rc = app_commands.open_command("onion", self.paths, with_address(), out=self.out)
         self.assertEqual(rc, 0)
-        lt.assert_called_once_with(f"http://{ADDR}/")
+        lt.assert_called_once_with(f"http://{ADDR}/", docker=mock.ANY)
         ob.assert_called_once_with("file:///home/x/OnionPress/.auto-login/login-1.html",
                                    prefer_tor=True)
         self.assertEqual(self.out.getvalue(), f"Opening http://{ADDR}/\n")

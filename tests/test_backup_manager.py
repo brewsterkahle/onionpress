@@ -25,6 +25,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from onionpress import backup as backup_manager
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker, on_path  # noqa: E402
 from onionpress import backup_crypto
 from onionpress import key_manager
 
@@ -364,6 +366,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
 
     def test_zip_structure(self):
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address="testaddr.onion",
             username="admin",
             password="testpass",
@@ -397,6 +400,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         archive carries the in-container regeneration marker and metadata
         says so."""
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address=_FAKE_DERIVED_ADDR,
             username="admin",
             password="testpass",
@@ -424,6 +428,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         # Pass the address that actually derives from the fake key so the
         # caller-vs-derived agreement check is satisfied.
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address=_FAKE_DERIVED_ADDR,
             username="admin",
             password="testpass",
@@ -456,6 +461,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         # source of stale caller input is greppable in analytics.
         stale_caller_addr = "stale123stale123stale123stale123stale123stale123stale1.onion"
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address=stale_caller_addr,
             username="admin",
             password="testpass",
@@ -481,6 +487,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
 
     def test_password_protection(self):
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address=_FAKE_DERIVED_ADDR,
             username="admin",
             password="secret",
@@ -519,6 +526,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         os.chmod(fake_zip, 0o755)
         with self.assertRaises(Exception) as ctx:
             backup_manager.create_backup(
+                docker=on_path(),
                 onion_address=_FAKE_DERIVED_ADDR, username="admin",
                 password="pw", output_path=self.output_zip, version="2.5.2",
                 log_func=self.logs.append, data_dir=self.data_dir,
@@ -530,6 +538,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
 
     def test_backup_file_is_owner_only(self):
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address=_FAKE_DERIVED_ADDR, username="admin", password="pw",
             output_path=self.output_zip, version="2.5.2",
             log_func=self.logs.append, data_dir=self.data_dir,
@@ -538,6 +547,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
 
     def test_readme_names_the_version_and_format(self):
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address=_FAKE_DERIVED_ADDR, username="admin", password="pw",
             output_path=self.output_zip, version="9.8.7",
             log_func=self.logs.append, data_dir=self.data_dir,
@@ -550,6 +560,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
 
     def test_log_messages(self):
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address="test.onion",
             username="admin",
             password="pw",
@@ -568,6 +579,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         """Verify temp staging directory is removed after backup."""
         before = set(os.listdir(tempfile.gettempdir()))
         backup_manager.create_backup(
+            docker=on_path(),
             onion_address="test.onion",
             username="admin",
             password="pw",
@@ -676,7 +688,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
     def test_restore_returns_metadata(self):
         zip_path = self._make_backup_zip()
         metadata = backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
         self.assertEqual(metadata["onion_address"], _FAKE_DERIVED_ADDR)
         self.assertEqual(metadata["username"], "admin")
         # No KEY-MISMATCH when backup metadata and key agree.
@@ -691,7 +703,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
         marker = os.path.join(self.data_dir, ".regenerate-derivatives-pending")
         self.assertFalse(os.path.exists(marker))
         backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
         self.assertTrue(os.path.exists(marker))
         self.assertTrue(any("resized images" in m for m in self.logs), self.logs)
 
@@ -712,7 +724,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
         stale_metadata_addr = "stalemdz" * 7 + ".onion"
         zip_path = self._make_backup_zip(metadata_address=stale_metadata_addr)
         metadata = backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
 
         # The returned metadata is mutated in-place so menubar.do_restore
         # picks up the derived address without further code changes.
@@ -844,7 +856,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
         zip_path = self._make_backup_zip(password="rightpw")
         with self.assertRaises(ValueError) as ctx:
             backup_manager.restore_from_backup(
-                zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir)
+                zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
         self.assertIn("password", str(ctx.exception).lower())
 
     def test_garbage_plaintext_on_wrong_password_raises_valueerror(self):
@@ -860,7 +872,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
                  zip_path, "wrongpw", self.logs.append, staging=staging)),
             ("restore_from_backup", "extractall",
              lambda: backup_manager.restore_from_backup(
-                 zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir)),
+                 zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir, docker=on_path())),
             ("peek_backup_metadata", "extract",
              lambda: backup_manager.peek_backup_metadata(zip_path, "wrongpw")),
         ]
@@ -902,7 +914,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
 
         zip_path = self._make_backup_zip()
         backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
 
         vanity_dir = os.path.join(self.data_dir, "shared", "vanity-keys")
 
@@ -921,7 +933,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
     def test_restore_logs_progress(self):
         zip_path = self._make_backup_zip()
         backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
         log_text = " ".join(self.logs)
         self.assertIn("extracting", log_text)
         self.assertIn("Tor keys", log_text)
@@ -932,7 +944,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
         zip_path = self._make_backup_zip()
         before = set(os.listdir(tempfile.gettempdir()))
         backup_manager.restore_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir, docker=on_path())
         after = set(os.listdir(tempfile.gettempdir()))
         new_dirs = [d for d in (after - before) if d.startswith("onionpress-restore-")]
         self.assertEqual(len(new_dirs), 0, "Staging directory was not cleaned up")
@@ -977,7 +989,7 @@ class TestRestoreRoundTripFormat2(TestRestoreRoundTrip):
             ("extract_backup", lambda: backup_manager.extract_backup(
                 zip_path, "wrongpw", self.logs.append, staging=staging)),
             ("restore_from_backup", lambda: backup_manager.restore_from_backup(
-                zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir)),
+                zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir, docker=on_path())),
         ]
         for label, call in cases:
             with self.subTest(label):
@@ -1698,7 +1710,7 @@ class TestEnsureMultisiteConstants(unittest.TestCase):
 
     def test_adds_constants_for_multisite(self):
         """Should call wp config set for each multisite constant."""
-        backup_manager._ensure_multisite_constants(self.logs.append)
+        backup_manager._ensure_multisite_constants(self.logs.append, docker=on_path())
 
         with open(self.call_log) as f:
             calls = f.read()
@@ -1708,7 +1720,7 @@ class TestEnsureMultisiteConstants(unittest.TestCase):
             self.assertIn(name, calls, f"Missing wp config set for {name}")
 
     def test_logs_message(self):
-        backup_manager._ensure_multisite_constants(self.logs.append)
+        backup_manager._ensure_multisite_constants(self.logs.append, docker=on_path())
         self.assertTrue(any("multisite" in msg.lower() for msg in self.logs))
 
     def test_skips_when_not_multisite(self):
@@ -1724,7 +1736,7 @@ class TestEnsureMultisiteConstants(unittest.TestCase):
             f.write('exit 0\n')
         os.chmod(fake_docker, 0o755)
 
-        backup_manager._ensure_multisite_constants(self.logs.append)
+        backup_manager._ensure_multisite_constants(self.logs.append, docker=on_path())
 
         with open(self.call_log) as f:
             calls = f.read()
@@ -1742,53 +1754,41 @@ class TestVerifyWpAdminPasswordAny(unittest.TestCase):
         )
 
     def test_match_returns_username(self):
-        with mock.patch(
-            "onionpress.backup.subprocess.run",
-            return_value=self._make_result(stdout="alice\n"),
-        ):
-            ok, info = backup_manager.verify_wp_admin_password_any("hunter2")
+        docker = FakeDocker(lambda argv, **kw: self._make_result(stdout="alice\n"))
+        ok, info = backup_manager.verify_wp_admin_password_any("hunter2", docker=docker)
         self.assertTrue(ok)
         self.assertEqual(info, "alice")
 
     def test_no_match_returns_failure(self):
         # WP-CLI exits 1 with no stdout when no admin password matches.
-        with mock.patch(
-            "onionpress.backup.subprocess.run",
-            return_value=self._make_result(returncode=1, stdout=""),
-        ):
-            ok, info = backup_manager.verify_wp_admin_password_any("wrong")
+        docker = FakeDocker(lambda argv, **kw: self._make_result(returncode=1, stdout=""))
+        ok, info = backup_manager.verify_wp_admin_password_any("wrong", docker=docker)
         self.assertFalse(ok)
         self.assertIn("does not match", info)
 
     def test_timeout_returns_failure(self):
-        with mock.patch(
-            "onionpress.backup.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(cmd="wp eval", timeout=15),
-        ):
-            ok, info = backup_manager.verify_wp_admin_password_any("anything")
+        def timeout(argv, **kw):
+            raise subprocess.TimeoutExpired(cmd="wp eval", timeout=15)
+        ok, info = backup_manager.verify_wp_admin_password_any("anything",
+                                                               docker=FakeDocker(timeout))
         self.assertFalse(ok)
         self.assertIn("Timed out", info)
 
     def test_generic_exception_returns_failure(self):
-        # Anything not TimeoutExpired (e.g. FileNotFoundError if docker
-        # isn't installed) should surface as an error message rather
-        # than propagating.
-        with mock.patch(
-            "onionpress.backup.subprocess.run",
-            side_effect=FileNotFoundError("docker"),
-        ):
-            ok, info = backup_manager.verify_wp_admin_password_any("anything")
+        # A docker that cannot be run (the runner answers 127) surfaces
+        # as an error message rather than a wrong password.
+        def missing(argv, **kw):
+            raise FileNotFoundError("docker")
+        ok, info = backup_manager.verify_wp_admin_password_any("anything",
+                                                               docker=FakeDocker(missing))
         self.assertFalse(ok)
         self.assertIn("Error verifying password", info)
 
     def test_empty_stdout_returns_failure(self):
         # Defensive: exit 0 but no username on stdout should not be
         # treated as a successful verify.
-        with mock.patch(
-            "onionpress.backup.subprocess.run",
-            return_value=self._make_result(returncode=0, stdout=""),
-        ):
-            ok, info = backup_manager.verify_wp_admin_password_any("anything")
+        docker = FakeDocker(lambda argv, **kw: self._make_result(returncode=0, stdout=""))
+        ok, info = backup_manager.verify_wp_admin_password_any("anything", docker=docker)
         self.assertFalse(ok)
         self.assertIn("does not match", info)
 

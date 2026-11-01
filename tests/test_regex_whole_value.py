@@ -262,8 +262,7 @@ class TestOtherNameChecks(unittest.TestCase):
                               "admin_password": "hunter22",
                               "admin_email": email}).encode()
             h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-            h.server = types.SimpleNamespace(docker_bin="/x/docker", docker_env={},
-                                             log_func=lambda *_: None)
+            h.server = types.SimpleNamespace(docker=mock.Mock(), log_func=lambda *_: None)
             h.headers = {"Content-Length": str(len(body))}
             h.rfile, h.wfile = io.BytesIO(body), io.BytesIO()
             sent = []

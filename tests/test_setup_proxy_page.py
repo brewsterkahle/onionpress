@@ -31,6 +31,8 @@ for fake in ("AppKit", "Foundation", "objc"):
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import onion_proxy, setup_logic  # noqa: E402
+sys.path.insert(0, TESTS_DIR)
+from fake_docker import FakeDocker  # noqa: E402
 
 XSS = '"><script>alert(1)</script>'
 
@@ -48,16 +50,19 @@ class _SetupTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _handler(self, body=b""):
-        h, logs, sent = _handler(body)
+    def _handler(self, body=b"", run=None):
+        h, logs, sent = _handler(body, run)
         h.server.data_dir = self.tmpdir
         return h, logs, sent
 
 
-def _handler(body=b""):
+def _handler(body=b"", run=None):
+    """*run*: the subprocess.run stand-in the server's Docker answers
+    through (the tests patch subprocess.run with the same one for the
+    launcher hop)."""
     logs, sent = [], []
     h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-    h.server = types.SimpleNamespace(docker_bin="/x/docker", docker_env={},
+    h.server = types.SimpleNamespace(docker=FakeDocker(run, docker_bin="/x/docker", env={}),
                                      log_func=logs.append, onion_address=None,
                                      launcher_script="/x/onionpress",
                                      data_dir=None)
@@ -85,7 +90,7 @@ class TestSetupFailurePage(_SetupTest):
 
     def _post(self, fields, run):
         body = urlencode(fields).encode()
-        h, logs, sent = self._handler(body)
+        h, logs, sent = self._handler(body, run)
         with mock.patch.object(onion_proxy.subprocess, "run", run):
             h._handle_setup_post()
         return sent, h.wfile.getvalue().decode()
@@ -131,6 +136,7 @@ class TestSetupFailurePage(_SetupTest):
         def record(argv, **kwargs):
             calls.append(list(argv))
             return _run()(argv, **kwargs)
+        h.server.docker = FakeDocker(record, docker_bin="/x/docker", env={})
         with mock.patch.object(onion_proxy.subprocess, "run", record):
             h._handle_setup_post()
         self.assertEqual(sent[0][0], 503)
@@ -147,15 +153,15 @@ class TestSetupPostOnlyOnFirstRun(_SetupTest):
 
     def _post(self, run, origin=None, port=9077):
         body = urlencode(self.FIELDS).encode()
-        h, logs, sent = self._handler(body)
-        h.server.server_port = port
-        if origin is not None:
-            h.headers["Origin"] = origin
         calls = []
 
         def record(argv, **kwargs):
             calls.append(list(argv))
             return run(argv, **kwargs)
+        h, logs, sent = self._handler(body, record)
+        h.server.server_port = port
+        if origin is not None:
+            h.headers["Origin"] = origin
         with mock.patch.object(onion_proxy.subprocess, "run", record):
             h._handle_setup_post()
         return sent, calls, logs
@@ -212,7 +218,7 @@ class TestSetupFormPages(unittest.TestCase):
                          ["</script><script>t()</script>", "a&b"])
 
     def test_generated_password_is_attribute_safe(self):
-        h, _, sent = _handler()
+        h, _, sent = _handler(run=_run())
         with mock.patch.object(onion_proxy.subprocess, "run", _run()), \
                 mock.patch.object(onion_proxy.secrets, "choice", lambda chars: "&"):
             h._handle_setup_get()

@@ -38,6 +38,8 @@ sys.path.insert(0, SRC)
 
 from onionpress import multisite, wp_files  # noqa: E402
 from onionpress.docker import Docker  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker, over_binary  # noqa: E402
 
 ADDR = "op2" + "a" * 53 + ".onion"
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
@@ -265,7 +267,7 @@ exit 1
     def test_replaces_the_folder_whole(self):
         dest = "/var/www/html/wp-content/themes/onionpress"
         self._file("container" + dest + "/old.php", b"<?php // stale")
-        r = wp_files.put_tree(self.src, dest, docker_bin=self.docker, timeout=60)
+        r = wp_files.put_tree(self.src, dest, docker=over_binary(self.docker), timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._tree(dest[1:]), {"style.css": b"body {}",
                                                 "inc/functions.php": b"<?php // new"})
@@ -283,7 +285,7 @@ exit 1
     def test_merge_keeps_what_is_there(self):
         dest = "/var/www/html/wp-content"
         self._file("container" + dest + "/uploads/kept.jpg", b"jpg")
-        r = wp_files.put_tree(self.src, dest, merge=True, docker_bin=self.docker,
+        r = wp_files.put_tree(self.src, dest, merge=True, docker=over_binary(self.docker),
                               timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         tree = self._tree(dest[1:])
@@ -297,7 +299,7 @@ exit 1
         self._file("theme-src/creations/mine.txt", b"host's")
         self._file("theme-src/creations.txt", b"a file")
         self._file("theme-src/uploads/creations/kept.txt", b"nested")
-        r = wp_files.put_tree(self.src, dest, merge=True, docker_bin=self.docker,
+        r = wp_files.put_tree(self.src, dest, merge=True, docker=over_binary(self.docker),
                               timeout=60, skip=("creations",))
         self.assertEqual(r.returncode, 0, r.stderr)
         tree = self._tree(dest[1:])
@@ -313,7 +315,7 @@ exit 1
         logs = []
         with mock.patch.object(wp_files, "put_tree",
                                return_value=subprocess.CompletedProcess([], 0, "", "")) as put:
-            backup.put_wp_content(self.src, logs.append)
+            backup.put_wp_content(self.src, logs.append, docker=FakeDocker())
         self.assertEqual(put.call_args.kwargs["skip"], backup.WP_CONTENT_NEVER_RESTORED)
         self.assertEqual(backup.WP_CONTENT_NEVER_RESTORED, ("creations",))
         self.assertTrue([m for m in logs if "wp-content/creations is left out" in m], logs)
@@ -321,7 +323,7 @@ exit 1
         os.rename(os.path.join(self.src, "creations"), os.path.join(self.src, "uploads"))
         with mock.patch.object(wp_files, "put_tree",
                                return_value=subprocess.CompletedProcess([], 0, "", "")):
-            backup.put_wp_content(self.src, logs.append)
+            backup.put_wp_content(self.src, logs.append, docker=FakeDocker())
         self.assertEqual(logs, [])
 
     def test_the_launchers_cli_helper(self):
@@ -334,13 +336,18 @@ exit 1
         os.makedirs(bin_dir)
         os.rename(os.path.join(self.tmp, "bin-docker"), os.path.join(bin_dir, "docker"))
         dest = "/var/www/html/wp-content/plugins/cache-enabler"
-        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}):
-            rc = cli.main(["put-wp-tree", "--src", self.src, "--dest", dest])
+        data_dir = os.path.join(self.tmp, "data")
+        # No app bundle: the Docker the command builds runs the stub on
+        # PATH, never an installed OnionPress.app's docker.
+        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}), \
+                mock.patch("onionpress.platform.find_app_bundle", return_value=None):
+            rc = cli.main(["--data-dir", data_dir, "put-wp-tree", "--src", self.src, "--dest", dest])
             self.assertEqual(rc, 0)
             self.assertEqual(self._tree(dest[1:])["style.css"], b"body {}")
             os.symlink("/etc/passwd", os.path.join(self.src, "passwd.css"))
             with mock.patch("sys.stderr"):
-                rc = cli.main(["put-wp-tree", "--src", self.src, "--dest", dest])
+                rc = cli.main(["--data-dir", data_dir, "put-wp-tree", "--src", self.src,
+                               "--dest", dest])
             self.assertEqual(rc, 1)
 
     def test_a_link_in_the_source_is_refused_and_nothing_replaced(self):
@@ -348,7 +355,7 @@ exit 1
         self._file("container" + dest + "/old.php", b"<?php // stale")
         os.symlink("/etc/passwd", os.path.join(self.src, "passwd.css"))
         with self.assertRaises(ValueError):
-            wp_files.put_tree(self.src, dest, docker_bin=self.docker, timeout=60)
+            wp_files.put_tree(self.src, dest, docker=over_binary(self.docker), timeout=60)
         self.assertEqual(self._tree(dest[1:]), {"old.php": b"<?php // stale"})
         self.assertEqual(os.listdir(os.path.dirname(os.path.join(self.box, dest[1:]))),
                          ["onionpress"])
@@ -465,8 +472,7 @@ class TestSharedOnionAddress(unittest.TestCase):
             calls.append((list(argv), kw.get("input")))
             out = hostname_out if argv[1:3] == ["exec", "onionpress-tor"] else ""
             return subprocess.CompletedProcess(argv, 0, out, "")
-        with mock.patch.object(multisite.subprocess, "run", fake_run):
-            ok = multisite.write_shared_onion_address()
+        ok = multisite.write_shared_onion_address(docker=FakeDocker(fake_run))
         return ok, calls
 
     def test_read_from_tor_written_by_www_data(self):
@@ -475,7 +481,7 @@ class TestSharedOnionAddress(unittest.TestCase):
         self.assertEqual(calls[0][0], ["docker", "exec", "onionpress-tor", "cat",
                                        "/var/lib/tor/hidden_service/wordpress/hostname"])
         self.assertEqual(calls[1], (["docker"] + wp_files.put_file_args(
-            "/var/lib/onionpress/onion_address", "644"), ADDR + "\n"))
+            "/var/lib/onionpress/onion_address", "644"), (ADDR + "\n").encode()))
 
     def test_anything_but_one_address_is_not_written(self):
         for out in ("", "Generating...", ADDR + "\nSIGNAL HALT\n", ADDR.upper()):

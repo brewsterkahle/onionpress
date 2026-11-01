@@ -66,8 +66,8 @@ from onionpress.ui_helpers import (
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog, current_log_path
 from onionpress import redact
-from onionpress import wp_files
 from onionpress import ui_client
+from onionpress.docker import Docker
 from onionpress import auto_login
 from onionpress import splash_tips
 
@@ -321,6 +321,10 @@ class OnionPressApp(PortAttributes, rumps.App):
         else:
             _app_bundle = None
         self._paths = resolve_paths(data_dir=self.app_support, app_bundle=_app_bundle)
+        # The one docker runner (issue #477), for the first-run setup's
+        # one-shot wp-cli calls and the login token; every loop is the
+        # daemon's.
+        self.docker = Docker(self._paths, log_func=self.log)
 
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
@@ -1264,9 +1268,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         command line: ps shows every user's argv, and whoever redeems the
         token first is the admin. Log base_url, never the result.
         """
-        return auto_login.login_url(
-            base_url, docker_bin=os.path.join(self.bin_dir, "docker"),
-            log_func=self.log)
+        return auto_login.login_url(base_url, docker=self.docker, log_func=self.log)
 
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
@@ -1587,8 +1589,7 @@ class OnionPressApp(PortAttributes, rumps.App):
     def _read_onion_address(self):
         """Return the local wordpress .onion address, or None if not yet written."""
         try:
-            addr = onion_hostname.read_served_address_with(
-                os.path.join(self.bin_dir, "docker"))
+            addr = onion_hostname.read_served_address(self.docker)
             if addr:
                 return addr
         except Exception as e:
@@ -1620,14 +1621,9 @@ class OnionPressApp(PortAttributes, rumps.App):
         if name:
             return name
         try:
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            result = subprocess.run(
-                [docker_bin] + wp_files.wp_cli_args(
-                    "user", "list", "--role=administrator",
-                    "--field=user_login"),
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10,
-            )
+            result = self.docker.wp("user", "list", "--role=administrator",
+                                    "--field=user_login", timeout=10, offline=True,
+                                    quiet=True)
             if result.returncode == 0:
                 for line in result.stdout.splitlines():
                     login = line.strip()
@@ -1712,8 +1708,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             self._save_onionname(sw.admin_user, "", registered=False)
             return
 
-        docker_bin = os.path.join(self.bin_dir, "docker")
-        reg = Registrar(docker_bin=docker_bin, log=self.log)
+        reg = Registrar(docker_bin=self.docker.docker_bin, log=self.log)
 
         max_attempts = 5
         name = sw.admin_user
@@ -1773,15 +1768,11 @@ class OnionPressApp(PortAttributes, rumps.App):
         if not validate_name(old_name)[0] or not validate_name(new_name)[0]:
             self.log("onionname: rename aborted — name failed validation")
             return
-        docker_bin = os.path.join(self.bin_dir, "docker")
-        result = subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args(
-                "db", "query",
-                f"UPDATE wp_users SET user_login='{new_name}', "
-                f"user_nicename='{new_name}' WHERE user_login='{old_name}'"),
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=15
-        )
+        result = self.docker.wp(
+            "db", "query",
+            f"UPDATE wp_users SET user_login='{new_name}', "
+            f"user_nicename='{new_name}' WHERE user_login='{old_name}'",
+            timeout=15, offline=True, quiet=True)
         if result.returncode == 0:
             self.log(f"WordPress admin renamed: '{old_name}' -> '{new_name}'")
         else:
@@ -1799,10 +1790,8 @@ class OnionPressApp(PortAttributes, rumps.App):
             return
         try:
             from onionpress.setup_logic import install_fresh_wordpress
-            docker_bin = os.path.join(self.bin_dir, "docker")
             # One whole v3 address or "localhost": it becomes the site URL.
-            onion_addr = (onion_hostname.read_served_address_with(docker_bin)
-                          or "localhost")
+            onion_addr = onion_hostname.read_served_address(self.docker) or "localhost"
 
             def _log(msg):
                 self.log(msg)
@@ -1818,7 +1807,7 @@ class OnionPressApp(PortAttributes, rumps.App):
                 password=sw.admin_pass,
                 language=getattr(sw, "language", "en_US") or "en_US",
                 onion_addr=onion_addr,
-                docker_bin=docker_bin,
+                docker=self.docker,
                 launcher_bin=self.launcher_script,
                 log_func=_log,
             )

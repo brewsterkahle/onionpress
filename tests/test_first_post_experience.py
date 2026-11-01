@@ -21,7 +21,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from onionpress import setup_logic  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from onionpress import setup_logic
+from fake_docker import FakeDocker  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -144,7 +146,8 @@ class TestInstallWelcomePost(unittest.TestCase):
             "onionpress.setup_logic.subprocess.run", side_effect=responder,
         ) as mrun:
             ok = setup_logic.install_welcome_post(
-                blog_url="http://localhost/alice/", log_func=lambda m: None,
+                blog_url="http://localhost/alice/", docker=FakeDocker(mrun),
+                log_func=lambda m: None,
             )
         return ok, mrun
 
@@ -235,6 +238,7 @@ class TestWelcomePostWiring(unittest.TestCase):
         ) as mrun:
             setup_logic.provision_primary_subsite(
                 onionname="alice", site_title="Alice", onion_addr="abc.onion",
+                docker=FakeDocker(mrun),
             )
         updates = [a for a in _wp_calls(mrun) if a[:3] == ["post", "update", "1"]]
         self.assertEqual(len(updates), 1)
@@ -247,6 +251,7 @@ class TestWelcomePostWiring(unittest.TestCase):
         ) as mrun:
             setup_logic.provision_primary_subsite(
                 onionname="hub", site_title="Hub", onion_addr=branded,
+                docker=FakeDocker(mrun),
             )
         for argv in _wp_calls(mrun):
             self.assertNotEqual(argv[:2], ["post", "get"])

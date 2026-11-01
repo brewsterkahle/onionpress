@@ -381,15 +381,22 @@ _MULTISITE_CONSTANTS = {
 }
 
 
-def verify_wp_admin(username, password):
+def _wp(docker, *args, input=None, timeout=15):
+    """wp-cli as www-data through *docker* (the caller's
+    onionpress.docker.Docker), offline: nothing here needs the network."""
+    return docker.wp(*args, input=input, timeout=timeout, offline=True, quiet=True)
+
+
+def verify_wp_admin(username, password, *, docker):
     """Verify that the given credentials belong to a WordPress administrator.
 
     Returns (True, None) on success, or (False, error_message) on failure.
     """
     # Verify user exists and has administrator role
     try:
-        result = wp_files.wp_cli('user', 'get', username, '--field=roles',
-                                 timeout=15)
+        result = _wp(docker, 'user', 'get', username, '--field=roles')
+        if result.timed_out:
+            return (False, "Timed out connecting to WordPress container.")
         if result.returncode != 0:
             stderr = result.stderr.strip()
             if 'Invalid user' in stderr:
@@ -399,8 +406,6 @@ def verify_wp_admin(username, password):
         roles = result.stdout.strip()
         if 'administrator' not in roles:
             return (False, f"User '{username}' is not an administrator (roles: {roles}).")
-    except subprocess.TimeoutExpired:
-        return (False, "Timed out connecting to WordPress container.")
     except Exception as e:
         return (False, f"Error checking user role: {e}")
 
@@ -415,19 +420,18 @@ def verify_wp_admin(username, password):
         "echo 'ok';"
     )
     try:
-        result = wp_files.wp_cli('eval', php_code,
-                                 input=username + "\n" + password, timeout=15)
+        result = _wp(docker, 'eval', php_code, input=username + "\n" + password)
+        if result.timed_out:
+            return (False, "Timed out verifying password.")
         if result.returncode != 0:
             return (False, f"Incorrect password for '{username}'.")
-    except subprocess.TimeoutExpired:
-        return (False, "Timed out verifying password.")
     except Exception as e:
         return (False, f"Error verifying password: {e}")
 
     return (True, None)
 
 
-def verify_wp_admin_password_any(password):
+def verify_wp_admin_password_any(password, *, docker):
     """Verify *password* matches any WordPress administrator's account.
 
     Returns (True, username) on success, or (False, error_message).
@@ -452,17 +456,19 @@ def verify_wp_admin_password_any(password):
         "exit(1);"
     )
     try:
-        result = wp_files.wp_cli('eval', php_code, input=password, timeout=15)
+        result = _wp(docker, 'eval', php_code, input=password)
+        if result.timed_out:
+            return (False, "Timed out verifying password.")
+        if result.returncode == 127:    # docker could not be run
+            return (False, f"Error verifying password: {result.stderr.strip()}")
         if result.returncode == 0 and result.stdout.strip():
             return (True, result.stdout.strip())
         return (False, "Password does not match any administrator account.")
-    except subprocess.TimeoutExpired:
-        return (False, "Timed out verifying password.")
     except Exception as e:
         return (False, f"Error verifying password: {e}")
 
 
-def find_admin_username(data_dir=None):
+def find_admin_username(data_dir=None, *, docker):
     """The WordPress admin user's login, and whether it was found in
     WordPress (so the caller may record it as ONIONNAME).
 
@@ -477,8 +483,8 @@ def find_admin_username(data_dir=None):
     if name:
         return name, False
     try:
-        result = wp_files.wp_cli('user', 'list', '--role=administrator',
-                                 '--field=user_login', timeout=10)
+        result = _wp(docker, 'user', 'list', '--role=administrator',
+                     '--field=user_login', timeout=10)
         if result.returncode == 0:
             for line in result.stdout.splitlines():
                 login = line.strip()
@@ -489,12 +495,12 @@ def find_admin_username(data_dir=None):
     return "admin", False
 
 
-def get_admin_username(data_dir=None, log=None):
+def get_admin_username(data_dir=None, log=None, *, docker):
     """find_admin_username's login. With *log*, a login found in WordPress
     is recorded as ONIONNAME through config's checked writer, so the next
     call takes the fast path."""
     data_dir = data_dir or _default_data_dir()
-    login, found = find_admin_username(data_dir)
+    login, found = find_admin_username(data_dir, docker=docker)
     if found and log is not None:
         from . import config as op_config
         try:
@@ -551,9 +557,10 @@ def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None):
 WP_CONTENT_NEVER_RESTORED = ('creations',)
 
 
-def put_wp_content(src, log_func, timeout=None):
+def put_wp_content(src, log_func, timeout=None, *, docker):
     """Unpack the staged *src* over wp-content in the WordPress container,
-    as www-data (wp_files.put_tree). Not docker cp + chown -R as root: the
+    as www-data (wp_files.put_tree through *docker*, the caller's
+    onionpress.docker.Docker). Not docker cp + chown -R as root: the
     copy followed links www-data can plant in wp-content (the destination's
     own `wp-content/` too), and so did the trailing-slash chown. *timeout*
     defaults to one sized to *src* (wp_files.put_tree). A top-level
@@ -563,7 +570,7 @@ def put_wp_content(src, log_func, timeout=None):
             log_func(f"Restore: the backup's wp-content/{name} is left out: My "
                      f"Creations is the ~/OnionPress folder on this machine, never "
                      f"written by a restore")
-    r = wp_files.put_tree(src, '/var/www/html/wp-content', merge=True,
+    r = wp_files.put_tree(src, '/var/www/html/wp-content', docker=docker, merge=True,
                           timeout=timeout, skip=WP_CONTENT_NEVER_RESTORED)
     if r.returncode != 0:
         log_func(f"Restore: wp-content copy failed: {r.stderr.strip()[-300:]}")
@@ -732,9 +739,10 @@ def _stage_onion_key(staging, onion_address, include_onion_key, log_func):
 
 
 def create_backup(onion_address, username, password, output_path, version, log_func, *,
-                  data_dir=None, include_hub_data=True, include_host_secrets=True,
+                  docker, data_dir=None, include_hub_data=True, include_host_secrets=True,
                   include_onion_key=True):
-    """Create a full OnionPress backup zip; return its metadata.
+    """Create a full OnionPress backup zip; return its metadata. *docker*
+    is the caller's onionpress.docker.Docker (the one runner, issue #477).
 
     Args:
         onion_address: Current .onion address
@@ -776,7 +784,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         # 0. Workload stats — log once up front (issue #214). Read DB
         #    creds here so we can reuse them for the dump phase below
         #    without paying for two round trips through wp-cli.
-        db_creds = _get_db_credentials()
+        db_creds = _get_db_credentials(docker)
         stats = _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
 
         # 1. Extract Tor keys (OpenSSH PEM, the delivered-key format) out of
@@ -1227,11 +1235,12 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None,
     return staging, metadata
 
 
-def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
+def restore_from_backup(zip_path, password, log_func, *, docker, data_dir=None,
                         through_wordpress=False,
                         before_key_change=None,
                         confirm_address_change=None):
-    """Restore an OnionPress site from a backup zip.
+    """Restore an OnionPress site from a backup zip. *docker* is the
+    caller's onionpress.docker.Docker (the one runner, issue #477).
 
     Args:
         zip_path: Path to the backup .zip
@@ -1356,7 +1365,7 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
 
         # 2-6. Container-side artifacts + config overrides — shared with the
         # install-from-backup path (restore_container_artifacts / apply_config_overrides).
-        restore_container_artifacts(staging, metadata, log_func,
+        restore_container_artifacts(staging, metadata, log_func, docker=docker,
                                     hub_volumes=not through_wordpress,
                                     data_dir=data_dir)
         apply_config_overrides(staging, log_func, data_dir=data_dir,
@@ -1495,12 +1504,13 @@ def leave_healthcheck_key_out(tor_dir, data_dir, log_func):
         shutil.rmtree(staged, ignore_errors=True)
 
 
-def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True,
+def restore_container_artifacts(staging, metadata, log_func, *, docker, hub_volumes=True,
                                 name_registry=True, hub_data=None, data_dir=None):
     """Import a backup's container-side state into the RUNNING db + wordpress
     containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
     and multisite constants. Shared by restore_from_backup (in-place) and the
     install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
+    *docker* is the caller's onionpress.docker.Docker (the one runner).
 
     data_dir locates the host secrets file, the source of truth for the DB
     password (defaults to ~/.onionpress).
@@ -1537,7 +1547,7 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
         if not os.path.exists(sql_path):
             raise Exception("Backup is missing wordpress.sql")
 
-        db_creds = _get_db_credentials()
+        db_creds = _get_db_credentials(docker)
         # The source of truth for the password is the host secrets file, not
         # wp-config.php (WordPress's to write): the Settings page's restore is
         # reachable from WordPress, and a poisoned wp-config.php password would
@@ -1602,7 +1612,7 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     if wpcontent_dir and os.path.isdir(wpcontent_dir):
         with _phase_timer(log_func, 'RESTORE', 'wpcontent_extract'):
             log_func("Restore: copying wp-content (themes, plugins, uploads)...")
-            put_wp_content(wpcontent_dir, log_func)
+            put_wp_content(wpcontent_dir, log_func, docker=docker)
 
     # Surface Creations-exclusion reminder. The backup intentionally
     # skips wp-content/creations (it's the host-side bind mount of
@@ -1683,7 +1693,7 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     # constants when the container is recreated. Without these, wp core
     # is-installed --network fails and ensure_multisite skips conversion.
     with _phase_timer(log_func, 'RESTORE', 'multisite_constants'):
-        _ensure_multisite_constants(log_func)
+        _ensure_multisite_constants(log_func, docker=docker)
 
 
 # ─── Restoring OnionHome's name registry ────────────────────────────────
@@ -2012,7 +2022,7 @@ def apply_config_overrides(staging, log_func, *, data_dir=None, onion_address=''
                               log_func, onion_address)
 
 
-def _ensure_multisite_constants(log_func):
+def _ensure_multisite_constants(log_func, *, docker):
     """Re-add multisite constants to wp-config.php after restore.
 
     This fixes the bug where WordPress Docker generates a fresh wp-config.php
@@ -2022,18 +2032,13 @@ def _ensure_multisite_constants(log_func):
     Only adds constants if the database actually has multisite tables (wp_blogs).
     """
     # Check if the database has multisite tables before adding constants
-    try:
-        result = wp_files.wp_cli('db', 'query', "SHOW TABLES LIKE 'wp_blogs';",
-                                 timeout=15)
-        if result.returncode != 0 or 'wp_blogs' not in result.stdout:
-            return  # Not a multisite install, nothing to do
-    except (subprocess.TimeoutExpired, Exception):
-        return  # Can't check, skip rather than break single-site installs
+    result = _wp(docker, 'db', 'query', "SHOW TABLES LIKE 'wp_blogs';")
+    if result.returncode != 0 or 'wp_blogs' not in result.stdout:
+        return  # Not a multisite install (or not answered): nothing to do
 
     log_func("Restore: re-adding multisite constants to wp-config.php...")
     for name, value in _MULTISITE_CONSTANTS.items():
-        wp_files.wp_cli('config', 'set', name, value, '--raw',
-                        '--type=constant', timeout=15)
+        _wp(docker, 'config', 'set', name, value, '--raw', '--type=constant')
 
 
 def _restore_db_password(data_dir, fallback):

@@ -216,8 +216,7 @@ WELCOME_POST_CONTENT = """\
 def install_welcome_post(
     *,
     blog_url: str,
-    docker_bin: str = "docker",
-    docker_env: dict | None = None,
+    docker,
     log_func: Callable[[str], None] | None = None,
 ) -> bool:
     """Replace WordPress's stock "Hello world!" post on a freshly created
@@ -233,9 +232,8 @@ def install_welcome_post(
         if log_func:
             log_func(msg)
 
-    def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
-        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=docker_env,
-                               timeout=timeout)
+    def wp(*args, timeout: int = 30):
+        return _run_wp(docker, args, timeout=timeout)
 
     url_arg = f"--url={blog_url}"
     r = wp("post", "get", "1", "--field=post_title", url_arg)
@@ -293,31 +291,25 @@ echo "Success: password set for ", $u->user_login, "\n";
 '''
 
 
-def _run_wp(docker_bin, args, *, input=None, env=None, timeout=60):
-    """Run wp-cli in onionpress-wordpress as www-data (wp_files.wp_cli_args);
-    with *input*, `docker exec -i` and *input* on stdin.
+def _run_wp(docker, args, *, input=None, timeout=60):
+    """Run wp-cli in onionpress-wordpress as www-data through *docker*
+    (onionpress.docker.Docker.wp, the one front end); with *input*,
+    `docker exec -i` and *input* on stdin.
 
-    A timeout comes back as a failed CompletedProcess (returncode 124) whose
-    stderr names the wp command, not the argv: a TimeoutExpired's message
-    quotes the whole command line, and callers log what they catch.
+    Online (offline=False): the setup's `wp language core install`
+    downloads, and the rest run with the WordPress it loads as before,
+    update checks and all. A timeout comes back as a failed DockerResult
+    whose stderr names no argv: callers log what they get.
     """
-    try:
-        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=env,
-                               input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        name = " ".join(a for a in list(args)[:2] if a.isalpha())
-        return subprocess.CompletedProcess(
-            [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None),
-            124, "", f"wp {name} timed out after {timeout}s")
+    return docker.wp(*args, input=input, timeout=timeout, offline=False, quiet=True)
 
 
-def set_wp_user_password(login, password, *, docker_bin="docker", env=None,
-                         timeout=60):
+def set_wp_user_password(login, password, *, docker, timeout=60):
     """Set WordPress user *login*'s password. The password reaches PHP on
     stdin only (WP_SET_PASSWORD_PHP); it is never part of any argv or code.
-    Returns the CompletedProcess; returncode 0 on success."""
-    return _run_wp(docker_bin, ["eval", WP_SET_PASSWORD_PHP],
-                   input=f"{login}\n{password}", env=env, timeout=timeout)
+    Returns the DockerResult; returncode 0 on success."""
+    return _run_wp(docker, ["eval", WP_SET_PASSWORD_PHP],
+                   input=f"{login}\n{password}", timeout=timeout)
 
 
 # ─── Provisioning ────────────────────────────────────────────────────────────
@@ -327,8 +319,7 @@ def provision_primary_subsite(
     onionname: str,
     site_title: str,
     onion_addr: str = "localhost",
-    docker_bin: str = "docker",
-    docker_env: dict | None = None,
+    docker,
     log_func: Callable[[str], None] | None = None,
 ) -> bool:
     """Create the primary subsite at /<onionname>/ and configure it.
@@ -354,10 +345,8 @@ def provision_primary_subsite(
         if log_func:
             log_func(msg)
 
-    def wp(*args, timeout: int = 30,
-           stdin: str | None = None) -> subprocess.CompletedProcess:
-        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=docker_env,
-                               input=stdin, timeout=timeout)
+    def wp(*args, timeout: int = 30, stdin: str | None = None):
+        return _run_wp(docker, args, input=stdin, timeout=timeout)
 
     onion_addr = _site_address(onion_addr, log)
 
@@ -431,8 +420,7 @@ def provision_primary_subsite(
     #    on the stock title, so a re-run on an existing subsite is a no-op.
     install_welcome_post(
         blog_url=f"http://localhost/{onionname}/",
-        docker_bin=docker_bin,
-        docker_env=docker_env,
+        docker=docker,
         log_func=log_func,
     )
 
@@ -510,11 +498,10 @@ FOREIGN_INSTALL_MSG = (
 )
 
 
-def _wp_user_1_registered(docker_bin: str, docker_env: dict | None = None) -> str:
+def _wp_user_1_registered(docker) -> str:
     """User 1's `user_registered` as WordPress stores it ('' when it
     cannot be read)."""
-    r = _run_wp(docker_bin, ("user", "get", "1", "--field=user_registered"),
-                env=docker_env, timeout=30)
+    r = _run_wp(docker, ("user", "get", "1", "--field=user_registered"), timeout=30)
     if r.returncode != 0:
         return ""
     value = (r.stdout or "").split("\n", 1)[0].strip()
@@ -522,13 +509,12 @@ def _wp_user_1_registered(docker_bin: str, docker_env: dict | None = None) -> st
 
 
 def mark_wordpress_installed_by_onionpress(
-    data_dir: str, docker_bin: str = "docker",
+    data_dir: str, docker,
     log: Callable[[str], None] | None = None,
-    docker_env: dict | None = None,
 ) -> bool:
     """Record that OnionPress installed the WordPress now in the container.
     False, logged, when the marker cannot be written."""
-    stamp = _wp_user_1_registered(docker_bin, docker_env) or INSTALLED_BY_UNKNOWN
+    stamp = _wp_user_1_registered(docker) or INSTALLED_BY_UNKNOWN
     path = os.path.join(data_dir, INSTALLED_BY_ONIONPRESS_MARKER)
     try:
         os.makedirs(data_dir, mode=0o700, exist_ok=True)
@@ -541,7 +527,7 @@ def mark_wordpress_installed_by_onionpress(
     return True
 
 
-def wordpress_installed_by_onionpress(data_dir: str, docker_bin: str = "docker") -> bool:
+def wordpress_installed_by_onionpress(data_dir: str, docker) -> bool:
     """True when the marker says OnionPress installed the WordPress in the
     container: its stamp is user 1's registration time (or 'unknown', a
     stamp the install could not read), never a stale marker of an earlier
@@ -556,7 +542,7 @@ def wordpress_installed_by_onionpress(data_dir: str, docker_bin: str = "docker")
         return True
     if not _USER_REGISTERED_RE.fullmatch(stamp):
         return False
-    live = _wp_user_1_registered(docker_bin)
+    live = _wp_user_1_registered(docker)
     return bool(live) and live == stamp
 
 
@@ -567,8 +553,7 @@ def install_fresh_wordpress(
     password: str,
     language: str = "en_US",
     onion_addr: str = "localhost",
-    docker_bin: str = "docker",
-    docker_env: dict | None = None,
+    docker,
     launcher_bin: str | None = None,
     log_func: Callable[[str], None] | None = None,
     data_dir: str | None = None,
@@ -581,9 +566,9 @@ def install_fresh_wordpress(
     funnel through this single function with the user-typed creds, as
     does the browser extension proxy's /setup form (onion_proxy).
 
-    *docker_env* is the environment docker runs with (None: this
-    process's); the launcher hop and the background archive.org key
-    fetch use this process's environment.
+    *docker* is the caller's onionpress.docker.Docker: every wp-cli call
+    and the background archive.org key fetch run through it; the launcher
+    hop runs with this process's environment.
 
     Steps:
       1. wp core install (admin_user=onionname), then set the password on
@@ -609,8 +594,8 @@ def install_fresh_wordpress(
         if log_func:
             log_func(msg)
 
-    def wp(*args, timeout: int = 60) -> subprocess.CompletedProcess:
-        return _run_wp(docker_bin, args, env=docker_env, timeout=timeout)
+    def wp(*args, timeout: int = 60):
+        return _run_wp(docker, args, timeout=timeout)
 
     if _refuse_invalid_onionname(onionname, log):
         return False
@@ -640,8 +625,7 @@ def install_fresh_wordpress(
     # reaches wp-admin without a password), but the result is False so the
     # caller reports it.
     password_set = True
-    r = set_wp_user_password(onionname, password, docker_bin=docker_bin,
-                             env=docker_env)
+    r = set_wp_user_password(onionname, password, docker=docker)
     if r.returncode != 0:
         password_set = False
         log(f"ERROR: setting the admin password failed: "
@@ -653,8 +637,7 @@ def install_fresh_wordpress(
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
     # OnionPress installed this one (issue #464): what a later setup
     # that finds WordPress installed checks before adopting it.
-    mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log,
-                                           docker_env=docker_env)
+    mark_wordpress_installed_by_onionpress(data_dir, docker, log)
 
     # 2. Per-user subsite URL on the user's profile — matches Mac UX where
     # the "Website" link on profile.php points somewhere useful.
@@ -704,8 +687,7 @@ def install_fresh_wordpress(
         onionname=onionname,
         site_title=site_title,
         onion_addr=onion_addr,
-        docker_bin=docker_bin,
-        docker_env=docker_env,
+        docker=docker,
         log_func=log_func,
     )
 
@@ -740,11 +722,7 @@ def install_fresh_wordpress(
     def _fetch_s3_keys():
         try:
             from . import multisite
-            multisite.ensure_archive_s3_keys(
-                docker_bin=docker_bin, log_func=log_func)
-        except subprocess.SubprocessError as e:
-            # Not {e}: a subprocess error's message quotes the argv.
-            log(f"WARNING: archive.org S3 key fetch failed: {type(e).__name__}")
+            multisite.ensure_archive_s3_keys(docker=docker, log_func=log_func)
         except Exception as e:
             log(f"WARNING: archive.org S3 key fetch failed: {e}")
 
@@ -762,7 +740,7 @@ def provision_existing_wordpress(
     password: str,
     language: str = "en_US",
     onion_addr: str = "localhost",
-    docker_bin: str = "docker",
+    docker,
     log_func: Callable[[str], None] | None = None,
     data_dir: str | None = None,
     adopt_existing: bool = False,
@@ -794,8 +772,8 @@ def provision_existing_wordpress(
         if log_func:
             log_func(msg)
 
-    def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
-        return _run_wp(docker_bin, args, timeout=timeout)
+    def wp(*args, timeout: int = 30):
+        return _run_wp(docker, args, timeout=timeout)
 
     if _refuse_invalid_onionname(onionname, log):
         return False
@@ -804,12 +782,12 @@ def provision_existing_wordpress(
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
     # Only a WordPress OnionPress installed is adopted (issue #464): one
     # installed through wp-admin/install.php is whoever got there first's.
-    if not adopt_existing and not wordpress_installed_by_onionpress(data_dir, docker_bin):
+    if not adopt_existing and not wordpress_installed_by_onionpress(data_dir, docker):
         log(FOREIGN_INSTALL_MSG)
         return False
     if adopt_existing:
         log("Adopting the installed WordPress as the operator asked (--adopt-existing)")
-        mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log)
+        mark_wordpress_installed_by_onionpress(data_dir, docker, log)
 
     log(f"Provisioning WordPress: title={site_title!r} onionname={onionname!r}")
 
@@ -831,11 +809,11 @@ def provision_existing_wordpress(
         log(f"Username update: {r.stderr.strip()[:100]} (may already be set)")
 
     # 3. Password — on stdin, never as --user_pass (see WP_SET_PASSWORD_PHP)
-    r = set_wp_user_password(onionname, password, docker_bin=docker_bin)
+    r = set_wp_user_password(onionname, password, docker=docker)
     if r.returncode == 0:
         log("Password updated")
     else:
-        r2 = set_wp_user_password("admin", password, docker_bin=docker_bin)
+        r2 = set_wp_user_password("admin", password, docker=docker)
         if r2.returncode == 0:
             log("Password updated (via admin fallback)")
         else:
@@ -855,7 +833,7 @@ def provision_existing_wordpress(
         onionname=onionname,
         site_title=site_title,
         onion_addr=onion_addr,
-        docker_bin=docker_bin,
+        docker=docker,
         log_func=log_func,
     )
 
@@ -874,7 +852,7 @@ def provision_existing_wordpress(
     return True
 
 
-def provision_interactive(data_dir: str | None = None, *,
+def provision_interactive(data_dir: str | None = None, *, docker,
                           adopt_existing: bool = False) -> bool:
     """Interactive terminal setup for headless / SSH installs.
 
@@ -883,7 +861,8 @@ def provision_interactive(data_dir: str | None = None, *,
     title, username, and password, then delegates to
     provision_existing_wordpress(), which adopts an installed WordPress
     only when OnionPress installed it or *adopt_existing* says to
-    (`onionpress provision --adopt-existing`, issue #464).
+    (`onionpress provision --adopt-existing`, issue #464). *docker* is
+    this install's onionpress.docker.Docker.
     """
     import getpass
 
@@ -924,13 +903,14 @@ def provision_interactive(data_dir: str | None = None, *,
     print()
     print("  Applying settings…")
     log_fn = lambda msg: print(f"  {msg}")
-    if _wp_is_installed():
+    if _wp_is_installed(docker):
         # Legacy install path — WP was already configured by a previous
         # auto-bootstrap (older Linux installs). Rename + change password.
         ok = provision_existing_wordpress(
             site_title=title,
             onionname=onionname,
             password=pw,
+            docker=docker,
             data_dir=data_dir,
             log_func=log_fn,
             adopt_existing=adopt_existing,
@@ -939,7 +919,7 @@ def provision_interactive(data_dir: str | None = None, *,
         # Fresh install path — same as the GTK SetupDialog and Mac
         # SetupWindow now use. Pick up the live onion address so wp
         # core install's --url matches reality.
-        onion_addr = _read_onion_address() or "localhost"
+        onion_addr = _read_onion_address(docker) or "localhost"
         # Prefer the real binary at /opt/onionpress/onionpress over the
         # /usr/local/bin symlink, which install.sh creates late enough
         # that a quick Setup run can miss it. Honor an explicit override.
@@ -955,6 +935,7 @@ def provision_interactive(data_dir: str | None = None, *,
             onionname=onionname,
             password=pw,
             onion_addr=onion_addr,
+            docker=docker,
             launcher_bin=launcher_bin,
             data_dir=data_dir,
             log_func=log_fn,
@@ -965,18 +946,14 @@ def provision_interactive(data_dir: str | None = None, *,
     return ok
 
 
-def _wp_is_installed() -> bool:
+def _wp_is_installed(docker) -> bool:
     """Cheap wp-cli probe for the SSH/CLI setup path."""
-    try:
-        return wp_files.wp_cli("core", "is-installed",
-                               timeout=15).returncode == 0
-    except Exception:
-        return False
+    return _run_wp(docker, ("core", "is-installed"), timeout=15).returncode == 0
 
 
-def _read_onion_address() -> str:
+def _read_onion_address(docker) -> str:
     try:
-        return onion_hostname.read_served_address_with("docker")
+        return onion_hostname.read_served_address(docker)
     except Exception:
         return ""
 
@@ -1049,20 +1026,18 @@ def ask_setup_answers(*, user: str = "", password: str = "", title: str = "",
     return user, password, title
 
 
-def save_archive_login(email: str, password: str, *, docker_bin: str, docker_env: dict | None,
+def save_archive_login(email: str, password: str, *, docker,
                        log: Callable[[str], None]) -> bool:
     """Log in to archive.org with the owner's account (over Tor,
     multisite.fetch_archive_s3_keys) and keep its S3 keys in WordPress,
     each value on `wp option update`'s stdin."""
     from onionpress import multisite
-    keys = multisite.fetch_archive_s3_keys(email, password, docker_bin=docker_bin,
-                                           env=docker_env, log_func=log)
+    keys = multisite.fetch_archive_s3_keys(email, password, docker=docker, log_func=log)
     if not keys:
         return False
     for option, value in (("onionpress_archive_s3_access", keys["access"]),
                           ("onionpress_archive_s3_secret", keys["secret"])):
-        if _run_wp(docker_bin, ("option", "update", option), input=value,
-                   env=docker_env).returncode != 0:
+        if _run_wp(docker, ("option", "update", option), input=value).returncode != 0:
             return False
     log("Archive.org S3 keys saved (from login)")
     return True
@@ -1085,10 +1060,8 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
     SETUP_RESTART when the launcher must restart the stack (a restored
     site: the start's provisioning, plugins and install-state steps run
     against it)."""
-    docker_bin, docker_env = docker.docker_bin, docker.env
-
     def wp(*args):
-        return _run_wp(docker_bin, args, env=docker_env, timeout=30)
+        return _run_wp(docker, args, timeout=30)
 
     if wp("core", "is-installed").returncode == 0:
         say("WordPress is already installed.")
@@ -1142,9 +1115,8 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
         say("  Installing WordPress...")
         if not install_fresh_wordpress(
                 site_title=title, onionname=user, password=password,
-                onion_addr=(onion_hostname.read_served_address_with(docker_bin, env=docker_env)
-                            or "localhost"),
-                docker_bin=docker_bin, docker_env=docker_env, launcher_bin=launcher_bin,
+                onion_addr=onion_hostname.read_served_address(docker) or "localhost",
+                docker=docker, launcher_bin=launcher_bin,
                 log_func=log, data_dir=data_dir):
             say(f"  ERROR: WordPress installation failed. Check {log_path} for details.")
             return SETUP_FAILED
@@ -1152,8 +1124,7 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
 
     if ia_account and ia_password:
         say("  Logging in to Archive.org (over Tor)...")
-        if save_archive_login(ia_account, ia_password, docker_bin=docker_bin,
-                              docker_env=docker_env, log=log):
+        if save_archive_login(ia_account, ia_password, docker=docker, log=log):
             say("  Archive.org credentials saved.")
         else:
             say("  WARNING: Archive.org login failed. You can set credentials later in Settings.")

@@ -23,6 +23,7 @@ from unittest import mock
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, wp_files  # noqa: E402
 
@@ -146,10 +147,11 @@ class TestPutTreeLimit(_Tmp):
 
         def fake_own(*a, timeout, **k):
             timeouts.append(timeout)
+        from fake_docker import FakeDocker
+        docker = FakeDocker(popen_factory=lambda argv, env=None, **k: _Proc())
         with mock.patch.object(wp_files, "own", fake_own), \
-             mock.patch.object(wp_files.subprocess, "Popen", _Proc), \
              mock.patch.object(wp_files.threading, "Timer") as timer:
-            wp_files.put_tree(src, "/var/www/html/wp-content", merge=True)
+            wp_files.put_tree(src, "/var/www/html/wp-content", docker=docker, merge=True)
         expected = wp_files.sized_timeout(3 << 20, wp_files.PUT_TREE_FLOOR_S)
         self.assertEqual(timeouts, [expected])
         self.assertEqual(timer.call_args.args[0], expected)

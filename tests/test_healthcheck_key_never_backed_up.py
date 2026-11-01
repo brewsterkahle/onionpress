@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, key_manager  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 import test_backup_hub_data_off_wordpress as hub  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 
@@ -100,8 +101,8 @@ class TestRestoreLeavesItOut(unittest.TestCase):
                 mock.patch.object(backup, "_restore_backup_key"), \
                 mock.patch.object(backup, "restore_container_artifacts"), \
                 mock.patch.object(backup, "apply_config_overrides"):
-            backup.restore_from_backup(path, PW, logs.append, data_dir=data,
-                                       through_wordpress=through_wordpress)
+            backup.restore_from_backup(path, PW, logs.append, docker=FakeDocker(mv._NoDocker(self)),
+                                       data_dir=data, through_wordpress=through_wordpress)
         hc = os.path.join(data, backup.HEALTHCHECK_KEY_STAGING)
         restored = {}
         if os.path.isdir(hc):

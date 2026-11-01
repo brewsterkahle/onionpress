@@ -38,7 +38,7 @@ from onionpress.backup import (  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 from onionpress.config import PortConfig, Secrets  # noqa: E402
 from onionpress.containers import ContainerStatus  # noqa: E402
-from onionpress.docker import DockerResult  # noqa: E402
+from onionpress.docker import Docker, DockerResult  # noqa: E402
 from onionpress.launcher_ops import BACKUP_PASSWORD_ENV  # noqa: E402
 from onionpress.platform import OS, resolve_paths  # noqa: E402
 
@@ -1025,7 +1025,8 @@ class TestImportBackupArtifacts(Sandbox):
         self.assertEqual(self.cli.cmd_import_backup_artifacts(self.staging), 0)
         args, kw = self.restore.call_args
         self.assertEqual(args[:2], (self.staging, {"onion_address": ADDR}))
-        self.assertEqual(kw, {"name_registry": True, "hub_data": None, "data_dir": self.dir})
+        self.assertEqual(kw, {"docker": self.cli.docker, "name_registry": True, "hub_data": None,
+                              "data_dir": self.dir})
         self.cli.docker.wp.assert_called_once_with("core", "update-db", timeout=120)
         self.assertIn("Install-from-backup: artifacts imported", self.cli.logged)
 
@@ -1065,7 +1066,7 @@ class TestStagingHelpers(Sandbox):
         self.assertEqual(self.cli.logged, [])
         with open(self.cli.paths.log_file) as f:
             self.assertIn("from the sweep", f.read())
-        self.assertEqual(regen.call_args.kwargs["docker_bin"], "/stub/docker")
+        self.assertIs(regen.call_args.kwargs["docker"], self.cli.docker)
         with mock.patch("onionpress.derivatives.regenerate_if_pending",
                         return_value=True) as regen, \
                 mock.patch.object(sys, "stderr", mock.Mock(isatty=lambda: True)):
@@ -1076,10 +1077,14 @@ class TestStagingHelpers(Sandbox):
         with mock.patch("onionpress.wp_files.put_tree", side_effect=[
                 mock.Mock(returncode=0), mock.Mock(returncode=1, stderr="tar: denied\n"),
                 OSError("no docker")]) as put:
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x", True), 0)
-            self.assertEqual(put.call_args.kwargs, {"merge": True})
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x"), 1)
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x"), 1)
+            docker = object()
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x", True,
+                                                           docker=docker), 0)
+            self.assertEqual(put.call_args.kwargs, {"docker": docker, "merge": True})
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x",
+                                                           docker=docker), 1)
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x",
+                                                           docker=docker), 1)
         err = self.err.getvalue()
         self.assertIn("Could not copy theme into WordPress: tar: denied", err)
         self.assertIn("Could not copy theme into WordPress: no docker", err)
@@ -1087,7 +1092,7 @@ class TestStagingHelpers(Sandbox):
     def test_passthroughs(self):
         with mock.patch("onionpress.wayback_smoke.smoke_test_wayback", return_value=5) as smoke:
             self.assertEqual(self.cli.cmd_smoke_test_wayback(), 5)
-        smoke.assert_called_once_with(self.cli.log)
+        smoke.assert_called_once_with(self.cli.docker, self.cli.log)
         with mock.patch("onionpress.cli.check_for_update_report", return_value=0) as report:
             self.assertEqual(self.cli.cmd_check_for_update(json_output=True), 0)
             report.assert_called_once_with(cli.__version__, self.cli.log, True)
@@ -1410,6 +1415,7 @@ class TestSettingsPageBackup(Sandbox):
         args, kw = self.create.call_args
         self.assertEqual(args[:4], (ADDR, "owner", "pw", "/out.zip"))
         self.assertEqual(args[4], cli.__version__)
+        self.assertIsInstance(kw.pop("docker"), Docker)
         self.assertEqual(kw, {"include_hub_data": False, "include_host_secrets": False,
                               "include_onion_key": False})
 
@@ -1449,7 +1455,7 @@ class TestSettingsPageRestore(Sandbox):
     def test_the_hubs_are_asked_before_the_key_changes_and_a_refusal_is_logged(self):
         seen = {}
 
-        def restore(zip_path, password, log, *, through_wordpress, before_key_change,
+        def restore(zip_path, password, log, *, docker, through_wordpress, before_key_change,
                     confirm_address_change):
             seen["through"] = through_wordpress
             seen["confirmed"] = confirm_address_change(ADDR, OTHER)

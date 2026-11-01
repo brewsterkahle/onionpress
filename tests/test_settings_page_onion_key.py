@@ -47,6 +47,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, cli, key_manager  # noqa: E402
+from fake_docker import FakeDocker, on_path  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 from onionpress.platform import OS, resolve_paths  # noqa: E402
 import test_backup_hub_data_off_wordpress as hd  # noqa: E402
@@ -146,7 +147,7 @@ class TestMacSettingsPageBackupLeavesTheKeyOut(unittest.TestCase):
         hd._Container(self, self.tmp, hub=False)
         out = os.path.join(self.tmp, f"backup-{include_onion_key}.zip")
         meta = backup.create_backup(ADDR, "admin", PW, out, "2.5.3", self.logs.append,
-                                    data_dir=self.data_dir, include_hub_data=False,
+                                    docker=on_path(), data_dir=self.data_dir, include_hub_data=False,
                                     include_host_secrets=False,
                                     include_onion_key=include_onion_key)
         return meta, out, bsl._inner_names_and_bytes(out, PW)
@@ -291,6 +292,7 @@ class TestRestoreFromBackupKeepsTheAddress(unittest.TestCase):
         path = _keyless_backup(self.tmp, "k.zip", overrides={"ADDRESS_PREFIX": ADDR[:3]})
         confirm, released = mock.Mock(return_value=True), mock.Mock()
         meta = backup.restore_from_backup(path, PW, self.logs.append,
+                                          docker=FakeDocker(mv._NoDocker(self)),
                                           data_dir=self.install.data,
                                           through_wordpress=True,
                                           before_key_change=released,
@@ -308,6 +310,7 @@ class TestRestoreFromBackupKeepsTheAddress(unittest.TestCase):
         with mock.patch.object(backup, "served_onion_address", return_value=""):
             with self.assertRaises(ValueError) as cm:
                 backup.restore_from_backup(path, PW, self.logs.append,
+                                           docker=FakeDocker(mv._NoDocker(self)),
                                            data_dir=self.install.data)
         self.assertEqual(str(cm.exception), backup.NO_KEY_TO_KEEP_MSG)
         self.artifacts.assert_not_called()
@@ -548,6 +551,7 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         released = mock.Mock()
         kw = {} if confirm is False else {"confirm_address_change": confirm}
         backup.restore_from_backup(path or self.path, PW, self.logs.append,
+                                   docker=FakeDocker(mv._NoDocker(self)),
                                    data_dir=self.install.data, through_wordpress=True,
                                    before_key_change=released, **kw)
         return released
@@ -832,6 +836,7 @@ class TestMacSettingsPageRestoreOnAHub(unittest.TestCase):
                                       return_value=onionhome):
                 with self.assertRaises(backup.SettingsPageRestoreRefused) as cm:
                     backup.restore_from_backup("/nonexistent.zip", PW, lambda m: None,
+                                               docker=FakeDocker(mv._NoDocker(self)),
                                                data_dir=self.install.data,
                                                through_wordpress=True,
                                                confirm_address_change=mock.Mock(
@@ -845,6 +850,7 @@ class TestMacSettingsPageRestoreOnAHub(unittest.TestCase):
                                side_effect=AssertionError("node checked")), \
                 self.assertRaises(AssertionError) as cm:
             backup.restore_from_backup("/nonexistent.zip", PW, lambda m: None,
+                                       docker=FakeDocker(mv._NoDocker(self)),
                                        data_dir=self.install.data)
         self.assertEqual(str(cm.exception), "upload opened")
 

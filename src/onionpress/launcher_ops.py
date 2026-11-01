@@ -328,14 +328,15 @@ def generate_vanity_in_container(
     return addr
 
 
-def login_url(base_url: str) -> str:
-    """*base_url* with a one-time auto-login token, or *base_url* when none
-    could be minted. Only for a URL that reaches the browser off any command
-    line (the tray's copy-and-paste dialog); see login_target otherwise."""
-    return auto_login.login_url(base_url) or base_url
+def login_url(base_url: str, *, docker) -> str:
+    """*base_url* with a one-time auto-login token (minted through
+    *docker*, the caller's Docker), or *base_url* when none could be
+    minted. Only for a URL that reaches the browser off any command line
+    (the tray's copy-and-paste dialog); see login_target otherwise."""
+    return auto_login.login_url(base_url, docker=docker) or base_url
 
 
-def login_target(base_url: str, *, page_dir: Optional[str] = None) -> str:
+def login_target(base_url: str, *, docker, page_dir: Optional[str] = None) -> str:
     """What to put on a browser's command line to open *base_url* logged in.
 
     A browser on Linux takes URLs only in its argv, which every local user
@@ -344,7 +345,7 @@ def login_target(base_url: str, *, page_dir: Optional[str] = None) -> str:
     that redirects to the URL (auto_login.write_redirect_page), deleted once
     the token has expired. *base_url* itself when no token could be minted.
     """
-    url = auto_login.login_url(base_url)
+    url = auto_login.login_url(base_url, docker=docker)
     if not url:
         return base_url
     try:
@@ -356,9 +357,9 @@ def login_target(base_url: str, *, page_dir: Optional[str] = None) -> str:
     return pathlib.Path(path).as_uri()
 
 
-def open_login(base_url: str) -> None:
+def open_login(base_url: str, *, docker) -> None:
     """Open *base_url* logged in as the admin (`onionpress dashboard`)."""
-    open_in_browser(login_target(base_url))
+    open_in_browser(login_target(base_url, docker=docker))
 
 
 def signal_watchdog(docker, container: str, sig: str) -> bool:

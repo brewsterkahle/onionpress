@@ -35,12 +35,14 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, TESTS_DIR)
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import backup, key_manager, onion_auth, onionheaven  # noqa: E402
+from fake_docker import FakeDocker, on_path  # noqa: E402
 
 KEY_MANAGER = os.path.join(PROJECT_DIR, "src", "onionpress", "key_manager.py")
 HC = "vipwsi6bjeychxvdo3xjvojr2yvw7ggwagekemekmeccscryuhehp2id.onion"
@@ -258,7 +260,7 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
         logs = []
         with mock.patch.object(backup.subprocess, "run", rec):
             backup.restore_container_artifacts(staging, {}, logs.append,
-                                               data_dir=data_dir)
+                                               docker=FakeDocker(rec), data_dir=data_dir)
         rec.assert_secret_not_in_argv(self, safe_password)
 
         # The dump goes in on stdin, through a sandboxed client, never
@@ -330,7 +332,7 @@ exit 0
         with mock.patch.dict(os.environ,
                              {"PATH": bindir + os.pathsep + os.environ["PATH"]}):
             backup.create_backup("x.onion", "admin", "zip-password", out_zip,
-                                 "test", logs.append, data_dir=data_dir)
+                                 "test", logs.append, docker=on_path(), data_dir=data_dir)
         self.assertTrue(os.path.exists(out_zip), logs)
         with open(argv_log) as f:
             argv_lines = f.read()

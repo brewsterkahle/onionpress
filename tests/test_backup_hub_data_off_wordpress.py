@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, key_manager  # noqa: E402
+from fake_docker import FakeDocker, on_path  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 import test_backup_staging_links as bsl  # noqa: E402
@@ -198,7 +199,7 @@ class TestCreateBackup(unittest.TestCase):
         self.container = _Container(self, self.tmp, **container)
         out = os.path.join(self.tmp, "backup.zip")
         meta = backup.create_backup(mv.ADDR, "admin", PW, out, "2.5.3",
-                                    self.logs.append, data_dir=self.data_dir,
+                                    self.logs.append, docker=on_path(), data_dir=self.data_dir,
                                     include_hub_data=include_hub_data)
         return meta, bsl._inner_names_and_bytes(out, PW)
 
@@ -344,6 +345,7 @@ class TestCreateBackup(unittest.TestCase):
         cli.paths = mock.Mock(data_dir=self.data_dir)
         cli.containers = mock.Mock(get_onion_address=mock.Mock(return_value=mv.ADDR))
         cli.log = self.logs.append
+        cli.docker = FakeDocker()
         import contextlib
         import io
         with mock.patch("onionpress.backup.verify_wp_admin", return_value=(True, None)), \
@@ -357,6 +359,7 @@ class TestCreateBackup(unittest.TestCase):
         cli.paths = mock.Mock(data_dir=self.data_dir)
         cli.containers = mock.Mock(get_onion_address=mock.Mock(return_value=mv.ADDR))
         cli.log = self.logs.append
+        cli.docker = FakeDocker()
         for meta, want in (
                 ({"onionheaven_data_unchecked": True, "onionhome_registry_unchecked": True},
                  [backup.HUB_DATA_UNCHECKED_NOTE, backup.ONIONHOME_REGISTRY_UNCHECKED_NOTE]),
@@ -945,6 +948,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
                 path = self._backup(f"b-{len(self.logs)}-{sorted(kw)[0]}.zip", **kw)
                 with self.assertRaises(backup.SettingsPageRestoreRefused) as cm:
                     backup.restore_from_backup(path, PW, self.logs.append,
+                                               docker=FakeDocker(mv._NoDocker(self)),
                                                data_dir=self.data_dir,
                                                through_wordpress=True)
                 self.assertEqual(str(cm.exception), want)
@@ -959,12 +963,14 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
     def test_the_apps_restore_goes_ahead(self):
         path = self._backup("hub.zip", keys=True, registry=True, onionhome=True)
         with self.assertRaises(_KeyWritten):
-            backup.restore_from_backup(path, PW, self.logs.append, data_dir=self.data_dir)
+            backup.restore_from_backup(path, PW, self.logs.append,
+                                       docker=FakeDocker(mv._NoDocker(self)), data_dir=self.data_dir)
 
     def test_a_backup_without_hub_data_goes_ahead(self):
         path = self._backup("site.zip", registry=True, empty_keys=True)
         with self.assertRaises(_KeyWritten):
             backup.restore_from_backup(path, PW, self.logs.append,
+                                       docker=FakeDocker(mv._NoDocker(self)),
                                        data_dir=self.data_dir, through_wordpress=True)
 
     def test_the_settings_page_asks_for_it(self):
@@ -973,7 +979,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
         src = mv._read("src/onionpress/cli.py")
         body = src[src.index("def cmd_settings_page_restore("):src.index("def main(")]
         self.assertRegex(body, r"restore_from_backup\(backup_file, password, log, "
-                               r"through_wordpress=True,")
+                               r"docker=docker, through_wordpress=True,")
         # The only caller in what ships.
         callers = [rel for rel in ("src/menubar.py", "src/onionpress/cli.py",
                                    "src/onionpress/setup_window.py", "src/onionpress/handle_action.py")
@@ -1007,7 +1013,7 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
             backup.restore_container_artifacts(staging, metadata or {}, logs.append,
-                                               data_dir=self.tmp, **kw)
+                                               docker=FakeDocker(run), data_dir=self.tmp, **kw)
         touched = [c for c in calls if any("onionheaven" in a or "onionnames" in a
                                            for a in c)]
         return touched, logs

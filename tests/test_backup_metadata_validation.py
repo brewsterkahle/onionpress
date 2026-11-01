@@ -32,6 +32,7 @@ sys.path.insert(0, SRC)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, backup_crypto, cli, key_manager  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 LAUNCHERS = ["app/MacOS/onionpress", "linux/onionpress"]
 PW = "backup-pw"
@@ -394,6 +395,7 @@ class TestPythonRestorePaths(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaises(ValueError):
                     backup.restore_from_backup(path, PW, self.logs.append,
+                                               docker=FakeDocker(_NoDocker(self)),
                                                data_dir=self.data_dir)
                 self.assert_untouched()
 

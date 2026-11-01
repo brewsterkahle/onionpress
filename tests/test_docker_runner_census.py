@@ -34,29 +34,21 @@ RUNNERS = {
 
 # Hand-built docker argv lists left in each module, as of issue #477.
 REVIEWED = {
-    "src/menubar.py": 2,
     "src/onionpress/analytics_sharing.py": 1,
     "src/onionpress/app_commands.py": 1,
     "src/onionpress/backup.py": 13,
     "src/onionpress/daemon.py": 3,
     "src/onionpress/db_import.py": 2,
-    "src/onionpress/derivatives.py": 3,
     "src/onionpress/handle_action.py": 1,
     "src/onionpress/hub_backup.py": 6,
     "src/onionpress/key_manager.py": 5,
     "src/onionpress/launcher_ops.py": 2,
-    "src/onionpress/multisite.py": 6,
     # Started by the browser, outside the app's package: it cannot import
     # the runner.
     "src/onionpress/native_messaging_host.py": 3,
-    # read_served_address_with: the reader for a caller with only a binary
-    # (issue #478).
-    "src/onionpress/onion_hostname.py": 1,
     "src/onionpress/onionheaven.py": 3,
     "src/onionpress/onionnames_registrar.py": 1,
     "src/onionpress/ports.py": 1,
-    "src/onionpress/scrub.py": 3,
-    "src/onionpress/setup_logic.py": 1,
 }
 
 FINDERS = {"_docker_bin", "_find_docker", "find_docker_bin"}

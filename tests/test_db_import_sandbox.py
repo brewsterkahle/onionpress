@@ -34,12 +34,14 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import backup, cli, db_import, wp_files  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 MAC = os.path.join(PROJECT_DIR, "app", "MacOS", "onionpress")
 LINUX = os.path.join(PROJECT_DIR, "linux", "onionpress")
@@ -233,7 +235,7 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
              mock.patch.object(backup, "_ensure_multisite_constants"), \
              mock.patch.object(backup.subprocess, "run", fake_run):
             backup.restore_container_artifacts(staging, {}, lambda *a: None,
-                                               hub_volumes=False)
+                                               docker=FakeDocker(fake_run), hub_volumes=False)
         return runs
 
     def test_import_uses_safe_flags_and_streams_on_stdin(self):
@@ -292,7 +294,7 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
              mock.patch.object(backup.subprocess, "run", fake_run):
             with self.assertRaises(Exception) as cm:
                 backup.restore_container_artifacts(staging, {}, lambda *a: None,
-                                                   hub_volumes=False)
+                                                   docker=FakeDocker(fake_run), hub_volumes=False)
         self.assertIn("too old", str(cm.exception).lower())
 
 
@@ -329,23 +331,17 @@ class TestDbValueValidation(unittest.TestCase):
             return _run
 
         # a poisoned DB_PASSWORD (quote) is refused
-        with mock.patch.object(backup.subprocess, "run",
-                               creds_run(["wordpress\n", "wordpress\n",
-                                          "x'; DROP\n"])):
-            with self.assertRaises(Exception):
-                backup._get_db_credentials()
+        with self.assertRaises(Exception):
+            backup._get_db_credentials(FakeDocker(creds_run(["wordpress\n", "wordpress\n",
+                                                             "x'; DROP\n"])))
         # a DB_NAME beginning with '-' is refused
-        with mock.patch.object(backup.subprocess, "run",
-                               creds_run(["-evil\n", "wordpress\n", "ok\n"])):
-            with self.assertRaises(Exception):
-                backup._get_db_credentials()
+        with self.assertRaises(Exception):
+            backup._get_db_credentials(FakeDocker(creds_run(["-evil\n", "wordpress\n", "ok\n"])))
         # legit values pass
-        with mock.patch.object(backup.subprocess, "run",
-                               creds_run(["wordpress\n", "wordpress\n",
-                                          "Abc123\n"])):
-            creds = backup._get_db_credentials()
-            self.assertEqual(creds["name"], "wordpress")
-            self.assertEqual(creds["password"], "Abc123")
+        creds = backup._get_db_credentials(
+            FakeDocker(creds_run(["wordpress\n", "wordpress\n", "Abc123\n"])))
+        self.assertEqual(creds["name"], "wordpress")
+        self.assertEqual(creds["password"], "Abc123")
 
 
 class TestRestoreDbPasswordSource(unittest.TestCase):

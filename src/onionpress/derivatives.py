@@ -23,8 +23,9 @@ half of wp-content/uploads (449 of 916 MB). So:
 
 * `regenerate_if_pending()` runs, when either marker is present,
   `wp media regenerate --only-missing --yes` for every site, `nice`d, in
-  the WordPress container as www-data, and clears both markers only on
-  success.
+  the WordPress container as www-data (through the caller's
+  onionpress.docker.Docker, like every container step here), and clears
+  both markers only on success.
   `--only-missing` builds just the sizes absent on disk, so a run that a
   reboot, quit or OOM kill interrupts resumes where it left off at the
   next launcher start instead of starting over. The launchers spawn this
@@ -201,30 +202,23 @@ def host_marker_present(data_dir: str) -> bool:
     return os.path.exists(os.path.join(data_dir, HOST_MARKER))
 
 
-def container_marker_present(docker_bin: str = "docker",
-                             container: str = WORDPRESS_CONTAINER) -> bool:
-    try:
-        r = subprocess.run(
-            [docker_bin, "exec", container, "test", "-f", CONTAINER_MARKER],
-            capture_output=True, timeout=15,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return r.returncode == 0
+def container_marker_present(docker, container: str = WORDPRESS_CONTAINER) -> bool:
+    return docker.exec(container, ["test", "-f", CONTAINER_MARKER],
+                       timeout=15, quiet=True).ok
 
 
-def regeneration_pending(data_dir: str, docker_bin: str = "docker") -> bool:
-    return host_marker_present(data_dir) or container_marker_present(docker_bin)
+def regeneration_pending(data_dir: str, docker) -> bool:
+    return host_marker_present(data_dir) or container_marker_present(docker)
 
 
-def _site_urls(docker_bin: str, container: str) -> list[Optional[str]]:
+def _wp(docker, *args, timeout=60, nice=False):
+    """wp-cli as www-data, offline: nothing here needs the network."""
+    return docker.wp(*args, timeout=timeout, nice=nice, offline=True, quiet=True)
+
+
+def _site_urls(docker) -> list[Optional[str]]:
     """Every site's URL on a multisite, else [None] (run without --url)."""
-    try:
-        r = wp_files.wp_cli("site", "list", "--field=url",
-                            docker_bin=docker_bin, timeout=60,
-                            container=container)
-    except (OSError, subprocess.SubprocessError):
-        return [None]
+    r = _wp(docker, "site", "list", "--field=url")
     urls = [u.strip() for u in (r.stdout or "").splitlines() if u.strip()]
     if r.returncode != 0 or not urls:
         return [None]
@@ -232,8 +226,7 @@ def _site_urls(docker_bin: str, container: str) -> list[Optional[str]]:
 
 
 def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None]] = None,
-                          docker_bin: str = "docker",
-                          container: str = WORDPRESS_CONTAINER) -> bool:
+                          *, docker, container: str = WORDPRESS_CONTAINER) -> bool:
     """Rebuild missing image sizes if a marker says a restore left them out.
 
     Returns True when there is nothing (left) to do — no marker, or the
@@ -244,7 +237,7 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
     """
     log = log_func or (lambda _m: None)
     host_pending = host_marker_present(data_dir)
-    container_pending = container_marker_present(docker_bin, container)
+    container_pending = container_marker_present(docker, container)
     if not (host_pending or container_pending):
         return True
 
@@ -258,9 +251,7 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
             log("Image derivatives: a regeneration sweep is already running — not starting another")
             return True
 
-        installed = wp_files.wp_cli("core", "is-installed",
-                                    docker_bin=docker_bin, timeout=60,
-                                    container=container)
+        installed = _wp(docker, "core", "is-installed")
         if installed.returncode != 0:
             log("Image derivatives: WordPress is not up — leaving the marker for the next start")
             return False
@@ -269,25 +260,16 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
         # of uploads: give it what an older version's root wp-cli left
         # root's, following no link www-data may have planted
         # (wp_files.own_args).
-        subprocess.run(
-            [docker_bin] + wp_files.own_args(CONTAINER_UPLOADS, recursive=True,
-                                             container=container),
-            capture_output=True, timeout=600,
-        )
-        sites = _site_urls(docker_bin, container)
+        wp_files.own(CONTAINER_UPLOADS, recursive=True, docker=docker, timeout=600,
+                     container=container)
+        sites = _site_urls(docker)
         log(f"Image derivatives: rebuilding missing resized images for "
             f"{len(sites)} site(s) (wp media regenerate --only-missing)")
         for url in sites:
             args = ["media", "regenerate", "--only-missing", "--yes"]
             if url:
                 args.append(f"--url={url}")
-            try:
-                r = wp_files.wp_cli(*args, docker_bin=docker_bin, nice=True,
-                                    timeout=REGENERATE_TIMEOUT,
-                                    container=container)
-            except (OSError, subprocess.SubprocessError) as e:
-                log(f"Image derivatives: regenerate failed for {url or 'site'}: {e} — will resume on next start")
-                return False
+            r = _wp(docker, *args, nice=True, timeout=REGENERATE_TIMEOUT)
             tail = (r.stdout or "").strip().splitlines()[-1:] or [""]
             if r.returncode != 0:
                 err = (r.stderr or "").strip().splitlines()[-1:] or [""]
@@ -296,11 +278,8 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
                 return False
             log(f"Image derivatives: {url or 'site'}: {tail[0][:200]}")
 
-        rm = subprocess.run(
-            [docker_bin] + wp_files.exec_args("rm", "-f", CONTAINER_MARKER,
-                                              container=container),
-            capture_output=True, timeout=30,
-        )
+        rm = docker.run(wp_files.exec_args("rm", "-f", CONTAINER_MARKER, container=container),
+                        timeout=30, quiet=True)
         if rm.returncode != 0:
             log("Image derivatives: could not clear the in-container marker — will retry on next start")
             return False

@@ -1037,8 +1037,9 @@ esac
     def _backup(self):
         from onionpress import backup
         out = os.path.join(self.tmp, "backup.zip")
+        from fake_docker import on_path
         backup.create_backup(self.bsl.mv.ADDR, "admin", self.bsl.PW, out, "2.5.2",
-                             self.logs.append, data_dir=self.data_dir)
+                             self.logs.append, docker=on_path(), data_dir=self.data_dir)
         return self.bsl._inner_names_and_bytes(out, self.bsl.PW)
 
     def test_a_hub_backup_holds_its_registry_and_keys_and_nothing_else(self):
@@ -1108,9 +1109,10 @@ esac
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
                 stderr="" if kwargs.get("text") else b"")
 
+        from fake_docker import FakeDocker
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
             backup.restore_container_artifacts(staging, {}, lambda msg: None,
-                                               data_dir=self.tmp)
+                                               docker=FakeDocker(run), data_dir=self.tmp)
         hub_calls = [(c, i) for c, i in calls if any("onionheaven" in a for a in c)]
         self.assertEqual([c for c, _ in hub_calls], [
             ["docker", "exec", "onionheaven", "mkdir", "-p", "/var/lib/onionheaven/keys"],

@@ -12,8 +12,10 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import setup_logic  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 ONION = "abc" + "d" * 53 + ".onion"
 
@@ -43,12 +45,15 @@ class TestInstallFreshWordpress(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _run(self, **kwargs):
+    def _run(self, mrun=None, **kwargs):
+        """*mrun*: the subprocess.run stand-in the test patched in; the
+        Docker handed to the install answers through it too."""
         defaults = dict(
             site_title="My Blog",
             onionname="alice",
             password="hunter22",
             onion_addr=ONION,
+            docker=FakeDocker(mrun),
             launcher_bin="/usr/local/bin/onionpress",
             data_dir=self.tmpdir,
         )
@@ -63,7 +68,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
         ) as mrun:
-            ok = self._run()
+            ok = self._run(mrun)
         self.assertTrue(ok)
         # First call must be `wp core install` with the user-typed name;
         # the password is set on stdin after it (test_secrets_off_argv_setup).
@@ -80,8 +85,8 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run",
             return_value=_fail("DB connection refused"),
-        ):
-            ok = self._run()
+        ) as mrun:
+            ok = self._run(mrun)
         self.assertFalse(ok)
 
     def test_post_install_subcommand_invoked_with_launcher_bin(self):
@@ -90,7 +95,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
         ) as mrun:
-            self._run(launcher_bin="/opt/onionpress/onionpress")
+            self._run(mrun, launcher_bin="/opt/onionpress/onionpress")
         post_install_calls = [
             c for c in mrun.call_args_list
             if c.args and isinstance(c.args[0], list)
@@ -106,7 +111,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
         ) as mrun:
-            self._run(launcher_bin=None)
+            self._run(mrun, launcher_bin=None)
         # No `provision-post-install` should be invoked.
         for c in mrun.call_args_list:
             argv = c.args[0] if c.args else []
@@ -118,8 +123,8 @@ class TestInstallFreshWordpress(unittest.TestCase):
     def test_onionname_persisted_to_config(self):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
-        ):
-            ok = self._run(onionname="bobby")
+        ) as mrun:
+            ok = self._run(mrun, onionname="bobby")
         self.assertTrue(ok)
         with open(os.path.join(self.tmpdir, "config")) as f:
             contents = f.read()
@@ -131,7 +136,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
         ) as mrun:
-            self._run(onionname="alice", onion_addr=ONION)
+            self._run(mrun, onionname="alice", onion_addr=ONION)
         user_url_calls = [
             c for c in mrun.call_args_list
             if c.args and isinstance(c.args[0], list)
@@ -171,7 +176,7 @@ class TestProvisionInteractiveRouting(unittest.TestCase):
             "onionpress.setup_logic.provision_existing_wordpress",
             return_value=True,
         ) as m_existing:
-            ok = setup_logic.provision_interactive()
+            ok = setup_logic.provision_interactive(docker=FakeDocker())
         self.assertTrue(ok)
         m_fresh.assert_called_once()
         m_existing.assert_not_called()
@@ -189,7 +194,7 @@ class TestProvisionInteractiveRouting(unittest.TestCase):
             "onionpress.setup_logic.provision_existing_wordpress",
             return_value=True,
         ) as m_existing:
-            ok = setup_logic.provision_interactive()
+            ok = setup_logic.provision_interactive(docker=FakeDocker())
         self.assertTrue(ok)
         m_existing.assert_called_once()
         m_fresh.assert_not_called()

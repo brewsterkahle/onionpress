@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, cli, config  # noqa: E402
+from fake_docker import on_path  # noqa: E402
 import test_backup_hub_data_off_wordpress as hub  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 import test_backup_staging_links as bsl  # noqa: E402
@@ -101,7 +102,7 @@ class TestCreateBackup(unittest.TestCase):
         hub._Container(self, self.tmp, hub=False)
         out = os.path.join(self.tmp, "backup.zip")
         meta = backup.create_backup(mv.ADDR, "admin", PW, out, "2.5.3",
-                                    self.logs.append, data_dir=self.data_dir,
+                                    self.logs.append, docker=on_path(), data_dir=self.data_dir,
                                     include_hub_data=include_host_secrets,
                                     include_host_secrets=include_host_secrets)
         return meta, bsl._inner_names_and_bytes(out, PW)

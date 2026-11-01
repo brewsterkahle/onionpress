@@ -10,10 +10,14 @@ verify checks, and the failure-path branches.
 
 import os
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
-from onionpress import scrub
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from onionpress import scrub  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 
 def _ok(stdout: str = "", code: int = 0):
@@ -74,7 +78,7 @@ class TestPhaseVerify(unittest.TestCase):
              mock.patch.object(scrub, "_hub_registered", return_value=False), \
              mock.patch.object(scrub, "_wayback_creds_present", return_value=False), \
              mock.patch.dict(os.environ, {"ONIONPRESS_WP_PORT": "28080"}):
-            checks = scrub.phase_verify(self._state(), log=lambda _: None)
+            checks = scrub.phase_verify(self._state(), log=lambda _: None, docker=FakeDocker())
         # 4 containers + 1 address + 1 wp + 1 service + 1 port + 1 hub + 1 wayback = 10
         self.assertEqual(len(checks), 10)
         # All fail-severity checks are False
@@ -95,7 +99,7 @@ class TestPhaseVerify(unittest.TestCase):
              mock.patch.object(scrub, "_wayback_creds_present", return_value=True), \
              mock.patch.dict(os.environ, {"ONIONPRESS_WP_PORT": "28080"}):
             checks = scrub.phase_verify(self._state(port=18080),
-                                        log=lambda _: None)
+                                        log=lambda _: None, docker=FakeDocker())
         port_check = next(c for c in checks if "WP port" in c.name)
         self.assertFalse(port_check.ok, "port drift must be caught")
         self.assertIn("18080", port_check.message)
@@ -111,7 +115,7 @@ class TestPhaseVerify(unittest.TestCase):
              mock.patch.object(scrub, "_wayback_creds_present", return_value=True), \
              mock.patch.dict(os.environ, {"ONIONPRESS_WP_PORT": "18080"}):
             checks = scrub.phase_verify(self._state(addr="ORIGINAL.onion"),
-                                        log=lambda _: None)
+                                        log=lambda _: None, docker=FakeDocker())
         addr_check = next(c for c in checks if "Onion address" in c.name)
         self.assertFalse(addr_check.ok, "vanity-key drift must be caught")
 
@@ -126,7 +130,7 @@ class TestPhaseVerify(unittest.TestCase):
              mock.patch.object(scrub, "_hub_registered", return_value=False), \
              mock.patch.object(scrub, "_wayback_creds_present", return_value=True), \
              mock.patch.dict(os.environ, {"ONIONPRESS_WP_PORT": "18080"}):
-            checks = scrub.phase_verify(self._state(), log=lambda _: None)
+            checks = scrub.phase_verify(self._state(), log=lambda _: None, docker=FakeDocker())
         hub = next(c for c in checks if "OnionHeaven" in c.name)
         self.assertEqual(hub.severity, "warn")
         self.assertTrue(scrub.scrub_passed(checks),
@@ -144,7 +148,7 @@ class TestPhaseBackup(unittest.TestCase):
              mock.patch("os.path.isfile", return_value=True), \
              mock.patch("os.path.getsize", return_value=1_000_000), \
              mock.patch.dict(os.environ, {"ONIONPRESS_WP_PORT": "18080"}):
-            state = scrub.phase_backup("pw", log=lambda _: None)
+            state = scrub.phase_backup("pw", log=lambda _: None, docker=FakeDocker())
         self.assertEqual(state.onion_address, "op2happy.onion")
         self.assertEqual(state.wp_port, 18080)
         self.assertEqual(state.repo_dir, "/home/x/onionpress")
@@ -157,7 +161,7 @@ class TestPhaseBackup(unittest.TestCase):
         with mock.patch.object(scrub, "_get_onion_address", return_value=""), \
              mock.patch.object(scrub, "_find_repo_dir", return_value=""):
             with self.assertRaises(RuntimeError) as ctx:
-                scrub.phase_backup("pw", log=lambda _: None)
+                scrub.phase_backup("pw", log=lambda _: None, docker=FakeDocker())
         self.assertIn("Cannot find OnionPress git repo", str(ctx.exception))
 
     def test_aborts_when_backup_zip_is_empty(self):
@@ -168,7 +172,7 @@ class TestPhaseBackup(unittest.TestCase):
              mock.patch("os.path.isfile", return_value=True), \
              mock.patch("os.path.getsize", return_value=0):
             with self.assertRaises(RuntimeError) as ctx:
-                scrub.phase_backup("pw", log=lambda _: None)
+                scrub.phase_backup("pw", log=lambda _: None, docker=FakeDocker())
         self.assertIn("missing or empty", str(ctx.exception))
 
 
@@ -236,16 +240,16 @@ class TestRunScrubBranches(unittest.TestCase):
              mock.patch.object(scrub, "phase_backup") as backup, \
              mock.patch.object(scrub, "phase_uninstall") as uninstall, \
              mock.patch.object(scrub, "phase_install") as install:
-            rc = scrub.run_scrub(password="wrong", log_func=lambda _: None)
+            rc = scrub.run_scrub(password="wrong", docker=FakeDocker(), log_func=lambda _: None)
         self.assertEqual(rc, 1)
-        pv.assert_called_once_with("wrong", log=mock.ANY)
+        pv.assert_called_once_with("wrong", docker=mock.ANY, log=mock.ANY)
         backup.assert_not_called()
         uninstall.assert_not_called()
         install.assert_not_called()
 
     def test_user_cancels(self):
         with mock.patch.object(scrub, "_confirm", return_value=False):
-            rc = scrub.run_scrub(password="pw", log_func=lambda _: None)
+            rc = scrub.run_scrub(password="pw", docker=FakeDocker(), log_func=lambda _: None)
         self.assertEqual(rc, 0)
 
     def test_sudo_auth_fails(self):
@@ -254,14 +258,14 @@ class TestRunScrubBranches(unittest.TestCase):
         with mock.patch.object(scrub, "_confirm", return_value=True), \
              mock.patch.object(scrub, "_SudoKeepAlive",
                                return_value=ka):
-            rc = scrub.run_scrub(password="pw", log_func=lambda _: None)
+            rc = scrub.run_scrub(password="pw", docker=FakeDocker(), log_func=lambda _: None)
         self.assertEqual(rc, 1)
 
     def test_happy_path_returns_zero(self):
         for p in self._patch_all():
             p.start()
         try:
-            rc = scrub.run_scrub(password="pw", log_func=lambda _: None)
+            rc = scrub.run_scrub(password="pw", docker=FakeDocker(), log_func=lambda _: None)
         finally:
             mock.patch.stopall()
         self.assertEqual(rc, 0)
@@ -275,7 +279,7 @@ class TestRunScrubBranches(unittest.TestCase):
         try:
             with mock.patch.object(scrub, "phase_install",
                                    side_effect=RuntimeError("install.sh failed")):
-                rc = scrub.run_scrub(password="pw", log_func=lambda _: None)
+                rc = scrub.run_scrub(password="pw", docker=FakeDocker(), log_func=lambda _: None)
         finally:
             mock.patch.stopall()
         self.assertEqual(rc, 1)
@@ -288,7 +292,7 @@ class TestRunScrubBranches(unittest.TestCase):
         for p in patches:
             p.start()
         try:
-            rc = scrub.run_scrub(password="pw", log_func=lambda _: None)
+            rc = scrub.run_scrub(password="pw", docker=FakeDocker(), log_func=lambda _: None)
         finally:
             mock.patch.stopall()
         self.assertEqual(rc, 1)
@@ -301,7 +305,7 @@ class TestRunScrubBranches(unittest.TestCase):
         try:
             with mock.patch("os.unlink", side_effect=lambda p: unlinked.append(p)):
                 rc = scrub.run_scrub(
-                    password="pw", clean=True, log_func=lambda _: None)
+                    password="pw", docker=FakeDocker(), clean=True, log_func=lambda _: None)
         finally:
             mock.patch.stopall()
         self.assertEqual(rc, 0)

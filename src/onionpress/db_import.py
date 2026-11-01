@@ -163,8 +163,9 @@ def _db_client_argv(*client_argv):
             'sh', '-c', _DB_PASSWORD_FROM_STDIN, 'sh', *client_argv]
 
 
-def _get_db_credentials():
-    """Read WordPress database credentials from wp-config.php via WP-CLI.
+def _get_db_credentials(docker):
+    """Read WordPress database credentials from wp-config.php via WP-CLI,
+    through *docker* (the caller's onionpress.docker.Docker).
 
     wp-config.php is WordPress's to write, so the values are validated before
     any caller uses them as a client argv or splices them into SQL: a
@@ -174,7 +175,7 @@ def _get_db_credentials():
     """
     creds = {}
     for field in ('DB_NAME', 'DB_USER', 'DB_PASSWORD'):
-        result = wp_files.wp_cli('config', 'get', field, timeout=15)
+        result = docker.wp('config', 'get', field, timeout=15, offline=True, quiet=True)
         if result.returncode != 0:
             raise Exception(f"Could not read {field} from WordPress config")
         creds[field] = result.stdout.strip()

@@ -161,8 +161,10 @@ class TestInstall(unittest.TestCase):
             return subprocess.CompletedProcess(argv, returncode, b"", b"boom")
 
         logs = []
-        with mock.patch.object(wp_files.subprocess, "run", side_effect=fake_run) as run:
-            ok = onion_proxy.install_php_proxy("/x/docker", {}, script_path, log_func=logs.append)
+        run = mock.Mock(side_effect=fake_run)
+        from fake_docker import FakeDocker
+        ok = onion_proxy.install_php_proxy(FakeDocker(run, docker_bin="/x/docker"),
+                                           script_path, log_func=logs.append)
         return ok, seen, run, logs
 
     def test_installs_a_copy_with_this_runs_token(self):

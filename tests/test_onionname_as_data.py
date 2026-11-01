@@ -33,6 +33,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import onionnames_client  # noqa: E402
 from onionpress import setup_logic  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker  # noqa: E402
 
 # Each would have changed the PHP of the old blog_id lookup, or a config
 # line, had it got through.
@@ -101,6 +103,7 @@ class TestBlogIdLookupIsConstantPhp(unittest.TestCase):
                         return_value=_ok("7\n")) as mrun:
             setup_logic.provision_primary_subsite(
                 onionname=onionname, site_title="T", onion_addr="abc.onion",
+                docker=FakeDocker(mrun),
             )
         calls = [c for c in mrun.call_args_list
                  if "eval" in c.args[0]
@@ -132,6 +135,7 @@ class TestBlogIdLookupIsConstantPhp(unittest.TestCase):
                         return_value=_ok("7\n")) as mrun:
             setup_logic.provision_primary_subsite(
                 onionname="alice", site_title="T", onion_addr="abc.onion",
+                docker=FakeDocker(mrun),
             )
         for c in mrun.call_args_list:
             if "eval" not in c.args[0]:
@@ -152,7 +156,8 @@ class TestInstallersRefuseInvalidNames(unittest.TestCase):
                             return_value=_ok()) as mrun, \
                     mock.patch.object(setup_logic, "_onc", None):
                 ok = fn(site_title="T", onionname=name, password="hunter22",
-                        data_dir=self.tmpdir, log_func=logs.append, **extra)
+                        docker=FakeDocker(mrun), data_dir=self.tmpdir,
+                        log_func=logs.append, **extra)
             self.assertFalse(ok, name)
             self.assertEqual(mrun.call_count, 0,
                              f"{name!r}: nothing may reach wp-cli")

@@ -321,7 +321,8 @@ def open_command(what, paths, docker, *, out=None):
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    launcher_ops.open_in_browser(launcher_ops.login_target(url), prefer_tor=prefer_tor)
+    launcher_ops.open_in_browser(launcher_ops.login_target(url, docker=docker),
+                                 prefer_tor=prefer_tor)
     print(f"Opening {url}", file=out)
     return 0
 

@@ -40,6 +40,7 @@ sys.path.insert(0, TESTS_DIR)
 
 import onionnames  # noqa: E402
 from onionpress import backup  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 import test_onionhome_registry_volume as vol  # noqa: E402
 
 NAMES_DIR = vol.NAMES_DIR
@@ -291,7 +292,8 @@ class TestRestoreContainerArtifacts(unittest.TestCase):
                 stderr="" if kwargs.get("text") else b"")
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, {}, logs.append, data_dir=root)
+            backup.restore_container_artifacts(staging, {}, logs.append,
+                                               docker=FakeDocker(run), data_dir=root)
         self.assertTrue([m for m in logs if "ERROR — OnionHome's name registry was not "
                          "restored" in m and "unchanged" in m], logs)
         self.assertFalse([c for c in calls if any(f"onionpress-tor:{NAMES_DIR}" in a
@@ -362,7 +364,8 @@ class TestOnionpressRestore(unittest.TestCase):
                         mock.patch.object(backup, "_assert_db_client_sandboxed"), \
                         mock.patch.object(backup.subprocess, "run", return_value=
                                           subprocess.CompletedProcess([], 0, stdout="", stderr="")):
-                    backup.restore_container_artifacts(staging, {}, logs.append, **kw)
+                    backup.restore_container_artifacts(staging, {}, logs.append,
+                                                       docker=FakeDocker(), **kw)
                 self.assertEqual(names.called, inline)
                 if not inline:
                     self.assertIn("Restore: OnionHome's name registry is restored once "

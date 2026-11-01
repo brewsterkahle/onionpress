@@ -585,7 +585,7 @@ class TestOnionProxy(_PathsCase):
         self.assertEqual(srv.onion_address, ADDR)
         self.assertEqual(srv.data_dir, self.dir)
         self.assertEqual(srv.launcher_script, "/x/onionpress")
-        self.assertEqual(srv.docker_bin, self.docker.docker_bin)
+        self.assertIs(srv.docker, self.docker)
         self.assertTrue(srv.state_while_serving["proxy_running"])
         self.install.assert_not_called()   # no onion-forward.php shipped
 
@@ -593,8 +593,7 @@ class TestOnionProxy(_PathsCase):
         php = os.path.join(self.d.resources_dir, "onion-forward.php")
         open(php, "w").close()
         self.start()
-        self.install.assert_called_once_with(self.docker.docker_bin, self.docker.env, php,
-                                             log_func=self.d.log)
+        self.install.assert_called_once_with(self.docker, php, log_func=self.d.log)
 
     def test_not_started_twice_or_while_quitting(self):
         self.d.proxy_server = object()

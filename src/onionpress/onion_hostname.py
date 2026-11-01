@@ -8,21 +8,15 @@ address goes into site URLs, backup file names and metadata, probe URLs,
 control-port commands and the browser extension, so a damaged or planted
 hostname file reads as no address at all.
 
-Two ways in, for the two kinds of caller:
-  - read_served_address(docker): through an onionpress.docker.Docker (or
-    anything with its exec());
-  - read_served_address_with(docker_bin): a plain subprocess, for callers
-    that hold only a docker binary (the menubar's setup, setup_logic,
-    multisite).
-Both raise what docker raises; callers keep their own handling.
+One way in: read_served_address(docker), through an onionpress.docker.Docker
+(or anything with its exec()), the one runner (issue #477); every caller,
+the menubar's setup, setup_logic and multisite included, holds one.
 
 key_manager.extract_keys reads the same file to recover a public key, and
 the standalone native messaging host (started by the browser, outside this
 package) keeps its own copy of the rule; tests/test_strict_onion_addresses.py
 has a census of every reader.
 """
-
-import subprocess
 
 from .key_manager import is_valid_onion_address
 
@@ -53,14 +47,3 @@ def read_hostname_text(docker, *, timeout: int = 10, quiet: bool = True) -> str:
 def read_served_address(docker, *, timeout: int = 10, quiet: bool = True) -> str:
     """The served address through *docker* (a Docker), or ""."""
     return served_address(read_hostname_text(docker, timeout=timeout, quiet=quiet))
-
-
-def read_served_address_with(docker_bin: str = "docker", *, env=None,
-                             timeout: int = 10) -> str:
-    """The served address through the *docker_bin* binary, or ""."""
-    r = subprocess.run(
-        [docker_bin] + exec_args(),
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, env=env,
-    )
-    return served_address(r.stdout) if r.returncode == 0 else ""

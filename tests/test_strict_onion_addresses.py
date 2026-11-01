@@ -47,6 +47,7 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
@@ -509,21 +510,23 @@ class TestSetupSiteAddress(unittest.TestCase):
     def test_install_never_takes_a_malformed_address_for_the_site_url(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
+        from fake_docker import FakeDocker
         rec = _Recorder()
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             setup_logic.install_fresh_wordpress(
                 site_title="T", onionname="alice", password="hunter22",
-                onion_addr=LOOSE[0], launcher_bin="/x/onionpress", data_dir=tmp)
+                onion_addr=LOOSE[0], docker=FakeDocker(rec), launcher_bin="/x/onionpress",
+                data_dir=tmp)
         urls = [a for argv in rec.calls for a in argv if "http://" in a]
         self.assertTrue(urls)
         self.assertTrue(all("evil" not in u for u in urls), urls)
         self.assertIn("--url=http://localhost", rec.calls[0])
 
     def test_read_onion_address(self):
+        from fake_docker import FakeDocker
         for content, want in ((SITE + "\n", SITE), (LOOSE[0] + "\n", "")):
             rec = _Recorder(content)
-            with mock.patch.object(setup_logic.subprocess, "run", rec):
-                self.assertEqual(setup_logic._read_onion_address(), want)
+            self.assertEqual(setup_logic._read_onion_address(FakeDocker(rec)), want)
 
 
 # ─── The served hostname (issue #478) ───────────────────────────────────
@@ -563,20 +566,6 @@ class TestServedHostnameReader(unittest.TestCase):
                 # Unchecked only for the caller that reports a damaged file.
                 self.assertEqual(onion_hostname.read_hostname_text(_HostnameDocker(value)),
                                  value.strip())
-
-    def test_through_a_docker_binary(self):
-        rec = _Recorder(SITE + "\n")
-        with mock.patch.object(onion_hostname.subprocess, "run", rec):
-            self.assertEqual(onion_hostname.read_served_address_with("/x/docker"), SITE)
-        self.assertEqual(rec.calls, [["/x/docker", "exec", "onionpress-tor", "cat",
-                                      "/var/lib/tor/hidden_service/wordpress/hostname"]])
-        for value in LOOSE:
-            with self.subTest(value=value), \
-                    mock.patch.object(onion_hostname.subprocess, "run", _Recorder(value)):
-                self.assertEqual(onion_hostname.read_served_address_with(), "")
-        failed = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, SITE, "")  # noqa: E731
-        with mock.patch.object(onion_hostname.subprocess, "run", failed):
-            self.assertEqual(onion_hostname.read_served_address_with(), "")
 
     def test_the_rule_is_key_managers(self):
         self.assertIs(onion_hostname.is_valid_onion_address, key_manager.is_valid_onion_address)

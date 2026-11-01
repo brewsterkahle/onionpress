@@ -1635,8 +1635,6 @@ class Daemon(PortAttributes):
             # Linux has no browser extension host (issue #318: the
             # extension is the Mac's); nothing listens.
             return
-        docker_bin = self._docker.docker_bin
-        docker_env = self._docker.env
         php_script = ""
         for candidate in (os.path.join(self.resources_dir, "MenubarApp", "Contents", "Resources", "onion-forward.php"),
                           os.path.join(self.resources_dir, "onion-forward.php")):
@@ -1644,15 +1642,14 @@ class Daemon(PortAttributes):
                 php_script = candidate
                 break
         if php_script:
-            onion_proxy.install_php_proxy(docker_bin, docker_env, php_script, log_func=self.log)
+            onion_proxy.install_php_proxy(self._docker, php_script, log_func=self.log)
 
         def run_proxy():
             try:
                 server = onion_proxy.ThreadingHTTPServer(("127.0.0.1", self.proxy_port),
                                                          onion_proxy.OnionProxyHandler,
                                                          ports=lambda: self.ports)
-                server.docker_bin = docker_bin
-                server.docker_env = docker_env
+                server.docker = self._docker
                 server.onion_address = self.onion_address
                 server.healthcheck_address = self.healthcheck_address
                 server.version = self.version

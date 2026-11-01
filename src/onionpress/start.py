@@ -812,7 +812,7 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     # Image derivatives (#257): a restore's resized images, rebuilt in the
     # background (niced, resumable), after provision-post-install put the
     # image-fallback mu-plugin in place.
-    if installed and derivatives.regeneration_pending(paths.data_dir, docker.docker_bin):
+    if installed and derivatives.regeneration_pending(paths.data_dir, docker):
         log("Image derivatives: rebuild pending — starting in the background")
         run_detached_cli(["regenerate-derivatives"], data_dir=paths.data_dir,
                          log_file=paths.log_file)
