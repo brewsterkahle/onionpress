@@ -835,23 +835,23 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         self.assertIn("*([] if remaining else [REGISTRATION_RECORD])", body)
 
     def test_key_imports(self):
+        # Every import goes through key_import.replace_key (issue #524, one
+        # copy for both platforms): the hubs are asked once, after the
+        # current key was kept and before anything stops or is replaced.
+        src = _read("src/onionpress/key_import.py")
+        body = src[src.index("def replace_key("):src.index("def _log_file(")]
+        self.assertEqual(body.count('release("key-import")'), 1)
+        self.assert_before(body, "keep_current_keys", 'release("key-import")', "replace_key")
+        self.assert_before(body, 'release("key-import")', "containers.stop()", "replace_key")
+        self.assert_before(body, 'release("key-import")', "IMPORT_KEY_PENDING", "replace_key")
+        # The CLI's run() never reaches it before the question.
+        run = src[src.index("def run("):]
+        self.assert_before(run, '"address-change" in confirmed', "replace_key(", "run")
         for rel in ("linux/onionpress", "app/MacOS/onionpress"):
             with self.subTest(rel=rel):
-                text = _read(rel)
-                # Every import replaces the key in replace_onion_key: the
-                # hubs are asked once, after the current key was kept and
-                # before anything stops or is replaced.
-                body = _shell_function(text, "replace_onion_key")
-                self.assertEqual(body.count("onionheaven_release key-import"), 1)
-                self.assert_before(body, "keep-current",
-                                   "onionheaven_release key-import", rel)
-                self.assert_before(body, "onionheaven_release key-import",
-                                   "stop_containers", rel)
-                self.assert_before(body, "onionheaven_release key-import",
-                                   "touch \"$DATA_DIR/.import-key-pending\"", rel)
-                body = _shell_function(text, "import_key")
+                body = _shell_function(_read(rel), "import_key")
                 self.assertNotIn("onionheaven_release", body)
-                self.assert_before(body, 'read -r confirm', "replace_onion_key", rel)
+                self.assertIn('import-key "$@"', body)
 
     def test_linux_settings_page_key_changes(self):
         text = _read("linux/onionpress")

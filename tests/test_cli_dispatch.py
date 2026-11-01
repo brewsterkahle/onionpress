@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
-    derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
+    derivatives, docker_versions, handle_action, key_import, launcher_ops, multisite, onionheaven,
     redact, scrub, setup_logic, start, status_writer, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
@@ -270,6 +270,20 @@ ROWS = [
         mock.call("disable", ANY, json_output=True)),
     Row("onionheaven", ["onionheaven", "overview", "--json"], "onionheaven.run_onionheaven_command",
         mock.call("overview", ANY, json_output=True)),
+    Row("import-key", ["import-key", "--check", "--json", "--confirmed", "address-change", "-"],
+        "key_import.run", mock.call(ANY, paths=ANY, docker=ANY, containers=ANY, log=ANY,
+                                    release=ANY, linux=True),
+        setup_cli=False,
+        check=lambda t, m: (
+            t.assertEqual(m.call_args.args[0].key, "-"),
+            t.assertTrue(m.call_args.args[0].check),
+            t.assertTrue(m.call_args.args[0].json),
+            t.assertEqual(confirm.given(m.call_args.args[0]), frozenset({"address-change"})))),
+    Row("import-key", ["import-key", "--file", "/k/hs_ed25519_secret_key"],
+        "key_import.run", mock.call(ANY, paths=ANY, docker=ANY, containers=ANY, log=ANY,
+                                    release=ANY, linux=False),
+        os_name="macos", setup_cli=False,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].file, "/k/hs_ed25519_secret_key")),
     Row("onionheaven-unregister", ["onionheaven-unregister", "--reason", "reset",
                                    "--keep-address", ONION], "cli.release_onionheaven",
         mock.call("reset", keep_address=ONION, data_dir=D("")), rc=0, returns=[]),
@@ -478,6 +492,7 @@ MODULES = {
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
     "start": start, "setup_logic": setup_logic, "status_writer": status_writer,
+    "key_import": key_import,
 }
 
 
@@ -518,7 +533,7 @@ class TestCensus(unittest.TestCase):
         with_check = {k for k, p in tree.items()
                       if any(a.dest == "check" for a in p._actions)
                       and any(a.dest == "confirmed" for a in p._actions)}
-        self.assertEqual(with_check, {("backup",), ("restore",), ("reset",), ("uninstall",),
+        self.assertEqual(with_check, {("backup",), ("restore",), ("reset",), ("uninstall",), ("import-key",),
                                       ("config", "set")})
         confirmed_only = {k for k, p in tree.items()
                           if any(a.dest == "confirmed" for a in p._actions)} - with_check

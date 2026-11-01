@@ -1964,6 +1964,43 @@ def _run_uninstall(run):
                          json_output=args.json, confirmed=_confirm.given(args))
 
 
+# ---- Key import (issue #524) ----
+
+def _add_import_key(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Replace this site's onion service key with an imported one "
+             "(a base32 key, '-' for the key on stdin, or --file): the "
+             "current key is kept in ~/.onionpress/replaced-keys/ first")
+    p.add_argument("key", nargs="?", default=None,
+                   help="The base32 expanded secret key, or '-' to read it from stdin")
+    p.add_argument("--file", default=None, metavar="hs_ed25519_secret_key",
+                   help="C Tor's key file (or the bare 64-byte key) instead")
+    _confirm.add_arguments(p)
+
+
+def _run_import_key(run):
+    # May run before the first launch and replaces the identity: no
+    # OnionPressCLI setup (config and secrets creation, port probing).
+    from . import key_import
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    log = _launcher_log_func()
+    docker = Docker(paths, log_func=log)
+    manager = _start_step_manager(paths)
+    # key_manager's reads run plain `docker`: the docker environment
+    # _hub_context sets up.
+    _hub_context(paths.data_dir, log)
+
+    def release(reason):
+        return release_onionheaven(reason, data_dir=paths.data_dir,
+                                   out=sys.stderr if args.json else sys.stdout)
+
+    return key_import.run(args, paths=paths, docker=docker, containers=manager,
+                          log=log, release=release,
+                          linux=detect_os() == OS.LINUX)
+
+
 # ---- OnionHeaven ----
 
 def _add_onionheaven_unregister(sub, name):
@@ -2813,6 +2850,7 @@ _COMMANDS = [
     ("reset", _add_reset, _run_reset),
     ("update", _add_update, _run_update),
     ("uninstall", _add_uninstall, _run_uninstall),
+    ("import-key", _add_import_key, _run_import_key),
     ("onionheaven-unregister", _add_onionheaven_unregister, _run_onionheaven_unregister),
     ("onionheaven-registrations",
      _plain("List what the registration record says OnionHeaven hubs may "

@@ -24,6 +24,7 @@ it too). Nothing talks to a Docker daemon.
 """
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -41,7 +42,7 @@ PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from onionpress import key_manager  # noqa: E402
+from onionpress import confirm, key_import, key_manager  # noqa: E402
 
 SCRIPTS_DIR = os.path.join(PROJECT_DIR, "src", "onionpress")
 LINUX = "linux/onionpress"
@@ -206,46 +207,62 @@ class _Install:
         return os.path.exists(os.path.join(self.data, ".import-key-pending"))
 
 
-# Stand-ins for what replace_onion_key calls outside itself, recording the
-# order (into the same calls file as docker).
-LINUX_PRELUDE = r'''
-log() { echo "[log] $*" >> "$LOG_FILE"; }
-python3() { "$PY" "$@"; }
-stop_containers() { echo "stop_containers" >> "$CALLS"; }
-start_heartbeat_client() { echo "start_heartbeat_client" >> "$CALLS"; }
-onionheaven_release() {
-    echo "onionheaven_release $* yes=${ONIONPRESS_YES:-}" >> "$CALLS"
-    return "${RELEASE_RC:-0}"
-}
-'''
-if sys.platform == "darwin":
-    # The Linux launcher's GNU `sed -i`, on BSD sed.
-    LINUX_PRELUDE += ('sed() { if [ "$1" = -i ]; then shift; command sed -i "" "$@"; '
-                      'else command sed "$@"; fi; }\n')
+class _FakeDocker:
+    """key_import's `docker`: the tor container's files from the install's
+    TOR_FS (what the stub docker serves key_manager's own reads from)."""
+
+    class _Result:
+        def __init__(self, ok, stdout=""):
+            self.ok, self.stdout, self.output = ok, stdout, stdout
+
+    def __init__(self, inst):
+        self.inst = inst
+
+    def exec(self, container, command, timeout=30, check=False, quiet=False, user=None):
+        path = self.inst.tor_fs + command[1]
+        if container == "onionpress-tor" and command[0] == "cat" and os.path.isfile(path):
+            with open(path) as f:
+                return self._Result(True, f.read())
+        return self._Result(False)
 
 
-def _linux_functions():
-    text = _read(LINUX)
-    return "\n".join(_shell_function(text, n) for n in (
-        "is_onion_address", "vanity_key_dir", "docker_volume_state",
-        "replace_onion_key", "set_address_prefix_for"))
+class _FakeContainers:
+    """What replace_key asks of the ContainerManager: volume_state (read
+    from the install's volume list; the stub's failing `volume ls` is state
+    2) and stop."""
+
+    def __init__(self, inst):
+        self.inst = inst
+
+    def volume_state(self, name):
+        if self.inst.volume_ls_fails:
+            return 2
+        with open(self.inst.volumes) as f:
+            return 0 if name in f.read().split() else 1
+
+    def stop(self):
+        with open(self.inst.calls, "a") as f:
+            f.write("stop_containers\n")
+        return True
 
 
-class TestLinuxReplaceOnionKey(unittest.TestCase):
+class ReplaceKeyBase(unittest.TestCase):
 
-    def _replace(self, inst, key, **env):
-        script = ("set -e\n" + LINUX_PRELUDE + _linux_functions() + "\n"
-                  'rc=0; replace_onion_key "$KEY" || rc=$?\n'
-                  'echo "rc=$rc"\n'
-                  'echo "address=$REPLACE_KEY_ADDRESS"\n'
-                  'echo "stopped=$REPLACE_KEY_STOPPED"\n'
-                  'echo "error=$REPLACE_KEY_ERROR"\n'
-                  'printf "kept=%s\\n" "$REPLACE_KEY_KEPT"\n')
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           timeout=120, env=inst.env(KEY=key, **env))
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        out = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
-        return out, r
+    def _replace(self, inst, key, release_why=None, **kw):
+        """key_import.replace_key against *inst*; *release_why* is what the
+        hubs may still hold (a list of {"why": ...} items)."""
+        def release(reason):
+            with open(inst.calls, "a") as f:
+                f.write(f"onionheaven_release {reason}\n")
+            return list(release_why or [])
+        logged = []
+        with mock.patch.dict(os.environ, inst.env()):
+            result = key_import.replace_key(
+                key, data_dir=inst.data, docker=_FakeDocker(inst),
+                containers=_FakeContainers(inst), log=logged.append,
+                release=release, hub_held_ok=kw.pop("hub_held_ok", lambda remaining: not remaining),
+                linux=False, **kw)
+        return result
 
     def assert_untouched(self, inst, vanity_before):
         calls = inst.calls_list()
@@ -257,6 +274,11 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
         self.assertEqual(inst.staging_left(), [])
         self.assertIn("ADDRESS_PREFIX=op2\n", inst.config())
 
+
+class TestReplaceKey(ReplaceKeyBase):
+    """replace_onion_key's tests, from when it was bash twice: the same
+    cases against key_import.replace_key."""
+
     def test_a_refused_key_changes_nothing(self):
         for name, key in (("not base32", "this is not a key!"),
                           ("13 bytes", b32(b"\x01" * 13)),
@@ -266,20 +288,21 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
                 with self.subTest(name, vanity=vanity is not None):
                     inst = _Install(self, vanity=vanity)
                     before = inst.vanity()
-                    out, _ = self._replace(inst, key)
-                    self.assertEqual(out["rc"], "1")
-                    self.assertTrue(out["error"], out)
-                    self.assertNotIn("Error:", out["error"])
+                    r = self._replace(inst, key)
+                    self.assertEqual(r.status, "failed")
+                    self.assertTrue(r.error, r)
+                    self.assertNotIn("Error:", r.error)
+                    self.assertFalse(r.stopped)
                     self.assertEqual(inst.kept(), {})
                     self.assert_untouched(inst, before)
                     self.assertEqual(inst.calls_list(), [], "nothing was even asked of Docker")
 
     def test_a_valid_key_keeps_the_served_one_then_replaces_it(self):
         inst = _Install(self)
-        out, r = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "0", r.stdout + r.stderr)
-        self.assertEqual(out["address"], NEW_ADDR)
-        self.assertEqual(out["stopped"], "yes")
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "replaced", r)
+        self.assertEqual(r.address, NEW_ADDR)
+        self.assertTrue(r.stopped)
         kept = inst.kept()
         self.assertEqual(len(kept), 1, kept)
         (name, files), = kept.items()
@@ -288,7 +311,7 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
         self.assertEqual(files["hostname"], (OLD_ADDR + "\n").encode())
         self.assertEqual(key_manager.parse_openssh_key(files["ks_hs_id.ed25519_expanded_private"])[0], OLD)
         kept_dir = os.path.join(inst.data, "replaced-keys", name)
-        self.assertEqual(out["kept"], kept_dir)
+        self.assertEqual(r.kept, [kept_dir])
         for path, mode in ((os.path.join(inst.data, "replaced-keys"), 0o700), (kept_dir, 0o700),
                            (os.path.join(kept_dir, "hs_ed25519_secret_key"), 0o600)):
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), mode, path)
@@ -303,22 +326,22 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
         self.assertFalse([c for c in calls if c.startswith("docker volume rm")], calls)
         # Kept before the hubs are asked, asked before anything stops.
         reads = [i for i, c in enumerate(calls) if "hs_ed25519_secret_key" in c]
-        release = calls.index("onionheaven_release key-import yes=")
+        release = calls.index("onionheaven_release key-import")
         self.assertTrue(reads and max(reads) < release, calls)
         self.assertLess(release, calls.index("stop_containers"))
 
     def test_a_vanity_key_is_kept_when_tor_does_not_answer(self):
         inst = _Install(self, served=None, vanity=OLD)
-        out, r = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "0", r.stdout + r.stderr)
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "replaced", r)
         self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
         self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [NEW_ADDR])
 
     def test_both_kept_when_they_differ(self):
         other = expanded_key(b"pending import")
         inst = _Install(self, served=OLD, vanity=other)
-        out, r = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "0", r.stdout + r.stderr)
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "replaced", r)
         self.assertEqual(sorted(n.rsplit("-", 1)[0] for n in inst.kept()),
                          sorted([OLD_ADDR, address_of(other)]))
 
@@ -335,9 +358,9 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
             with self.subTest(name):
                 inst = _Install(self, **kw)
                 before = inst.vanity()
-                out, _ = self._replace(inst, b32(NEW))
-                self.assertEqual(out["rc"], "1")
-                self.assertIn("could not be read", out["error"])
+                r = self._replace(inst, b32(NEW))
+                self.assertEqual(r.status, "failed")
+                self.assertIn("could not be read", r.error)
                 self.assert_untouched(inst, before)
 
     def test_a_copy_that_cannot_be_written_stops_it(self):
@@ -345,9 +368,9 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
         with open(os.path.join(inst.data, "replaced-keys"), "w") as f:
             f.write("not a folder")
         before = inst.vanity()
-        out, _ = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "1")
-        self.assertIn("could not be kept", out["error"])
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "failed")
+        self.assertIn("could not be kept", r.error)
         self.assert_untouched(inst, before)
 
     def test_an_unreadable_served_key_stops_it(self):
@@ -355,39 +378,328 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
         with open(inst.tor_fs + TOR_HS + "/hs_ed25519_secret_key", "wb") as f:
             f.write(b"garbage")
         before = inst.vanity()
-        out, _ = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "1")
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "failed")
         self.assert_untouched(inst, before)
 
     def test_a_fresh_install_has_nothing_to_keep(self):
         inst = _Install(self, served=None, volumes=())
-        out, r = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "0", r.stdout + r.stderr)
-        self.assertEqual(out["kept"], "")
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "replaced", r)
+        self.assertEqual(r.kept, [])
         self.assertEqual(inst.kept(), {})
         self.assertTrue(inst.pending())
 
     def test_the_same_key_is_nothing_to_do(self):
         inst = _Install(self, served=NEW)
         before = inst.vanity()
-        out, _ = self._replace(inst, b32(NEW))
-        self.assertEqual(out["rc"], "2")
-        self.assertEqual(out["address"], NEW_ADDR)
+        r = self._replace(inst, b32(NEW))
+        self.assertEqual(r.status, "unchanged")
+        self.assertEqual(r.address, NEW_ADDR)
         self.assertEqual(inst.kept(), {})
         self.assert_untouched(inst, before)
 
     def test_a_no_at_the_hub_question_stops_before_anything_is_replaced(self):
         inst = _Install(self, vanity=OLD)
         before = inst.vanity()
-        out, _ = self._replace(inst, b32(NEW), RELEASE_RC="1")
-        self.assertEqual(out["rc"], "1")
-        self.assertIn("OnionHeaven", out["error"])
+        r = self._replace(inst, b32(NEW), release_why=[{"why": "unanswered"}])
+        self.assertEqual(r.status, "failed")
+        self.assertIn("OnionHeaven", r.error)
+        self.assertFalse(r.stopped)
         calls = inst.calls_list()
         self.assertNotIn("stop_containers", calls)
         self.assertEqual(inst.vanity(), before)
         self.assertFalse(inst.pending())
         self.assertEqual(inst.staging_left(), [])
         self.assertEqual(len(inst.kept()), 1)
+
+    def test_a_replaced_identity_ends_a_pending_volume_migration(self):
+        inst = _Install(self)
+        marker = os.path.join(inst.data, ".key-volume-migration-pending")
+        open(marker, "w").close()
+        self.assertEqual(self._replace(inst, b32(NEW)).status, "replaced")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_no_unit_is_stopped_around_the_hubs(self):
+        # #407: the daemon's beats stay off a released key on both
+        # platforms; the hubs are asked, nothing else is touched.
+        for answer in ([], [{"why": "unanswered"}]):
+            with self.subTest(answer=answer):
+                inst = _Install(self, vanity=OLD)
+                events = []
+                with mock.patch.dict(os.environ, inst.env()):
+                    key_import.replace_key(
+                        b32(NEW), data_dir=inst.data, docker=_FakeDocker(inst),
+                        containers=_FakeContainers(inst), log=lambda m: None,
+                        release=lambda reason: events.append("release") or answer,
+                        hub_held_ok=lambda remaining: not remaining, linux=True)
+                self.assertEqual(events, ["release"])
+        self.assertNotIn("heartbeat_unit", open(os.path.join(
+            PROJECT_DIR, "src", "onionpress", "key_import.py"), encoding="utf-8").read())
+
+
+class TestPrefixRule(unittest.TestCase):
+    """One prefix rule (the launchers had three): the configured length,
+    3 when there is none, held to 2-5."""
+
+    def test_the_length_follows_the_configured_prefix(self):
+        for current, length in (("", 3), ("a", 3), ("ab", 2), ("abcd", 4), ("abcde", 5),
+                                ("abcdefgh", 5)):
+            with self.subTest(current=current):
+                self.assertEqual(key_import.prefix_for_address(NEW_ADDR, current),
+                                 NEW_ADDR[:length])
+
+    def test_follow_address_prefix_writes_the_config(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "config")
+        with open(path, "w") as f:
+            f.write("FOO=bar\nADDRESS_PREFIX=abcd\n")
+        key_import.follow_address_prefix(path, NEW_ADDR, lambda m: None)
+        with open(path) as f:
+            self.assertEqual(f.read(), f"FOO=bar\nADDRESS_PREFIX={NEW_ADDR[:4]}\n")
+        os.remove(path)
+        key_import.follow_address_prefix(path, NEW_ADDR, lambda m: None)
+        with open(path) as f:
+            self.assertEqual(f.read(), f"ADDRESS_PREFIX={NEW_ADDR[:3]}\n")
+
+
+class _Args:
+    def __init__(self, key=None, file=None, check=False, json=False, confirmed=()):
+        self.key, self.file, self.check, self.json = key, file, check, json
+        self.confirmed = list(confirmed)
+
+
+class TestRun(ReplaceKeyBase):
+    """`onionpress import-key` (key_import.run): the check/confirm
+    protocol around replace_key. The Mac's menubar hands it the page's key
+    on stdin ("-"), so a question cannot be asked of a terminal there."""
+
+    def _run(self, inst, args, *, interactive=False, answers="", environ=None,
+             release_why=None, linux=False):
+        out, err = io.StringIO(), io.StringIO()
+
+        def release(reason):
+            with open(inst.calls, "a") as f:
+                f.write(f"onionheaven_release {reason}\n")
+            return list(release_why or [])
+
+        paths = mock.Mock(data_dir=inst.data)
+        env = dict(environ or {})
+        with mock.patch.dict(os.environ, inst.env()):
+            rc = key_import.run(
+                args, paths=paths, docker=_FakeDocker(inst),
+                containers=_FakeContainers(inst), log=lambda m: None,
+                release=release, linux=linux, interactive=interactive,
+                environ=env, out=out, err=err, stdin=io.StringIO(answers))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_without_a_confirmation_nothing_is_replaced(self):
+        inst = _Install(self, vanity=OLD)
+        before = inst.vanity()
+        rc, out, err = self._run(inst, _Args(b32(NEW)))
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertIn("Cancelled.", out)
+        self.assertEqual(inst.vanity(), before)
+        self.assertEqual(inst.kept(), {})
+        self.assertNotIn("stop_containers", inst.calls_list())
+        self.assertFalse(inst.pending())
+
+    def test_confirmed_it_keeps_the_old_key_and_replaces_it(self):
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("Imported key for: " + NEW_ADDR, out)
+        self.assertIn("Launch OnionPress to use this address.", out)
+        self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
+        self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [NEW_ADDR])
+        self.assertTrue(inst.pending())
+        self.assertIn(f"ADDRESS_PREFIX={NEW_ADDR[:3]}\n", inst.config())
+        calls = inst.calls_list()
+        self.assertLess(calls.index("onionheaven_release key-import"),
+                        calls.index("stop_containers"))
+
+    def test_the_old_variable_and_the_env_stand_in_for_the_flag(self):
+        for env in ({"ONIONPRESS_IMPORT_KEY_CONFIRMED": "yes"},
+                    {"ONIONPRESS_CONFIRMED": "reset,address-change"}):
+            with self.subTest(env=env):
+                inst = _Install(self, vanity=OLD)
+                rc, out, err = self._run(inst, _Args(b32(NEW)), environ=env)
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
+
+    def test_only_yes_confirms_the_old_variable(self):
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args(b32(NEW)),
+                                 environ={"ONIONPRESS_IMPORT_KEY_CONFIRMED": "1"})
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertEqual(inst.kept(), {})
+
+    def test_a_terminal_is_asked_and_only_y_confirms(self):
+        for answer, replaced in (("y\n", True), ("Y\n", True), ("n\n", False), ("", False),
+                                 ("yes\n", False)):
+            with self.subTest(answer=answer):
+                inst = _Install(self, vanity=OLD)
+                rc, out, err = self._run(inst, _Args(b32(NEW)), interactive=True,
+                                         answers=answer, linux=True)
+                self.assertIn("Continue? [y/N] ", out)
+                self.assertEqual(rc, 0 if replaced else 1, out + err)
+                self.assertEqual(inst.pending(), replaced)
+                if not replaced:
+                    self.assertIn("Cancelled.", out)
+                    self.assertEqual(inst.kept(), {})
+
+    def test_a_refused_key_is_refused_before_the_question(self):
+        inst = _Install(self, vanity=OLD)
+        before = inst.vanity()
+        rc, out, err = self._run(inst, _Args(b32(TOP_BIT), confirmed=["address-change"]))
+        self.assertEqual(rc, 1)
+        self.assertIn("top bit", err)
+        self.assertEqual(inst.vanity(), before)
+        self.assertEqual(inst.calls_list(), [])
+
+    def test_check_json_asks_without_changing_anything(self):
+        """The check/confirm protocol (onionpress.confirm): --check --json
+        answers the question, exit 4, and replaces nothing."""
+        inst = _Install(self, vanity=OLD)
+        before = inst.vanity()
+        rc, out, err = self._run(inst, _Args(b32(NEW), check=True, json=True))
+        self.assertEqual(rc, confirm.EXIT_CONFIRM, out + err)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]),
+                         {"confirm": "address-change", "current": OLD_ADDR, "new": NEW_ADDR})
+        self.assertEqual(inst.vanity(), before)
+        self.assertEqual(inst.kept(), {})
+        self.assertEqual(inst.calls_list(), [])
+        # The same key: nothing to ask
+        rc, out, err = self._run(inst, _Args(b32(OLD), check=True, json=True))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]),
+                         {"ok": True, "address": OLD_ADDR, "unchanged": True})
+        # No key volume, nothing to replace: nothing to ask
+        inst = _Install(self, served=None, volumes=())
+        rc, out, err = self._run(inst, _Args(b32(NEW), check=True, json=True))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]),
+                         {"ok": True, "address": NEW_ADDR})
+
+    def test_a_bad_check_answers_an_error(self):
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args("not a key!", check=True, json=True))
+        self.assertEqual(rc, 1)
+        self.assertIn("error", json.loads(out.strip().splitlines()[-1]))
+
+    def test_the_key_comes_from_stdin_or_a_file(self):
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args("-", confirmed=["address-change"]),
+                                 answers=b32(NEW) + "\n")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [NEW_ADDR])
+        inst = _Install(self, vanity=OLD)
+        keyfile = os.path.join(inst.tmp, "hs_ed25519_secret_key")
+        with open(keyfile, "wb") as f:
+            f.write(key_manager.CTOR_HEADER_SECRET + NEW)
+        rc, out, err = self._run(inst, _Args(file=keyfile, confirmed=["address-change"]))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [NEW_ADDR])
+        rc, out, err = self._run(inst, _Args(file=os.path.join(inst.tmp, "missing")))
+        self.assertEqual(rc, 1)
+        rc, out, err = self._run(inst, _Args())
+        self.assertEqual(rc, 0)
+        self.assertIn("Usage: onionpress import-key", out)
+
+    def test_a_hub_that_keeps_the_key_asks_a_terminal_and_refuses_a_script(self):
+        why = [{"why": "unanswered"}]
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]),
+                                 release_why=why)
+        self.assertEqual(rc, 1)
+        self.assertIn("Cancelled: an OnionHeaven hub", err)
+        self.assertFalse(inst.pending())
+        self.assertNotIn("stop_containers", inst.calls_list())
+        # --confirmed hub-holds-key, ONIONPRESS_YES and a "y" go on
+        for kw in (dict(args=_Args(b32(NEW), confirmed=["address-change", "hub-holds-key"])),
+                   dict(args=_Args(b32(NEW), confirmed=["address-change"]),
+                        environ={"ONIONPRESS_YES": "true"}),
+                   dict(args=_Args(b32(NEW), confirmed=["address-change"]),
+                        interactive=True, answers="y\n")):
+            with self.subTest(kw=sorted(kw)):
+                inst = _Install(self, vanity=OLD)
+                rc, out, err = self._run(inst, release_why=why, **kw)
+                self.assertEqual(rc, 0, out + err)
+                self.assertTrue(inst.pending())
+        # nothing a user could take back (a hub that cannot be reached any more): on
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]),
+                                 release_why=[{"why": "key-gone"}])
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_failure_after_the_stop_says_so(self):
+        inst = _Install(self, vanity=OLD)
+        with mock.patch.object(key_import.os, "rename", side_effect=OSError("no")):
+            rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]))
+        self.assertEqual(rc, 1)
+        self.assertIn("OnionPress was stopped; launch it again.", err)
+        self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [OLD_ADDR])
+
+    def test_linux_words_its_ending(self):
+        inst = _Install(self, vanity=OLD)
+        rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]), linux=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("Run 'onionpress restart'", out)
+
+
+class TestLauncherDelegation(unittest.TestCase):
+    """Both launchers' import_key is one line: the CLI's import-key. The
+    settings page never replaces the key on Linux."""
+
+    def test_both_launchers_delegate(self):
+        for rel, runner in ((MAC, "bundled_python -m onionpress.cli"), (LINUX, "op_py")):
+            with self.subTest(rel):
+                text = _read(rel)
+                body = _shell_function(text, "import_key")
+                self.assertIn('import-key "$@"', body)
+                self.assertIn(runner, body)
+                self.assertLess(len(body.splitlines()), 6)
+                for gone in ("replace_onion_key", "set_address_prefix_for", "REPLACE_KEY_"):
+                    self.assertNotIn(gone, text)
+        # The Mac ran a bundled copy of key_manager.py for it; the Linux
+        # restore still does (the backup's ctor-to-arti, #406).
+        self.assertNotIn("key_manager.py", _read(MAC))
+
+    def test_the_settings_page_never_replaces_the_key(self):
+        text = _read(LINUX)
+        # The page's requests are the shared handler's (issue #366): the
+        # Linux launcher has no import-key-file branch, and the handler
+        # refuses the import on Linux before any launcher runs.
+        self.assertNotIn("\n                import-key-file)\n", text)
+        self.assertNotIn("\n                generate-vanity)\n", text)
+        handler = _read("src/onionpress/handle_action.py")
+        branch = handler[handler.index("def _import_key_file("):handler.index("def _import_key(")]
+        self.assertIn("IMPORT_REFUSED_LINUX_MSG", branch)
+        self.assertNotIn("replace_onion_key", handler)
+        self.assertNotIn("volume", branch)
+
+    def test_the_order_of_replace_key(self):
+        """No volume removal before the start (the pending-import path
+        counts only a confirmed removal), and the steps in their order."""
+        src = _read("src/onionpress/key_import.py")
+        body = src[src.index("def replace_key("):src.index("def _log_file(")]
+        self.assertNotIn("volume rm", body)
+        self.assertNotIn('"rm"', body)
+        order = ["import_key_b32", "staged_key_address", "keep_current_keys",
+                 "release(", "containers.stop()", "os.rename(staged_keys, vanity)",
+                 "IMPORT_KEY_PENDING", "follow_address_prefix"]
+        positions = [body.index(s) for s in order]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_the_cli_asks_before_replacing(self):
+        src = _read("src/onionpress/key_import.py")
+        body = src[src.index("def run("):]
+        self.assertLess(body.index("decoded_address(key_b32)"),
+                        body.index('"address-change" in confirmed'))
+        self.assertLess(body.index('"address-change" in confirmed'),
+                        body.index("replace_key("))
+
 
 
 class TestLinuxSettingsPage(unittest.TestCase):
@@ -435,168 +747,6 @@ class TestLinuxSettingsPage(unittest.TestCase):
         self._assert_refused(_Install(self), b32(NEW))
 
 
-class TestLinuxStructure(unittest.TestCase):
-
-    def test_the_settings_page_never_replaces_the_key(self):
-        text = _read(LINUX)
-        # The page's requests are the shared handler's (issue #366): the
-        # Linux launcher has no import-key-file branch, and the handler
-        # refuses the import on Linux before any launcher runs.
-        self.assertNotIn("\n                import-key-file)\n", text)
-        self.assertNotIn("\n                generate-vanity)\n", text)
-        handler = _read("src/onionpress/handle_action.py")
-        branch = handler[handler.index("def _import_key_file("):handler.index("def _import_key(")]
-        self.assertIn("IMPORT_REFUSED_LINUX_MSG", branch)
-        self.assertNotIn("replace_onion_key", handler)
-        self.assertNotIn("volume", branch)
-        # replace_onion_key's one caller: the CLI's import, which asks.
-        callers = [line.strip() for line in text.splitlines()
-                   if re.search(r"\breplace_onion_key\b", line)
-                   and not line.lstrip().startswith("#")
-                   and not line.startswith("replace_onion_key()")]
-        self.assertEqual(len(callers), 1, callers)
-        self.assertIn("replace_onion_key", _shell_function(text, "import_key"))
-        self.assertNotIn("import_key_noninteractive", text)
-
-    def test_the_cli_asks_first(self):
-        body = _shell_function(_read(LINUX), "import_key")
-        self.assertLess(body.index("decode-key -"), body.index("read -r confirm"))
-        self.assertLess(body.index("read -r confirm"), body.index("replace_onion_key"))
-        self.assertNotIn("docker volume rm", body)
-        self.assertNotIn("rm -rf", body)
-
-    def test_no_volume_removal_before_the_start(self):
-        """replace_onion_key leaves the key volumes to start_containers'
-        pending-import path, which only counts a confirmed removal."""
-        body = _shell_function(_read(LINUX), "replace_onion_key")
-        self.assertNotIn("volume rm", body)
-        order = ["import-key -", "staged-address", "keep-current",
-                 "onionheaven_release key-import", "stop_containers",
-                 'mv "$staging/vanity-keys" "$DATA_DIR/shared/vanity-keys"',
-                 'touch "$DATA_DIR/.import-key-pending"', "set_address_prefix_for"]
-        positions = [body.index(s) for s in order]
-        self.assertEqual(positions, sorted(positions))
-
-
-class TestMacImportKey(unittest.TestCase):
-    """app/MacOS/onionpress import_key, run for real: the menubar hands it
-    the page's key on stdin ("import-key -"), so its own question reads the
-    end of the input. It replaces a key only with the menubar's explicit
-    ONIONPRESS_IMPORT_KEY_CONFIRMED=yes, and then in replace_onion_key's
-    order."""
-
-    PRELUDE = r'''
-log() { echo "[log] $*" >> "$LOG_FILE"; }
-bundled_python() { "$PY" "$@"; }
-stop_containers() { echo "stop_containers" >> "$CALLS"; }
-onionheaven_release() {
-    echo "onionheaven_release $* yes=${ONIONPRESS_YES:-}" >> "$CALLS"
-    return "${RELEASE_RC:-0}"
-}
-'''
-    if sys.platform != "darwin":
-        # The Mac launcher's BSD `sed -i ''`, on GNU sed.
-        PRELUDE += ('sed() { if [ "$1" = -i ] && [ -z "$2" ]; then shift 2; '
-                    'command sed -i "$@"; else command sed "$@"; fi; }\n')
-
-    def _import(self, inst, key, **env):
-        text = _read(MAC)
-        funcs = "\n".join(_shell_function(text, n) for n in (
-            "is_onion_address", "vanity_key_dir", "docker_volume_state",
-            "replace_onion_key", "set_address_prefix_for", "import_key"))
-        extra = env.pop("ONIONPRESS_IMPORT_KEY_ARGS", "")
-        first = env.pop("ONIONPRESS_IMPORT_KEY_FLAGS_FIRST", "")
-        script = "set -e\n" + self.PRELUDE + funcs + f"\nimport_key {first} - {extra}\n"
-        return subprocess.run(["bash", "-c", script], input=key + "\n",
-                              capture_output=True, text=True, timeout=120,
-                              env=inst.env(**env))
-
-    def test_without_the_menubars_confirmation_nothing_is_replaced(self):
-        inst = _Install(self, vanity=OLD)
-        before = inst.vanity()
-        r = self._import(inst, b32(NEW))
-        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)    # refused, as every unconfirmed run
-        self.assertIn("Cancelled.", r.stdout)
-        self.assertEqual(inst.vanity(), before)
-        self.assertEqual(inst.kept(), {})
-        self.assertNotIn("stop_containers", inst.calls_list())
-        self.assertFalse(inst.pending())
-
-    def test_confirmed_it_keeps_the_old_key_and_replaces_it(self):
-        inst = _Install(self, vanity=OLD)
-        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_CONFIRMED="yes")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("Confirmed at this Mac.", r.stdout)
-        self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
-        self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [NEW_ADDR])
-        self.assertTrue(inst.pending())
-        self.assertIn(f"ADDRESS_PREFIX={NEW_ADDR[:3]}\n", inst.config())
-        calls = inst.calls_list()
-        self.assertFalse([c for c in calls if c.startswith("docker volume rm")], calls)
-        self.assertLess(calls.index("onionheaven_release key-import yes="),
-                        calls.index("stop_containers"))
-
-    def test_only_yes_confirms(self):
-        inst = _Install(self, vanity=OLD)
-        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_CONFIRMED="1")
-        self.assertIn("Cancelled.", r.stdout)
-        self.assertEqual(inst.kept(), {})
-
-    def test_a_refused_key_is_refused_before_the_question(self):
-        inst = _Install(self, vanity=OLD)
-        before = inst.vanity()
-        r = self._import(inst, b32(TOP_BIT), ONIONPRESS_IMPORT_KEY_CONFIRMED="yes")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("top bit", r.stderr)
-        self.assertEqual(inst.vanity(), before)
-        self.assertEqual(inst.calls_list(), [])
-
-    def test_check_json_asks_without_changing_anything(self):
-        """The check/confirm protocol (onionpress.confirm): --check --json
-        answers the question, exit 4, and replaces nothing."""
-        inst = _Install(self, vanity=OLD)
-        before = inst.vanity()
-        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_ARGS="--check --json")
-        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                         {"confirm": "address-change", "current": OLD_ADDR, "new": NEW_ADDR})
-        self.assertEqual(inst.vanity(), before)
-        self.assertEqual(inst.kept(), {})
-        # Only the read that decides whether there is a key to replace
-        self.assertEqual([c for c in inst.calls_list() if not c.startswith("docker volume ls")], [])
-        # The flags may come before the key
-        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_FLAGS_FIRST="--check --json")
-        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1])["confirm"], "address-change")
-        # The same key: nothing to ask
-        r = self._import(inst, b32(OLD), ONIONPRESS_IMPORT_KEY_ARGS="--check --json")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                         {"ok": True, "address": OLD_ADDR, "unchanged": True})
-
-    def test_confirmed_flag_and_env_stand_in_for_the_old_variable(self):
-        for env in ({"ONIONPRESS_IMPORT_KEY_ARGS": "--confirmed address-change --json"},
-                    {"ONIONPRESS_CONFIRMED": "reset,address-change"}):
-            with self.subTest(env=env):
-                inst = _Install(self, vanity=OLD)
-                r = self._import(inst, b32(NEW), **env)
-                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                self.assertIn("Confirmed at this Mac.", r.stdout)
-                self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
-                if "ONIONPRESS_IMPORT_KEY_ARGS" in env:
-                    self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                                     {"ok": True, "address": NEW_ADDR})
-
-    def test_the_two_launchers_replace_alike(self):
-        linux = _shell_function(_read(LINUX), "replace_onion_key")
-        mac = _shell_function(_read(MAC), "replace_onion_key")
-        self.assertEqual(mac.replace("bundled_python ", "python3 "), linux)
-        body = _shell_function(_read(MAC), "import_key")
-        self.assertLess(body.index("decode-key -"),
-                        body.index('if [ "${ONIONPRESS_IMPORT_KEY_CONFIRMED:-}" = "yes" ]'))
-        self.assertLess(body.index("read -r confirm"), body.index("replace_onion_key"))
-        self.assertNotIn("docker volume rm", body)
-        self.assertNotIn("rm -rf", body)
 
 
 def _menubar_method(name):

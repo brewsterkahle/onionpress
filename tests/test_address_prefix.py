@@ -315,55 +315,32 @@ class TestKeyImportKeepsPrefixLength(unittest.TestCase):
     address so the startup check does not flag a mismatch. The macOS launcher
     hardcoded `cut -c1-3` there (#116): a user with a 4- or 5-character prefix
     had it silently replaced by the first three characters of the new address.
-    The Linux launcher already derives the length from the configured prefix;
-    this runs the launchers' own bash against a scratch config to pin both.
+    The prefix rule is one function now (key_import.prefix_for_address, issue
+    #524; the launchers had two bash copies and the restore a third): the
+    configured length, 3 when there is none, held to the 2-5 characters the
+    startup check allows.
     """
 
-    MAC = "app/MacOS/onionpress"
-    LINUX = "linux/onionpress"
-    START = "# Update ADDRESS_PREFIX in config to match"
-    END = 'log "Updated ADDRESS_PREFIX'
     ADDRESS = "elphinabcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqr.onion"
 
-    def _import_block(self, launcher):
-        """The import_key() lines from the config read to the log line."""
-        body = _read(launcher)
-        start = body.index(self.START)
-        end = body.index(self.END, start)
-        block = body[start:end]
-        # import_key() is the first user of this comment in both launchers;
-        # make sure a second copy did not shadow it.
-        self.assertNotIn("cut -c1-3", block, f"{launcher} still truncates the "
-                         "imported prefix to 3 characters (#116)")
-        return block
-
-    def _run(self, launcher, current_prefix):
-        """Run the block with ADDRESS_PREFIX=current_prefix (None: absent)
-        and return what the launcher wrote back."""
-        import subprocess
-        block = self._import_block(launcher)
+    def _run(self, current_prefix):
+        """Write the prefix back into a scratch config (current_prefix None:
+        the line is absent) and return what was written."""
+        from onionpress import key_import
         with tempfile.TemporaryDirectory() as tmp:
             config = os.path.join(tmp, "config")
             with open(config, "w", encoding="utf-8") as f:
                 f.write("INSTALL_IA_PLUGIN=yes\n")
                 if current_prefix is not None:
                     f.write(f"ADDRESS_PREFIX={current_prefix}\n")
-            script = (
-                "log() { :; }\n"
-                f"DATA_DIR={tmp!r}\n"
-                + config_value_function() +
-                f"address={self.ADDRESS!r}\n"
-                "import_block() {\n" + block + "\n}\nimport_block\n"
-            )
-            subprocess.run(["bash", "-c", script], check=True,
-                           capture_output=True, text=True, timeout=30)
+            key_import.follow_address_prefix(config, self.ADDRESS, lambda m: None)
             with open(config, encoding="utf-8") as f:
                 lines = [l for l in f.read().splitlines()
                          if l.startswith("ADDRESS_PREFIX=")]
         self.assertEqual(len(lines), 1, lines)
         return lines[0].split("=", 1)[1]
 
-    def _check(self, launcher):
+    def test_the_configured_length_is_kept(self):
         cases = {
             None: "elp",       # no config value: the historical default of 3
             "": "elp",
@@ -374,25 +351,16 @@ class TestKeyImportKeepsPrefixLength(unittest.TestCase):
         }
         for current, expected in cases.items():
             with self.subTest(current=current):
-                self.assertEqual(self._run(launcher, current), expected)
+                self.assertEqual(self._run(current), expected)
 
-    @unittest.skipUnless(sys.platform == "darwin",
-                         "the macOS launcher uses BSD `sed -i ''`")
-    def test_mac_launcher_keeps_the_configured_length(self):
-        self._check(self.MAC)
+    def test_a_hand_edited_over_long_prefix_is_capped(self):
+        """It must not be written back over-long: the startup check would
+        reject it and fall back to op2."""
+        self.assertEqual(self._run("abcdefg"), "elphin"[:ADDRESS_PREFIX_MAX])
 
-    @unittest.skipUnless(sys.platform == "darwin",
-                         "the macOS launcher uses BSD `sed -i ''`")
-    def test_mac_launcher_caps_at_the_maximum(self):
-        """A hand-edited over-long prefix must not be written back over-long:
-        the startup check would reject it and fall back to op2."""
-        self.assertEqual(self._run(self.MAC, "abcdefg"),
-                         "elphin"[:ADDRESS_PREFIX_MAX])
-
-    @unittest.skipUnless(sys.platform.startswith("linux"),
-                         "the Linux launcher uses GNU `sed -i`")
-    def test_linux_launcher_keeps_the_configured_length(self):
-        self._check(self.LINUX)
+    def test_the_launchers_have_no_prefix_rule_of_their_own(self):
+        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
+            self.assertNotIn("set_address_prefix_for", _read(launcher))
 
 
 if __name__ == "__main__":

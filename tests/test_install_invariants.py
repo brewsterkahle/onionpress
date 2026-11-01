@@ -25,59 +25,21 @@ def _read(rel_path):
         return f.read()
 
 
-class TestMacOSBuildBundlesKeyManager(unittest.TestCase):
-    """The macOS shell launcher invokes $SCRIPTS_DIR/key_manager.py directly
-    (app/MacOS/onionpress:504,638,702). If that file isn't bundled, vanity
-    generation silently falls back to a random address AND OnionHeaven
-    registration hits "sign_failed" forever — both observed on an install
-    test where build-dmg-simple.sh copied menubar.py but not key_manager.py.
-    """
+class TestMacOSBuildNeedsNoKeyManagerScript(unittest.TestCase):
+    """The key import is `onionpress import-key` (issue #524), run by the
+    bundle's package like every other subcommand: the Mac launcher no longer
+    invokes a $SCRIPTS_DIR/key_manager.py copy, so the DMG build neither
+    copies nor requires one (and nothing in the launcher may name it)."""
 
-    def test_build_script_copies_key_manager_into_scripts_dir(self):
+    def test_build_script_has_no_key_manager_script_copy(self):
         script = _read("build/build-dmg-simple.sh")
-        self.assertRegex(
-            script,
-            r'cp\s+"\$PROJECT_DIR/src/onionpress/key_manager\.py"\s+'
-            r'"\$APP_PATH/Contents/Resources/scripts/"',
-            "build-dmg-simple.sh must copy src/onionpress/key_manager.py "
-            "into Contents/Resources/scripts/ — the macOS shell launcher "
-            "invokes it from there.",
-        )
+        self.assertNotIn("scripts/key_manager.py", script)
+        self.assertNotIn("key_manager.py", script)
 
-    def test_build_script_verifies_file_not_substring(self):
-        """The old check was `grep -rq "key_manager" MenubarApp` — that
-        passes even when the actual file the shell launcher needs is
-        missing, because the string appears in py2app's bundled bytecode.
-        The real check has to be `test -f` against the launcher's path
-        and must exit non-zero on failure.
-        """
-        script = _read("build/build-dmg-simple.sh")
-        self.assertNotRegex(
-            script,
-            r'grep\s+-rq\s+"key_manager"',
-            "Substring grep can pass when the file is missing. Use "
-            "`test -f` against Contents/Resources/scripts/key_manager.py.",
-        )
-        self.assertRegex(
-            script,
-            r'\[\s*-f\s+"\$APP_PATH/Contents/Resources/scripts/key_manager\.py"\s*\]',
-            "Need a `test -f` check for the bundled key_manager.py.",
-        )
-        # The verification must fail the build, not just log a warning.
-        # Look for an `exit 1` inside the key_manager check's else-branch.
-        km_block = re.search(
-            r'if\s+\[\s*-f\s+"\$APP_PATH/Contents/Resources/scripts/key_manager\.py"\s*\];\s*then'
-            r'(.*?)fi',
-            script,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(km_block, "Could not find key_manager.py test -f block")
-        self.assertIn(
-            "exit 1",
-            km_block.group(1),
-            "The key_manager.py check must `exit 1` on miss, not just warn — "
-            "otherwise broken bundles ship.",
-        )
+    def test_mac_launcher_runs_no_key_manager_script(self):
+        launcher = _read("app/MacOS/onionpress")
+        self.assertNotIn("key_manager.py", launcher)
+        self.assertIn('import-key "$@"', launcher)
 
 
 class TestMacOSBuildBundlesMkp224o(unittest.TestCase):

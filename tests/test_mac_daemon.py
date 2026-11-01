@@ -721,6 +721,11 @@ class TestLaunchdAgent(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-daemon-agent-")
         self.addCleanup(shutil.rmtree, self.dir, True)
+        # The launchd side, wherever the tests run (the systemd side is
+        # tests/test_linux_daemon.py's).
+        patcher = mock.patch.object(op_daemon_client, "_on_linux", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         # This temp dir plays the account's own ~/.onionpress: the default
         # label (another dir's is derived: TestLabelPerDataDir).
         patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.dir)
@@ -873,6 +878,9 @@ class TestLabelPerDataDir(unittest.TestCase):
         self.other = tempfile.mkdtemp(prefix="op-other-")
         for d in (self.default, self.other):
             self.addCleanup(shutil.rmtree, d, True)
+        patcher = mock.patch.object(op_daemon_client, "_on_linux", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.default)
         patcher.start()
         self.addCleanup(patcher.stop)

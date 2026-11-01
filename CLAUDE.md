@@ -366,11 +366,15 @@
   `OnionPress-<≤8>-<YYYY-MM-DD-HH-MM>.zip` regular file; changing the name
   in `handle_action.py` means changing the pattern.
   `tests/test_backup_download.py`.
-- **A key import never loses the current key**: every import goes through
-  `replace_onion_key` (check, stage, copy old keys to
-  `~/.onionpress/replaced-keys/`, then release hubs and swap). On a Mac the
+- **A key import never loses the current key**: every import is
+  `onionpress import-key` (`key_import.replace_key`, both platforms; the
+  launchers' `import_key` is a delegation, and the one ADDRESS_PREFIX rule
+  is `config.prefix_for_address`): check, stage, copy old keys to
+  `~/.onionpress/replaced-keys/`, then release hubs and swap. On a Mac the
   page's import needs the person at the Mac (native dialog, Cancel default,
-  5 min = Cancel); Linux refuses it from the page.
+  5 min = Cancel); Linux refuses it from the page. The CLI speaks the
+  check/confirm protocol on both platforms (`address-change`, and
+  `hub-holds-key` when a hub may still keep the key).
   `tests/test_onion_key_replacement.py`.
 - An import Docker was not up for (`.import-key-pending`) is finished by
   the next start, first: `ContainerManager.apply_pending_key_import` wipes

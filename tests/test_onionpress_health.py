@@ -241,7 +241,14 @@ class TestCheckInternalConnectivity(unittest.TestCase):
 
 
 class TestCheckInternetConnectivity(unittest.TestCase):
-    """Interface-scan based check — no TCC-gated API calls."""
+    """Interface-scan based check — no TCC-gated API calls (the Mac's;
+    Linux reads the routing table: tests/test_linux_daemon.py)."""
+
+    def setUp(self):
+        from onionpress.platform import OS
+        p = mock.patch("onionpress.platform.detect_os", return_value=OS.MACOS)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _run(self, stdout, returncode=0):
         return mock.Mock(returncode=returncode, stdout=stdout)
