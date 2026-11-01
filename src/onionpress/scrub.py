@@ -553,7 +553,8 @@ def phase_backup_mac(password: str, log: Callable[[str], None], *,
     return state
 
 
-def phase_reset_in_place(log: Callable[[str], None], *, launcher: str, data_dir: str) -> None:
+def phase_reset_in_place(log: Callable[[str], None], *, launcher: str, data_dir: str,
+                         docker) -> None:
     """The Mac's step 2: the reset wipes the config (OnionHeaven back to
     undecided, so no heartbeat follows the restore), so the hubs that may
     hold the key are asked to delete their copy first, as by `reset` (a
@@ -570,9 +571,11 @@ def phase_reset_in_place(log: Callable[[str], None], *, launcher: str, data_dir:
             "Continue anyway? The hub keeps the key listed above. [y/N] "):
         raise RuntimeError("Cancelled")
     subprocess.run([launcher, "stop"], capture_output=True)
-    r = _run(["docker", "volume", "ls", "-q", "--filter", "name=onionpress-"], capture=True)
-    for vol in (r.stdout or "").split() if r.returncode == 0 else []:
-        _run(["docker", "volume", "rm", vol], quiet=True)
+    # Through the runner (docker.Docker): this install's daemon, binary
+    # and environment.
+    r = docker.run(["volume", "ls", "-q", "--filter", "name=onionpress-"], timeout=30, quiet=True)
+    for vol in (r.stdout or "").split() if r.ok else []:
+        docker.run(["volume", "rm", vol], timeout=60, quiet=True)
     for name in RESET_FILES:
         try:
             os.remove(os.path.join(data_dir, name))
@@ -622,7 +625,7 @@ def phase_verify_mac(state: PreScrubState, log: Callable[[str], None], *,
     return checks
 
 
-def _run_scrub_mac(password, *, clean, log, launcher, data_dir) -> int:
+def _run_scrub_mac(password, *, clean, log, launcher, data_dir, docker) -> int:
     log("")
     log("OnionPress Scrub")
     log("================")
@@ -641,7 +644,7 @@ def _run_scrub_mac(password, *, clean, log, launcher, data_dir) -> int:
         log(f"ERROR: {e}")
         return 1
     try:
-        phase_reset_in_place(log, launcher=launcher, data_dir=data_dir)
+        phase_reset_in_place(log, launcher=launcher, data_dir=data_dir, docker=docker)
     except RuntimeError as e:
         log(f"{e}. Backup kept at: {state.backup_path}")
         return 1
@@ -687,20 +690,22 @@ def run_scrub(
     os_name: Optional[str] = None,
     launcher: Optional[str] = None,
     data_dir: Optional[str] = None,
+    docker=None,
 ) -> int:
     """Run the full scrub cycle. Returns 0 on PASS, 1 on FAIL.
 
     Mirrors the bash `scrub)` cases it replaces; printing format kept
     similar so the user sees recognisable output. *os_name* picks the
     cycle: Linux's uninstall/install one (sudo, install.sh; the default)
-    or the Mac's reset in place ("macos", issue #529); *launcher* and
-    *data_dir* are the install's (the Linux defaults are the .deb's).
+    or the Mac's reset in place ("macos", issue #529), which also needs
+    the install's *docker* (a docker.Docker); *launcher* and *data_dir*
+    are the install's (the Linux defaults are the .deb's).
     """
     log = log_func or _noop_log
     # No *os_name* means Linux's cycle (the module's original, and what
     # its tests drive); the CLI passes the platform it detected.
     if os_name == "macos":
-        return _run_scrub_mac(password, clean=clean, log=log,
+        return _run_scrub_mac(password, clean=clean, log=log, docker=docker,
                               launcher=launcher or LAUNCHER_BIN, data_dir=data_dir or DATA_DIR)
 
     log("")

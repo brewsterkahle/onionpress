@@ -129,9 +129,11 @@ class TestCLIArgParsing(unittest.TestCase):
     def test_reset_with_yes(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_reset.return_value = 0
+        instance.paths = mock.Mock(app_bundle="")
         result = main(["reset", "--yes"])
         instance.cmd_reset.assert_called_once_with(
-            yes=True, check=False, json_output=False, confirmed=frozenset())
+            yes=True, check=False, json_output=False, confirmed=frozenset(),
+            os_name=mock.ANY, launcher=mock.ANY)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_check_for_update_default(self, MockCLI):

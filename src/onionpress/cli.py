@@ -2226,6 +2226,7 @@ def _run_scrub(run):
         os_name=os_name,
         launcher=default_launcher(cli.paths, os_name),
         data_dir=cli.paths.data_dir,
+        docker=cli.docker,
     )
 
 

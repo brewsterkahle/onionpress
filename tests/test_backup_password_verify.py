@@ -85,8 +85,16 @@ class TestCreateBackupWiring(unittest.TestCase):
         self.text = _read(LINUX)
 
     def test_verifier_takes_the_password_on_stdin_only(self):
-        body = _function(self.text, "verify_wp_admin_password")
-        self.assertIn("\n    op_py verify-admin-password\n", body)
+        # The launcher's prompt went with its uninstall (#529): the checks
+        # are scrub._prompt_and_validate_wp_password's, over
+        # backup.verify_wp_admin_password_any (the password reaches PHP on
+        # stdin only); `verify-admin-password` stays a subcommand.
+        self.assertNotIn("verify_wp_admin_password", self.text)
+        self.assertNotIn("verify-admin-password", self.text)
+        import inspect
+        from onionpress import scrub
+        self.assertIn("verify_wp_admin_password_any(pw)",
+                      inspect.getsource(scrub._prompt_and_validate_wp_password))
 
     def test_archive_login_is_the_pythons(self):
         # multisite.fetch_archive_s3_keys (TestArchiveLoginPython) since #442.10.

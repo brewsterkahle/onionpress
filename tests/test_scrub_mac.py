@@ -85,12 +85,20 @@ class TestPhaseResetInPlace(_Case):
         self.files("secrets", "onionpress.log", ".last_status_state", "config", "config.bak",
                    "onionheaven-registration.json", "onion_address", "healthcheck-address",
                    "shared/vanity-keys/" + SITE + "/hostname", "colima/keep", "docker-config/config.json")
-        run = self.fake_run({"docker volume ls": (0, "onionpress-onion-keys\nonionpress-tor-state\n")})
+        run = self.fake_run({})
+        docker = mock.Mock()
+
+        def docker_run(args, **kw):
+            self.runs.append(("docker " + " ".join(args), kw))
+            if args[:2] == ["volume", "ls"]:
+                return mock.Mock(ok=True, stdout="onionpress-onion-keys\nonionpress-tor-state\n")
+            return mock.Mock(ok=True, stdout="")
+        docker.run.side_effect = docker_run
         with mock.patch.object(scrub, "_run", run), \
                 mock.patch.object(scrub.subprocess, "run", run), \
                 mock.patch.object(onionheaven, "release_onionheaven", return_value=remaining) as rel, \
                 mock.patch.object(scrub, "_confirm", return_value=confirm) as conf:
-            scrub.phase_reset_in_place(self.log, launcher=LAUNCHER, data_dir=self.data)
+            scrub.phase_reset_in_place(self.log, launcher=LAUNCHER, data_dir=self.data, docker=docker)
         return rel, conf
 
     def left(self):
@@ -199,7 +207,8 @@ class TestRunScrubMac(_Case):
                 mock.patch.object(scrub.subprocess, "run",
                                   side_effect=lambda args, **kw: stops.append(args)):
             rc = scrub.run_scrub("pw", clean=overrides.get("clean", False), log_func=self.log,
-                                 os_name="macos", launcher=LAUNCHER, data_dir=self.data)
+                                 os_name="macos", launcher=LAUNCHER, data_dir=self.data,
+                                 docker=mock.Mock())
         return rc, reset, restore, stops
 
     def test_the_happy_path_stops_the_containers_at_the_end(self):
@@ -207,7 +216,7 @@ class TestRunScrubMac(_Case):
             f.write("zip")
         rc, reset, restore, stops = self.run_mac()
         self.assertEqual(rc, 0)
-        reset.assert_called_once_with(self.log, launcher=LAUNCHER, data_dir=self.data)
+        reset.assert_called_once_with(self.log, launcher=LAUNCHER, data_dir=self.data, docker=mock.ANY)
         restore.assert_called_once_with("pw", os.path.join(self.data, "b.zip"), self.log,
                                         launcher=LAUNCHER, step="3/4")
         self.assertEqual(stops, [[LAUNCHER, "stop"]])

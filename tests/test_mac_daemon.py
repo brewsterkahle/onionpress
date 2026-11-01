@@ -1182,7 +1182,8 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertNotIn('daemon.pid', self.cases["upload-analytics"])
 
     def test_help_names_the_daemon(self):
-        self.assertIn("  daemon        ", self.src)
+        from onionpress import cli
+        self.assertIn("  daemon        ", cli.launcher_help("macos"))
 
     def test_setup_py_bundles_the_module(self):
         self.assertIn("'onionpress.daemon'", _read("setup.py"))

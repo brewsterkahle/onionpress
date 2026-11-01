@@ -518,12 +518,12 @@ ROWS = [
     # phases run this install's launcher.
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
         mock.call(password=None, clean=True, os_name="linux", launcher="/stub/launcher",
-                  data_dir=ANY), setup_cli=True),
+                  data_dir=ANY, docker=ANY), setup_cli=True),
     # The password as backup's: from the environment (then gone from it);
     # one on argv is refused (test_scrub_refuses_a_password_on_argv, #504).
     Row("scrub", ["scrub"], "scrub.run_scrub",
         mock.call(password="pw", clean=False, os_name="macos", launcher="/stub/launcher",
-                  data_dir=ANY), setup_cli=True, os_name="macos",
+                  data_dir=ANY, docker=ANY), setup_cli=True, os_name="macos",
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
     # #529: the Mac launcher's start-tor case is ContainerManager's
     # migration then start_tor, on a start step's manager.
