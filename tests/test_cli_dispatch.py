@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
     derivatives, docker_versions, handle_action, key_import, launcher_ops, multisite, onionheaven,
-    ports, redact, scrub, setup_logic, start, status_writer, wordpress_egress,
+    ports, redact, scrub, secrets_file, setup_logic, start, status_writer, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -500,13 +500,41 @@ ROWS = [
         mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
     Row("ensure-archive-s3-keys", ["ensure-archive-s3-keys"], "multisite.ensure_archive_s3_keys",
         mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
+    # The platform picks the cycle (#529: the Mac's reset in place), the
+    # phases run this install's launcher.
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
-        mock.call(password=None, clean=True), setup_cli=True),
+        mock.call(password=None, clean=True, os_name="linux", launcher="/stub/launcher",
+                  data_dir=ANY), setup_cli=True),
     # The password as backup's: from the environment (then gone from it);
     # one on argv is refused (test_scrub_refuses_a_password_on_argv, #504).
     Row("scrub", ["scrub"], "scrub.run_scrub",
-        mock.call(password="pw", clean=False), setup_cli=True,
+        mock.call(password="pw", clean=False, os_name="macos", launcher="/stub/launcher",
+                  data_dir=ANY), setup_cli=True, os_name="macos",
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
+    # #529: the Mac launcher's start-tor case is ContainerManager's
+    # migration then start_tor, on a start step's manager.
+    Row("start-tor", ["start-tor", "--docker-dir", "/d", "--bin-dir", "/b"], "cli.ContainerManager",
+        mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": True,
+                             "start_tor.return_value": True}),
+        check=lambda t, m: (
+            m.return_value.migrate_key_volume.assert_called_once_with(),
+            m.return_value.start_tor.assert_called_once_with(),
+            t.assertEqual((m.call_args.args[1].docker_dir, m.call_args.args[1].bin_dir), ("/d", "/b")))),
+    Row("start-tor", ["start-tor"], "cli.ContainerManager",
+        mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": False}),
+        check=lambda t, m: m.return_value.start_tor.assert_not_called()),
+    Row("start-tor", ["start-tor"], "cli.ContainerManager",
+        mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": True,
+                             "start_tor.return_value": False})),
+    # #529: the launchers' setup_db_passwords() makes the file here and
+    # sources it in bash.
+    Row("ensure-secrets", ["ensure-secrets"], "secrets_file.ensure_secrets",
+        mock.call(D("secrets")), rc=0, returns=mock.Mock(wordpress_db_password="w", mysql_root_password="r")),
+    Row("ensure-secrets", ["ensure-secrets"], "secrets_file.ensure_secrets",
+        mock.call(D("secrets")), rc=1, returns=mock.Mock(wordpress_db_password="", mysql_root_password="r")),
 ]
 
 MODULES = {
@@ -517,7 +545,7 @@ MODULES = {
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
     "start": start, "setup_logic": setup_logic, "status_writer": status_writer,
-    "key_import": key_import, "ports": ports,
+    "key_import": key_import, "ports": ports, "secrets_file": secrets_file,
 }
 
 

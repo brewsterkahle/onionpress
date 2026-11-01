@@ -1160,7 +1160,7 @@ class TestScrubBashDelegatesToPython(unittest.TestCase):
         body = m.group(1)
         # Must invoke the Python CLI's scrub subcommand.
         self.assertRegex(
-            body, r'op_py\s+scrub',
+            body, r'op_py( --data-dir "\$DATA_DIR")?\s+scrub',
             "scrub) must delegate to `op_py scrub` — the phase orchestration "
             "+ verify checks live in src/onionpress/scrub.py now.",
         )

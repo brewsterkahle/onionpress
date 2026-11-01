@@ -2117,17 +2117,24 @@ def _add_scrub(sub, name):
 
 
 def _run_scrub(run):
-    _cli(run)
+    cli = _cli(run)
     from . import scrub as _scrub
+    from .handle_action import default_launcher
     # As backup's password: the environment (removed at once, so no child
     # inherits it), else scrub prompts; one on argv is refused (#504).
     password = os.environ.pop(BACKUP_PASSWORD_ENV, "") or None
     if run.args.password:
         print(PASSWORD_ON_ARGV_MSG, file=sys.stderr)
         return 2
+    # The platform picks the cycle (#529: the Mac's reset in place), the
+    # phases run this install's launcher.
+    os_name = detect_os().value
     return _scrub.run_scrub(
         password=password,
         clean=run.args.clean,
+        os_name=os_name,
+        launcher=default_launcher(cli.paths, os_name),
+        data_dir=cli.paths.data_dir,
     )
 
 
@@ -2495,6 +2502,68 @@ def _run_start_post_up(run):
         manager.log_func(f"WARNING: the start's last steps failed: {e}")
         if errors is not None:
             errors.add("start-post-up")
+    return 0
+
+
+def _add_start_tor(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Start the tor container (the Mac daemon's, once the first run's "
+             "setup has installed WordPress): the key volume migration first, "
+             "then `compose up` of tor alone, never before its key volume is "
+             "in place; exit 1 with the ERROR when either cannot be done")
+    p.add_argument("--docker-dir", default=None, help="The compose files' folder")
+    p.add_argument("--bin-dir", default=None, help="The launcher's bundled binaries")
+
+
+def _run_start_tor(run):
+    # The Mac launcher's start-tor case (issue #529): a start step's
+    # manager (no OnionPressCLI). Starting tor mounts onionpress-onion-keys,
+    # creating it empty when it is not there, so an install that last ran
+    # on arti has its key moved there first, as start_containers does.
+    paths = _start_paths(run.args)
+    manager = _start_step_manager(paths)
+    log = manager.log_func
+    try:
+        if not manager.migrate_key_volume():
+            log("ERROR: Tor not started: the onion service key volume is not in place "
+                f"(see {paths.log_file})")
+            return 1
+        if not manager.start_tor():
+            log(f"ERROR: Failed to start tor container — see {paths.log_file}")
+            return 1
+    except Exception as e:
+        log(f"ERROR: Failed to start tor container: {e}")
+        return 1
+    return 0
+
+
+def _run_ensure_secrets(run):
+    # The launchers' setup_db_passwords() (issue #529): the database
+    # passwords made once, random per install (secrets_file.ensure_secrets,
+    # 0600 from the first byte), and read back whole: a truncated file
+    # (disk full on the first run) read as empty passwords, mariadb then
+    # refused to initialise and the only symptom was a db restart loop.
+    # The bash keeps only the `source` and the export compose reads. No
+    # OnionPressCLI (every verb runs this).
+    from . import secrets_file
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    log = _launcher_log_func()
+    try:
+        existed = os.path.exists(paths.secrets_file)
+        if not existed:
+            log("Generating random database passwords...")
+        secrets = secrets_file.ensure_secrets(paths.secrets_file)
+        if not existed:
+            log(f"Database passwords generated and saved to {paths.secrets_file}")
+    except Exception as e:
+        log(f"ERROR: the database passwords in {paths.secrets_file} could not be made or read: {e}")
+        return 1
+    if not secrets.wordpress_db_password or not secrets.mysql_root_password:
+        log(f"ERROR: {paths.secrets_file} is incomplete (empty database password) — not "
+            "starting. The database was initialised with these passwords, so restore the "
+            "file rather than regenerating it.")
+        return 1
     return 0
 
 
@@ -3057,6 +3126,12 @@ _COMMANDS = [
     ("start-containers", _add_start_containers, _run_start_containers),
     ("start-post-up", _add_start_post_up, _run_start_post_up),
     ("wait-for-services", _add_wait_for_services, _run_wait_for_services),
+    ("start-tor", _add_start_tor, _run_start_tor),
+    ("ensure-secrets",
+     _plain("Make this install's random database passwords once (~/.onionpress/"
+            "secrets, 0600) and check the file is whole; the launchers source "
+            "it afterwards for compose; exit 1 with the ERROR otherwise"),
+     _run_ensure_secrets),
     ("migrate-key-volume",
      _plain("Before anything starts Tor: copy the onion service key out of "
             "onionpress-arti-state (its name until 2026-09-25) into "

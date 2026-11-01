@@ -632,39 +632,17 @@ run_setup() {
 
 # ─── Secrets management ─────────────────────────────────────────────
 
+# The database passwords (issue #529): `onionpress ensure-secrets`
+# (secrets_file.ensure_secrets: made once, random per install, 0600;
+# refused when the file is incomplete) and then, here, the `source` and
+# the export compose reads. Nothing else in bash touches the file.
 setup_db_passwords() {
-    local secrets_file="$DATA_DIR/secrets"
-
-    if [ ! -f "$secrets_file" ]; then
-        log "Generating random database passwords..."
-
-        local wordpress_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-        local root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-
-        touch "$secrets_file"
-        chmod 600 "$secrets_file"
-
-        cat > "$secrets_file" <<EOF
-# Database passwords - generated on $(date)
-# DO NOT SHARE THESE PASSWORDS
-WORDPRESS_DB_PASSWORD='$wordpress_pass'
-MYSQL_PASSWORD='$wordpress_pass'
-MYSQL_ROOT_PASSWORD='$root_pass'
-EOF
-
-        log "Database passwords generated and saved to $secrets_file"
-    fi
-
-    if [ -f "$secrets_file" ]; then
-        source "$secrets_file"
-        export WORDPRESS_DB_PASSWORD
-        export MYSQL_PASSWORD
-        export MYSQL_ROOT_PASSWORD
-    else
-        log "ERROR: Secrets file not found at $secrets_file"
-        exit 1
-    fi
+    op_py --data-dir "$DATA_DIR" ensure-secrets 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
+    source "$DATA_DIR/secrets"
+    export WORDPRESS_DB_PASSWORD MYSQL_PASSWORD MYSQL_ROOT_PASSWORD
 }
+
 
 # ─── Key import ──────────────────────────────────────────────────────
 
@@ -1824,7 +1802,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Args forwarded verbatim — "${@:2}" skips this case label
             # itself. Supports: `onionpress scrub [--clean]` (the password
             # from the environment, stdin or a prompt; one on argv is refused).
-            op_py scrub "${@:2}"
+            op_py --data-dir "$DATA_DIR" scrub "${@:2}"
             ;;
 
         uninstall)

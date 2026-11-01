@@ -430,56 +430,38 @@ class TestRestore(_Case):
 
 
 class TestStartTor(_Case):
-    STUBS = ("setup_db_passwords", "migrate_key_volume")
+    STUBS = ("setup_db_passwords",)
 
-    def test_tor_starts_once_its_key_volume_is_in_place(self):
+    def test_start_tor_is_the_clis_with_its_exit(self):
+        # #529: the migration and the tor start are ContainerManager's
+        # (onionpress start-tor); the launcher hands its exit back.
         r = self.l.run("start-tor")
         self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.l.calls()
-        self.assertLess(calls.index("fn migrate_key_volume"), calls.index("bin docker compose up -d tor"))
-
-    def test_no_key_volume_no_tor(self):
-        r = self.l.run("start-tor", env={"STUB_RC_MIGRATE_KEY_VOLUME": "1"})
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.l.fn_calls(), ["setup_db_passwords"])
+        self.assertEqual(self.l.py_calls(), [
+            f"{self.dd()} start-tor --docker-dir {self.l.docker_dir} --bin-dir {self.l.resources}/bin"])
         self.assertNotIn("bin docker compose up -d tor", self.l.calls())
-
-    def test_a_failed_compose_up_is_the_exit_status(self):
-        r = self.l.run("start-tor", env={"STUB_RC_DOCKER_UP_TOR": "5"})
-        self.assertEqual(r.returncode, 5)
-        self.assertIn("Failed to start tor container (rc=5)", r.stdout)
+        r = self.l.run("start-tor", env={"STUB_RC_PY": "1"})
+        self.assertEqual(r.returncode, 1)
 
 
 class TestScrub(_Case):
-    """`scrub`'s password: read_backup_password, never required on argv;
-    the backup it makes stays in the data dir, not the shared /tmp."""
+    """`scrub` is the CLI's Mac cycle (onionpress.scrub, #529): the
+    password travels in the environment, every argument reaches it."""
 
-    STUBS = ("setup_db_passwords", "onionheaven_release", "stop_containers")
+    STUBS = ("setup_db_passwords",)
 
-    def test_no_password_stops_before_the_backup(self):
-        r = self.l.run("scrub", env={"ONIONPRESS_YES": "true"})
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("Password is required", r.stderr)
-        self.assertEqual(self.l.py_calls(), [])
-
-    def test_the_password_from_the_environment_reaches_the_backup(self):
-        # The hub release refused: the scrub stops after its backup.
-        r = self.l.run("scrub", env={"ONIONPRESS_YES": "true", "ONIONPRESS_BACKUP_PASSWORD": "pw",
-                                     "STUB_RC_ONIONHEAVEN_RELEASE": "1"})
-        self.assertEqual(r.returncode, 1)
-        backup = self.l.py_calls()[0]
-        self.assertTrue(backup.startswith(f"{self.dd()} backup --output {self.l.data_dir}/onionpress-scrub-"),
-                        backup)
+    def test_scrub_is_the_clis(self):
+        r = self.l.run("scrub", "--clean", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} scrub --clean"])
         self.assertIn("py-env pw", self.l.calls())
-        self.assertIn("Cancelled. Backup kept at:", r.stdout)
-        self.assertNotIn("stop_containers", self.l.fn_calls())
+        self.assertEqual(self.l.fn_calls(), [])
 
-    def test_the_old_positional_password_is_refused(self):
-        r = self.l.run("scrub", "pw", env={"ONIONPRESS_YES": "true",
-                                           "STUB_RC_ONIONHEAVEN_RELEASE": "1"})
+    def test_the_old_positional_password_reaches_the_cli_which_refuses_it(self):
+        r = self.l.run("scrub", "pw", env={"STUB_RC_PY": "2"})
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("refused", r.stderr)
-        self.assertNotIn("py-env pw", self.l.calls())
-        self.assertNotIn("stop_containers", self.l.fn_calls())
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} scrub pw"])
 
 
 class TestUsage(_Case):

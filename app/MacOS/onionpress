@@ -561,53 +561,17 @@ run_setup() {
         bundled_python -m onionpress.cli --data-dir "$DATA_DIR" setup --launcher "$SCRIPT_DIR/onionpress" "${args[@]}"
 }
 
-# Function to generate and load database passwords
+# The database passwords (issue #529): `onionpress ensure-secrets`
+# (secrets_file.ensure_secrets: made once, random per install, 0600;
+# refused when the file is incomplete) and then, here, the `source` and
+# the export compose reads. Nothing else in bash touches the file.
 setup_db_passwords() {
-    local secrets_file="$DATA_DIR/secrets"
-
-    # Create secrets file if it doesn't exist
-    if [ ! -f "$secrets_file" ]; then
-        log "Generating random database passwords..."
-
-        # Generate random 32-character passwords using /dev/urandom
-        # Use only alphanumeric chars to avoid shell quoting issues when sourcing
-        local wordpress_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-        local root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-
-        # Write passwords to secrets file with restricted permissions
-        # Values are single-quoted to prevent shell interpretation on source
-        touch "$secrets_file"
-        chmod 600 "$secrets_file"
-
-        cat > "$secrets_file" <<EOF
-# Database passwords - generated on $(date)
-# DO NOT SHARE THESE PASSWORDS
-WORDPRESS_DB_PASSWORD='$wordpress_pass'
-MYSQL_PASSWORD='$wordpress_pass'
-MYSQL_ROOT_PASSWORD='$root_pass'
-EOF
-
-        log "Database passwords generated and saved to $secrets_file"
-    fi
-
-    # Load passwords from secrets file
-    if [ -f "$secrets_file" ]; then
-        source "$secrets_file"
-        export WORDPRESS_DB_PASSWORD
-        export MYSQL_PASSWORD
-        export MYSQL_ROOT_PASSWORD
-        # A truncated file (disk full on first run) sources fine and yields
-        # empty passwords; mariadb then refuses to initialise and the only
-        # symptom is a db restart loop. Say so here instead.
-        if [ -z "$WORDPRESS_DB_PASSWORD" ] || [ -z "$MYSQL_ROOT_PASSWORD" ]; then
-            log "ERROR: $secrets_file is incomplete (empty database password) — not starting. The database was initialised with these passwords, so restore the file rather than regenerating it."
-            exit 1
-        fi
-    else
-        log "ERROR: Secrets file not found at $secrets_file"
-        exit 1
-    fi
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" ensure-secrets 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
+    source "$DATA_DIR/secrets"
+    export WORDPRESS_DB_PASSWORD MYSQL_PASSWORD MYSQL_ROOT_PASSWORD
 }
+
 
 # Function to detect container runtime
 detect_container_runtime() {
@@ -1574,28 +1538,15 @@ main() {
             ;;
 
         start-tor)
+            # The daemon's, once setup has installed WordPress (Tor is not
+            # started before the first run's setup on a Mac): the key
+            # volume migration, then tor alone (onionpress start-tor,
+            # ContainerManager.start_tor, never before its key volume is
+            # in place). Its exit is this one's.
             setup_db_passwords
-            cd "$DOCKER_DIR"
-            # Starting tor mounts onionpress-onion-keys, creating it empty if
-            # it is not there yet; an install that last ran on arti has to
-            # have its key moved there first, as start_containers does.
-            if ! migrate_key_volume; then
-                log "ERROR: Tor not started: the onion service key volume is not in place (see $LOG_FILE)"
-                exit 1
-            fi
-            # No --pull always: the tor image is pinned by digest, so a
-            # forced pull could only re-confirm the bytes already here, at
-            # the price of a registry round trip on every start (issue #36).
-            # Compose's default (missing) still fetches a pin a new release
-            # moved, and leaves a locally built image alone.
-            _tor_rc=0
-            docker compose up -d tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
-            if [ "$_tor_rc" -eq 0 ]; then
-                log "Tor containers started"
-            else
-                log "ERROR: Failed to start tor container (rc=$_tor_rc) — see $LOG_FILE"
-                exit "$_tor_rc"
-            fi
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" start-tor \
+                --docker-dir "$DOCKER_DIR" --bin-dir "$BIN_DIR" 2>&1 | tee -a "$LOG_FILE"
+            exit "${PIPESTATUS[0]}"
             ;;
 
         import-key)
@@ -1827,155 +1778,11 @@ main() {
             ;;
 
         scrub)
-            # Scrub: full lifecycle test — backup, reset, restore, verify.
-            # Proves backup/restore integrity and that reset truly cleans up.
-            # Usage: onionpress scrub. The WordPress admin password comes
-            # from read_backup_password (ONIONPRESS_BACKUP_PASSWORD, stdin or
-            # a prompt); `scrub <password>` is refused (issue #504).
-            echo ""
-            echo "OnionPress Scrub"
-            echo "================"
-            echo "This will: backup → reset → restore → verify"
-            echo ""
-
-            if [ "$ONIONPRESS_YES" != "true" ]; then
-                echo "  Press Enter to continue or Ctrl+C to cancel..."
-                read -r
-            fi
-
-            # ── Step 1: Backup ──────────────────────────────────────────
-            echo ""
-            echo "── Step 1/4: Backup ──"
-            setup_db_passwords
-            read_backup_password "${2:-}"
-            local scrub_pass="$BACKUP_PASS"
-            if [ -z "$scrub_pass" ]; then
-                echo "ERROR: Password is required for backup." >&2
-                exit 1
-            fi
-            # In the user's own data dir, not the shared /tmp.
-            local scrub_backup="$DATA_DIR/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
-            ONIONPRESS_BACKUP_PASSWORD="$scrub_pass" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" backup --output "$scrub_backup"
-
-            # Capture the live identity + a log mark BEFORE teardown so Step 4 can
-            # prove install-from-backup preserved the address and did not
-            # regenerate a vanity key during the restore.
-            local scrub_addr_before scrub_log_mark
-            scrub_addr_before=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-            scrub_log_mark=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-            echo "  Pre-scrub address: ${scrub_addr_before:-<none>}"
-
-            # ── Step 2: Reset ───────────────────────────────────────────
-            echo ""
-            echo "── Step 2/4: Reset ──"
-            # The reset wipes the config (OnionHeaven back to undecided, so
-            # no heartbeat follows the restore): hubs that may hold the key
-            # are asked to delete their copy, as by `reset`, or one would
-            # take the restored, running site over.
-            if ! onionheaven_release scrub; then
-                echo "Cancelled. Backup kept at: $scrub_backup"
-                exit 1
-            fi
-            stop_containers 2>/dev/null || true
-
-            # Remove all Docker volumes
-            cd "$DOCKER_DIR"
-            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
-                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-            done
-
-            # Wipe data directory (keep colima VM and docker-config); the
-            # OnionHeaven record stays when a hub may still hold a key.
-            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
-            rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
-            if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then
-                rm -f "$DATA_DIR/onionheaven-registration.json"
-            fi
-            rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
-            rm -rf "$DATA_DIR/shared/vanity-keys/"
-            echo "  Reset complete."
-
-            # ── Step 3: Restore ─────────────────────────────────────────
-            echo ""
-            echo "── Step 3/4: Restore (install-from-backup) ──"
-            setup_db_passwords
-            # cli restore tears down (already reset above) and rebuilds the
-            # install directly from the backup — seeded key + imported DB/
-            # content, no in-place overwrite or key-volume swap churn.
-            ONIONPRESS_BACKUP_PASSWORD="$scrub_pass" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "$scrub_backup"
-            echo "  Restore and restart complete."
-
-            # ── Step 4: Verify ──────────────────────────────────────────
-            echo ""
-            echo "── Step 4/4: Verify ──"
-            local scrub_ok=true
-
-            # Check containers are running
-            local expected_containers="onionpress-tor onionpress-wordpress onionpress-db onionheaven"
-            for ctr in $expected_containers; do
-                if docker ps --format '{{.Names}}' | grep -q "^${ctr}$"; then
-                    echo "  ✓ $ctr running"
-                else
-                    echo "  ✗ $ctr NOT running"
-                    scrub_ok=false
-                fi
-            done
-
-            # Check onion address is present
-            local scrub_addr
-            scrub_addr=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-            if [ -n "$scrub_addr" ]; then
-                echo "  ✓ Onion address: $scrub_addr"
-            else
-                echo "  ✗ No onion address found"
-                scrub_ok=false
-            fi
-
-            # install-from-backup criteria: the restored identity must MATCH the
-            # pre-scrub address (proves the backup key was reused, not a freshly
-            # generated vanity), and no vanity generation ran during the scrub.
-            if [ -n "$scrub_addr_before" ]; then
-                if [ "$scrub_addr" = "$scrub_addr_before" ]; then
-                    echo "  ✓ Address preserved (rebuilt from backup key, no regeneration)"
-                else
-                    echo "  ✗ Address CHANGED: was $scrub_addr_before, now $scrub_addr"
-                    scrub_ok=false
-                fi
-            fi
-            if tail -n +"$((scrub_log_mark + 1))" "$LOG_FILE" 2>/dev/null | \
-                 grep -qiE "Generating custom onion address|Generated custom address"; then
-                echo "  ✗ Vanity address regenerated during restore (should reuse backup key)"
-                scrub_ok=false
-            else
-                echo "  ✓ No vanity regeneration during restore"
-            fi
-
-            # Check WordPress responds
-            local wp_status
-            wp_status=$(docker exec onionpress-wordpress curl -s -o /dev/null -w '%{http_code}' http://localhost:80/ 2>/dev/null || echo "000")
-            if [ "$wp_status" = "200" ] || [ "$wp_status" = "301" ] || [ "$wp_status" = "302" ]; then
-                echo "  ✓ WordPress responding (HTTP $wp_status)"
-            else
-                echo "  ✗ WordPress not responding (HTTP $wp_status)"
-                scrub_ok=false
-            fi
-
-            echo ""
-            if [ "$scrub_ok" = "true" ]; then
-                echo "Scrub PASSED — backup/reset/restore all working."
-            else
-                echo "Scrub FAILED — see errors above."
-            fi
-
-            # Clean up backup file
-            rm -f "$scrub_backup"
-            echo "  Cleaned up: $scrub_backup"
-
-            # Stop everything so the app can do a clean start
-            echo ""
-            echo "Stopping containers for clean app launch..."
-            stop_containers 2>/dev/null || true
-            echo "Done. Launch OnionPress from /Applications to start fresh."
+            # Full lifecycle test — backup, reset in place, restore, verify
+            # (onionpress.scrub's Mac cycle, issue #529). The WordPress
+            # admin password comes from ONIONPRESS_BACKUP_PASSWORD or a
+            # prompt; one on argv is refused (#504). -y skips the question.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" scrub "${@:2}"
             ;;
 
         update)
