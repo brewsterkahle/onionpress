@@ -1950,7 +1950,9 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
         text = _read(self.MENUBAR)
         self.assertNotIn('subprocess.run([self.launcher_script, "start"])\n', text,
                          "start_service must not discard the launcher's return code")
-        self.assertIn('rc = subprocess.run([self.launcher_script, "start"], stdin=subprocess.DEVNULL).returncode', text)
+        self.assertIn('rc = self.launcher.wait("start")', text)
+        self.assertIn("return self.run(*args, capture=False, timeout=timeout).returncode",
+                      _read("src/onionpress/ui_client.py"))
         self.assertIn('"Status: Start failed — see View Logs"', text)
 
 

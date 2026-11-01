@@ -202,24 +202,26 @@ class TestTray(unittest.TestCase):
                 return node
         self.fail(name)
 
-    def _launcher_calls(self, fn):
+    def _ui_client_calls(self, fn, name):
         for node in ast.walk(fn):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "run"
+                    and node.func.attr == name
                     and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "Launcher"):
+                    and node.func.value.id == "ui_client"):
                 yield node
 
     def test_backup_and_restore_wait_for_the_launcher(self):
-        for name, cmd in (("show_backup_dialog", "backup"),
-                          ("show_restore_dialog", "restore")):
+        """The tray runs them through ui_client.run_backup / run_restore
+        (#526), whose launcher runs have no time limit."""
+        for name, call in (("show_backup_dialog", "run_backup"),
+                           ("show_restore_dialog", "run_restore")):
             with self.subTest(name):
-                calls = [c for c in self._launcher_calls(self._function(name))
-                         if isinstance(c.args[0], ast.Constant) and c.args[0].value == cmd]
-                self.assertEqual(len(calls), 1)
-                timeout = {k.arg: k.value for k in calls[0].keywords}["timeout"]
-                self.assertIsInstance(timeout, ast.Constant)
-                self.assertIsNone(timeout.value)
+                self.assertEqual(len(list(self._ui_client_calls(self._function(name), call))), 1)
+        src = _read(os.path.join(PROJECT_ROOT, "src", "onionpress", "ui_client.py"))
+        run_backup = src[src.index("def run_backup("):src.index("class RestoreUI")]
+        self.assertIn("timeout=None", run_backup)
+        run_restore = src[src.index("def run_restore("):src.index("def restore_summary(")]
+        self.assertIn("timeout=None", run_restore)
 
     def test_a_failure_to_run_is_notified(self):
         for name, title in (("show_backup_dialog", "Backup failed"),

@@ -48,7 +48,11 @@ def _bash_function(text, name):
 class TestEnvName(unittest.TestCase):
     def test_every_component_uses_the_same_variable(self):
         self.assertEqual(BACKUP_PASSWORD_ENV, "ONIONPRESS_BACKUP_PASSWORD")
-        self.assertIn(f'BACKUP_PASSWORD_ENV = "{BACKUP_PASSWORD_ENV}"', _read(TRAY))
+        # The tray's launcher client is ui_client's (#526), which takes
+        # the name from launcher_ops.
+        self.assertIn("BACKUP_PASSWORD_ENV = launcher_ops.BACKUP_PASSWORD_ENV",
+                      _read("src/onionpress/ui_client.py"))
+        self.assertIn("Launcher = ui_client.Launcher(LAUNCHER, log)", _read(TRAY))
         for path in LAUNCHERS:
             body = _bash_function(_read(path), "read_backup_password")
             self.assertIn(f'"${{{BACKUP_PASSWORD_ENV}:-}}"', body, path)
@@ -167,39 +171,20 @@ class TestCLIParsing(unittest.TestCase):
         M.assert_not_called()
 
 
-def _load_tray_launcher(fake_subprocess, logs):
-    """Exec the tray's Launcher wrapper (and what it needs) out of the script;
-    the script itself imports GTK at module level."""
-    tree = ast.parse(_read(TRAY))
-    keep = []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == "Launcher":
-            keep.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name == "_loggable":
-            keep.append(node)
-        elif isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id in ("BACKUP_PASSWORD_ENV", "_UNLOGGED_ARGS")
-                for t in node.targets):
-            keep.append(node)
-    ns = {
-        "os": os, "subprocess": fake_subprocess, "Optional": Optional,
-        "LAUNCHER": "/opt/onionpress/onionpress", "log": logs.append,
-    }
-    exec(compile(ast.Module(body=keep, type_ignores=[]), TRAY, "exec"), ns)
-    return ns
-
-
 class TestTrayLauncher(unittest.TestCase):
+    """The tray's `Launcher` is a ui_client.Launcher (#526): the password
+    in the environment, the argument-carrying verbs logged by name."""
 
     def setUp(self):
+        from onionpress import ui_client
         self.logs = []
         self.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
-        self.fake = types.SimpleNamespace(
-            run=self.run, Popen=mock.Mock(), DEVNULL=subprocess.DEVNULL,
-            TimeoutExpired=subprocess.TimeoutExpired,
-            CompletedProcess=subprocess.CompletedProcess)
-        self.ns = _load_tray_launcher(self.fake, self.logs)
-        self.Launcher = self.ns["Launcher"]
+        for name, target in (("run", self.run), ("Popen", mock.Mock())):
+            patcher = mock.patch.object(ui_client.subprocess, name, target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.Launcher = ui_client.Launcher("/opt/onionpress/onionpress", self.logs.append)
+        self.assertIn("Launcher = ui_client.Launcher(LAUNCHER, log)", _read(TRAY))
 
     def _assert_no_secret_in_logs(self):
         for line in self.logs:
@@ -302,12 +287,14 @@ class TestNoPasswordInLauncherArgv(unittest.TestCase):
 
     def test_menubar_restore_passes_env(self):
         # search + assertTrue: assertRegex would print all of menubar.py.
-        # The menubar goes through launcher_ops.run_launcher_restore (#323).
+        # The menubar goes through ui_client.run_restore, which goes
+        # through launcher_ops.run_launcher_restore (#323, #526).
+        self.assertIn("ui_client.run_restore(", _read("src/menubar.py"))
         self.assertTrue(re.search(
             r'launcher_ops\.run_launcher_restore\(\s*\n\s*'
-            r'self\.launcher_script, zip_path, password,',
-            _read("src/menubar.py")),
-            "menubar restore must go through launcher_ops.run_launcher_restore")
+            r'launcher\.script, plan\.backup_path, plan\.password,',
+            _read("src/onionpress/ui_client.py")),
+            "ui_client.run_restore must go through launcher_ops.run_launcher_restore")
         self.assertTrue(re.search(
             r'\[launcher_script, "restore", zip_path, \*\(extra_args or \[\]\)\],\s*\n\s*'
             r'env=\{\*\*os\.environ, BACKUP_PASSWORD_ENV: password\} \| \(extra_env or \{\}\)',

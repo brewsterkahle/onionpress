@@ -959,10 +959,9 @@ class TestWordPressConsumers(unittest.TestCase):
 
 # (file, function): sites that may still test a suffix, and why.
 ALLOWED_SUFFIX_TESTS = {
-    # Display only: shortens an address for a menu title.
-    ("src/menubar.py", "_short_onion"),
+    # Display only: shortens an address for a menu title (both UIs).
+    ("src/onionpress/ui_client.py", "short_onion"),
     ("src/menubar.py", "do_update"),
-    ("linux/onionpress-tray", "_update_status_line"),
     # Equality with a fixed address follows.
     ("src/onionpress/onionheaven.py", "is_onionheaven_instance"),
     ("src/onionpress/onionheaven.py", "should_auto_prevent_sleep"),

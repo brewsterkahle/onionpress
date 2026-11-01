@@ -623,18 +623,19 @@ class TestMenubarAsksThePersonAtTheMac(unittest.TestCase):
     def _app(self, answer):
         import textwrap
         import types
-        ns = {}
-        for name in ("_ask_to_replace_address", "_ask_cli_question", "_ask_settings_page_question"):
+        from onionpress import ui_client
+        ns = {"ui_client": ui_client, "rumps": mock.Mock()}
+        for name in ("_ask_cli_question", "_ask_settings_page_question"):
             exec(textwrap.dedent(_menubar_method(name)), ns)
         app = types.SimpleNamespace(log=mock.Mock(), show_native_alert=mock.Mock(return_value=answer))
-        for name in ("_ask_to_replace_address", "_ask_cli_question", "_ask_settings_page_question"):
+        for name in ("_ask_cli_question", "_ask_settings_page_question"):
             setattr(app, name, types.MethodType(ns[name], app))
         return app
 
     def test_replace_answers_yes(self):
         app = self._app(answer=1)
         self.assertIs(app._ask_settings_page_question(self.QUESTION), True)
-        title, message = app.show_native_alert.call_args.args[:2]
+        message = app.show_native_alert.call_args.kwargs["message"]
         self.assertIn(OLD_ADDR, message)
         self.assertIn(NEW_ADDR, message)
         self.assertIn("replace this site's onion service key", message)
@@ -666,7 +667,7 @@ class TestMenubarAsksThePersonAtTheMac(unittest.TestCase):
         body = src[src.index("def _answer_settings_page_question(self, question):"):]
         body = body[:body.index("\n    def ")]
         self.assertIn('["--confirmed", question["confirm"]] if answered_yes else ["--cancel"]', body)
-        self.assertIn('[self.launcher_script, "handle-action", "--json", *args]', body)
+        self.assertIn('self.launcher.run_json("handle-action", "--json", *args)', body)
         # The dialog gives up after 5 minutes: no answer is Cancel.
         self.assertIn("max_wait = 300", _menubar_method("show_native_alert"))
 

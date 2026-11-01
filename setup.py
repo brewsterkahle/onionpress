@@ -89,7 +89,7 @@ OPTIONS = {
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
                  'onionpress.image_overrides',
                  'onionpress.ports', 'onionpress.secrets_file',
-                 'onionpress.ui_helpers', 'onionpress.settings_ui',
+                 'onionpress.ui_helpers', 'onionpress.settings_ui', 'onionpress.ui_client',
                  'onionpress.browser', 'onionpress.log_rotation',
                  'onionpress.analytics_sharing', 'onionpress.power',
                  'onionpress.onion_proxy', 'onionpress.onion_auth',

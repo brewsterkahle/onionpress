@@ -367,6 +367,17 @@
   `onionpress …` subcommand run through the launcher; it imports none of
   `backup`, `hub_backup`, `updater`. A new menu action gets its subcommand
   first. `tests/test_menubar_actions.py`.
+- **The menubar and the Linux tray are widgets of one client** (#526,
+  `src/onionpress/ui_client.py`: stdlib + `confirm` + `launcher_ops`, so
+  the menubar's docker-free import closure holds): both call the
+  launcher only through `ui_client.Launcher` (secrets in the environment,
+  stdin /dev/null) and read its answers only through `run_json` /
+  `run_confirmed` (the `--check --json` → ask → `--confirmed` loop),
+  `plan_backup` / `run_backup`, `plan_restore` / `run_restore` /
+  `restore_summary` (the dialogs an object the UI supplies: `BackupUI`,
+  `RestoreUI`) and `update_outcome`; no `subprocess` argv in either names
+  the launcher. The tray imports the package hard (the .deb installs it
+  beside the tray): no degraded fallbacks. `tests/test_ui_client.py`.
 - launchd agent `org.onionpress.daemon` (`KeepAlive` on failure only,
   `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
   The launcher's `stop` runs `daemon offline` before stopping containers;
@@ -433,9 +444,11 @@
   `--confirmed <what>`. Off a terminal it refuses without confirmation
   (exit 3). `{"ask": "password"}` (exit 5): secret via env or stdin.
 - A new question: `confirm.add_arguments`, `confirm.require`, the name in
-  `QUESTIONS`, a dialog in `_ask_cli_question`, a flow in
-  `tests/test_cli_confirm_protocol.py`. The Linux tray is a client too
-  (`tests/test_linux_tray_protocol.py`).
+  `QUESTIONS`, **its one wording in `ui_client.question_text`** (the
+  menubar's `_ask_cli_question` and the tray's `_ask_question` render it;
+  a word to type is `typed`), a flow in
+  `tests/test_cli_confirm_protocol.py` and `tests/test_ui_client.py`. The
+  tray's own side is `tests/test_linux_tray_protocol.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published: nothing private there under a name not
