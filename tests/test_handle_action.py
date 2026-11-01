@@ -863,26 +863,28 @@ class TestApplyConfig(_Case):
             self.assertIsNone(ha.apply_config(self.host(), out=devnull))
         self.assertEqual(self.docker.get("config-updates.json"), '{"SHARE_ANALYTICS_WITH_ONIONHOME": "n')
 
-    def test_the_mac_tick_applies_pending_settings(self):
+    def test_every_run_applies_pending_settings(self):
         """QA on 2026-10-22: config-updates.json sat unapplied while the
-        menubar ran handle-action every tick. Every Mac run applies it,
-        request or not, and says which keys so the menubar applies what it
-        owes at once; Linux's launcher does it itself (write_status)."""
+        menubar ran handle-action every tick. Every run applies it, request
+        or not, on both platforms (Linux's launcher did it itself in
+        write_status until 2026-10-31), and says which keys so the menubar
+        applies what it owes at once."""
         from onionpress import config as op_config
         config = os.path.join(self.data_dir, "config")
-        with open(config, "w") as f:
-            f.write("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
-        self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "no"}))
-        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
-            result = ha.handle(self.host("linux"))
-        self.assertEqual(result, {"handled": None})
-        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "yes")
-        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
-            result = ha.handle(self.host("macos"))
-        self.assertEqual(result, {"handled": None, "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
-        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "no")
-        self.assertIsNone(self.docker.get("config-updates.json"))
-        self.assertEqual(op_config.take_config_changes(self.data_dir), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
+        for os_name in ("linux", "macos"):
+            with self.subTest(os_name=os_name):
+                with open(config, "w") as f:
+                    f.write("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+                self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "no"}))
+                with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+                    result = ha.handle(self.host(os_name))
+                self.assertEqual(result, {"handled": None, "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
+                self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "no")
+                self.assertIsNone(self.docker.get("config-updates.json"))
+                self.assertEqual(op_config.take_config_changes(self.data_dir), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
+                # Nothing left: the next run applies nothing and says so.
+                with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+                    self.assertEqual(ha.handle(self.host(os_name)), {"handled": None})
         # With a request in the same tick, both happen
         self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "yes"}))
         self.request("check-reachability")
@@ -978,10 +980,10 @@ class TestTunnelToken(_Case):
         self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN})
         self.assertEqual(list(applied.accepted), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
         self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+        # Linux applies the page's channel through apply_config too (no
+        # bash twin since 2026-10-31): the refusal below is the one it logs.
         with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
-            launcher = f.read()
-        self.assertIn("grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'", launcher)
-        self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", launcher)
+            self.assertNotIn("apply_config_updates", f.read())
         ha._hold_tunnel_token(self.host("linux"), self.TOKEN)
         self.assertFalse(os.path.exists(os.path.join(self.data_dir, ha.PENDING_DIR)))
         self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", self.logs[-1])
