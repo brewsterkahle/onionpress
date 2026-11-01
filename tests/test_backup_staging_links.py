@@ -10,10 +10,10 @@ its choosing and download it, so a link staged on the host as
 (no -y) stores the file a link points to. The derivative pruning would walk
 a linked uploads/ and delete host files, and the archive marker would be
 written through a link. These tests plant links, hard links and special
-files in what each staging step receives, on the Mac path (docker exec tar
-into unpack_plain_tar, docker cp) and the Linux one (docker cp, then the
-scrub-staging helper), and check that nothing outside the staging folder is
-packed, followed, pruned or written.
+files in what each staging step receives (docker exec tar into
+unpack_plain_tar, docker cp; one path for both platforms since issue #406),
+and check that nothing outside the staging folder is packed, followed,
+pruned or written.
 
 No docker: the container side is a stub script or bash function.
 """
@@ -323,22 +323,6 @@ class TestScrubStagedTree(_Base):
         self.assertEqual(len(self.logs), backup._STAGE_LOG_LIMIT + 1)
         self.assertIn("10 more", self.logs[-1])
 
-    def test_the_cli_helper(self):
-        """`onionpress.cli scrub-staging`, what the Linux create_backup runs."""
-        os.symlink(os.path.join(self.home, "secret.txt"),
-                   os.path.join(self.root, "uploads", "x"))
-        with mock.patch("sys.stderr", io.StringIO()) as err:
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(self.root), 0)
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(
-                os.path.join(self.tmp, "missing")), 0)
-            link = os.path.join(self.tmp, "rootlink")
-            os.symlink(self.home, link)
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(link), 1)
-        self.assertFalse(os.path.lexists(os.path.join(self.root, "uploads", "x")))
-        self.assertIn("out of the backup", err.getvalue())
-        self.assert_home_untouched()
-
-
 class TestDerivativesNeverFollowALink(_Base):
 
     def test_prune_skips_a_linked_uploads_folder(self):
@@ -518,119 +502,6 @@ esac
         self.assertTrue(tar_calls[0].startswith(
             "exec -u www-data onionpress-wordpress tar -cf - "), tar_calls[0])
         self.assertIn("--ignore-failed-read", tar_calls[0])
-
-
-class TestLinuxCreateBackup(_Base):
-    """linux/onionpress create_backup, run for real with docker stubbed:
-    the wp-content copy is read in the container as www-data and unpacked
-    as plain files (stage-wp-content), before the derivative pruning and
-    the marker, and pack-backup sweeps again."""
-
-    def _create_backup_function(self):
-        text = mv._read("linux/onionpress")
-        start = text.index("\ncreate_backup() {")
-        # The function embeds a python3 -c snippet with a bare "}" line.
-        return text[start:text.index("\nrestore_backup() {", start)]
-
-    def test_staging_comes_before_anything_reads_the_copy(self):
-        body = self._create_backup_function()
-        self.assertNotIn("docker cp onionpress-wordpress:", body)
-        stage = body.index('op_py stage-wp-content --dest "$staging/wp-content"')
-        self.assertLess(stage, body.index("prune-image-derivatives"))
-        self.assertLess(stage, body.index(".onionpress-regenerate-derivatives"))
-
-    def test_planted_links_never_reach_the_backup(self):
-        mv._cheap_kdf(self)
-        wp = os.path.join(self.tmp, "container-wp-content")
-        os.makedirs(os.path.join(wp, "themes"))
-        with open(os.path.join(wp, "themes", "flavor.css"), "w") as f:
-            f.write("theme data")
-        os.symlink(os.path.join(self.home, ".ssh", "id_ed25519"),
-                   os.path.join(wp, "themes", "key.css"))
-        os.symlink(os.path.join(self.home, "Pictures"), os.path.join(wp, "uploads"))
-        # The Python helper runs docker itself: a stub on PATH that streams
-        # $WP as the container's tar would.
-        bin_dir = os.path.join(self.tmp, "bin")
-        os.makedirs(bin_dir)
-        with open(os.path.join(bin_dir, "docker"), "w") as f:
-            f.write('#!/bin/bash\necho "docker $*" >> "$CALLS"\n'
-                    'case "$*" in\n'
-                    '  "exec -u www-data onionpress-wordpress tar -cf - "*)'
-                    ' COPYFILE_DISABLE=1 tar -cf - -C "$WP" . ;;\n'
-                    '  *) exit 1 ;;\nesac\n')
-        os.chmod(os.path.join(bin_dir, "docker"), 0o755)
-        prelude = r'''
-log() { echo "[log] $1" >> "$LOG_FILE"; }
-docker() {
-    echo "docker $*" >> "$CALLS"
-    case "$1 $2" in
-        "exec onionpress-tor") echo "$ADDR" ;;
-        "image inspect") return 0 ;;     # the key helpers' tor image is here
-        "volume ls") return 0 ;;         # no key volume: nothing is read
-        *) return 1 ;;
-    esac
-}
-db_client() { echo "-- dump"; }
-verify_wp_admin_password() { cat >/dev/null; }
-setup_db_passwords() { :; }
-python3() { "$PY" "$@"; }
-_helper() {
-    PYTHONPATH="$SRC" "$PY" -c 'import sys
-from onionpress.cli import OnionPressCLI as C
-cli = object.__new__(C)
-args = sys.argv[1:]
-data_dir = None
-if args[:1] == ["--data-dir"]:
-    data_dir, args = args[1], args[2:]
-cmd, a = args[0], args[1:]
-if cmd == "stage-wp-content":
-    sys.exit(C.cmd_stage_wp_content(a[1]))
-if cmd == "stage-hub-backup":
-    sys.exit(C.cmd_stage_hub_backup(a[1], data_dir))
-if cmd == "prune-image-derivatives":
-    cli.log = lambda m: print(m, file=sys.stderr)
-    sys.exit(cli.cmd_prune_image_derivatives(a[1]))
-if cmd == "backup-metadata":
-    from onionpress.cli import main
-    sys.exit(main(args))
-if cmd == "pack-backup":
-    sys.exit(cli.cmd_pack_backup(a[1], a[3], sys.stdin.read()))
-sys.exit(2)' "$@"
-}
-op_py() { _helper "$@"; }
-'''
-        out = os.path.join(self.tmp, "backup.zip")
-        home = os.path.join(self.tmp, "sandbox-home")
-        tmpdir = os.path.join(self.tmp, "t")
-        os.makedirs(tmpdir)
-        env = {
-            "PATH": bin_dir + os.pathsep + os.environ["PATH"],
-            "HOME": home, "TMPDIR": tmpdir,
-            "DATA_DIR": os.path.join(home, ".onionpress"),
-            "LOG_FILE": os.path.join(self.tmp, "log"),
-            "CALLS": os.path.join(self.tmp, "calls"),
-            "SRC": mv.SRC, "PY": sys.executable, "PW": PW, "WP": wp,
-            "ADDR": mv.ADDR, "WORDPRESS_DB_PASSWORD": "x",
-            "ONIONPRESS_VERSION": "2.5.2",
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
-        # create_backup checks the address the tor container reports.
-        is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
-        r = subprocess.run(
-            ["bash", "-c", prelude + is_onion + mv._linux_key_helpers()
-             + self._create_backup_function()
-             + f'\ncreate_backup "$PW" {out!r}\necho "rc=$?"'],
-            capture_output=True, text=True, timeout=120, env=env)
-        with open(env["LOG_FILE"]) as f:
-            log = f.read()
-        self.assertIn("rc=0", r.stdout, r.stderr + log)
-        members = _inner_names_and_bytes(out, PW)
-        self.assertFalse([n for n, data in members.items() if SECRET in data])
-        names = {n.rstrip("/") for n in members}
-        self.assertIn("wp-content/themes/flavor.css", names)
-        self.assertNotIn("wp-content/themes/key.css", names)
-        self.assert_home_untouched()
-        self.assertIn("out of the backup (a symbolic link)", log)
 
 
 if __name__ == "__main__":

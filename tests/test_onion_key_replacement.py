@@ -425,9 +425,9 @@ class TestReplaceKey(ReplaceKeyBase):
             with self.subTest(restarted=restarted):
                 inst = _Install(self, vanity=OLD)
                 events = []
-                with mock.patch.object(key_import, "stop_heartbeat_client",
+                with mock.patch.object(key_import.heartbeat_unit, "stop",
                                        lambda log: events.append("stop")), \
-                        mock.patch.object(key_import, "start_heartbeat_client",
+                        mock.patch.object(key_import.heartbeat_unit, "start",
                                           lambda log: events.append("start")), \
                         mock.patch.dict(os.environ, inst.env()):
                     key_import.replace_key(
@@ -646,42 +646,6 @@ class TestRun(ReplaceKeyBase):
         rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]), linux=True)
         self.assertEqual(rc, 0)
         self.assertIn("Run 'onionpress restart'", out)
-
-
-class TestHeartbeatUnits(unittest.TestCase):
-    """Linux's heartbeat client, stopped around the hubs (until #407)."""
-
-    def _run(self, fn, states):
-        calls = []
-
-        def fake(argv, **kw):
-            calls.append(argv)
-            key = " ".join(argv)
-            rc, out = states.get(key, (1, ""))
-            return mock.Mock(returncode=rc, stdout=out, stderr="")
-        with mock.patch.object(key_import.subprocess, "run", fake):
-            fn(lambda m: None)
-        return [" ".join(c) for c in calls]
-
-    def test_stop_stops_what_is_active(self):
-        calls = self._run(key_import.stop_heartbeat_client, {
-            "systemctl --user is-active onionpress-heartbeat.service": (0, "active\n"),
-            "systemctl is-active onionpress-heartbeat.service": (0, "active\n")})
-        self.assertIn("systemctl --user stop onionpress-heartbeat.service", calls)
-        self.assertIn("sudo systemctl stop onionpress-heartbeat.service", calls)
-        calls = self._run(key_import.stop_heartbeat_client, {})
-        self.assertFalse([c for c in calls if " stop " in c])
-
-    def test_start_respects_the_hold_and_the_enabled_unit(self):
-        calls = self._run(key_import.start_heartbeat_client, {
-            "systemctl --user is-enabled onionpress-heartbeat.service": (0, "masked-runtime\n")})
-        self.assertFalse([c for c in calls if " start " in c])
-        calls = self._run(key_import.start_heartbeat_client, {
-            "systemctl --user is-enabled onionpress-heartbeat.service": (0, "enabled\n")})
-        self.assertIn("systemctl --user start onionpress-heartbeat.service", calls)
-        calls = self._run(key_import.start_heartbeat_client, {
-            "systemctl is-enabled onionpress-heartbeat.service": (0, "enabled\n")})
-        self.assertIn("sudo systemctl start onionpress-heartbeat.service", calls)
 
 
 class TestLauncherDelegation(unittest.TestCase):

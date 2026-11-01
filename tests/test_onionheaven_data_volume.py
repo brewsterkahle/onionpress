@@ -263,10 +263,10 @@ class TestPaths(unittest.TestCase):
         self.assertIn("['docker', 'exec', '-i', 'onionheaven', 'sh', '-c',\n"
                       "                            REGISTRY_RESTORE_SH]", backup)
         self.assertNotRegex(backup, r"www-data[^\n]*onionheaven")
-        # The Mac launcher's `restore` is onionpress.cli restore (backup.py).
+        # Both launchers' backup and restore are onionpress.cli's (backup.py).
         self.assertIn("restore_hub_data(onionheaven_dir, log_func)", backup)
-        self.assertIn('restore-hub-data --src "$staging/onionheaven"', _read("linux/onionpress"))
-        self.assertIn('stage-hub-backup --staging "$staging"', _read("linux/onionpress"))
+        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
+            self.assertNotIn("onionheaven:", _read(rel), rel)
 
 
 # ---------------------------------------------------------------------------

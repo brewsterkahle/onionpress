@@ -1527,9 +1527,10 @@ class TestWithoutPyNaCl(unittest.TestCase):
 
 
 class TestBashBackupHelpers(unittest.TestCase):
-    """`onionpress.cli pack-backup` / `extract-backup`: what the bash
-    launchers now run instead of `zip -P` / `unzip -P`. extract-backup must
-    read both formats; the password always comes on stdin, never argv."""
+    """backup.pack_backup / extract_backup, what every backup and restore
+    runs instead of `zip -P` / `unzip -P` (the CLI's pack-backup and
+    extract-backup helpers went with the Linux bash spine, issue #406).
+    extract_backup must read both formats."""
 
     LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 
@@ -1567,13 +1568,14 @@ class TestBashBackupHelpers(unittest.TestCase):
 
     def test_pack_then_extract(self):
         out = os.path.join(self.tmpdir, "b.zip")
-        self.assertEqual(self.cli.cmd_pack_backup(self.staging, out, "pw"), 0)
+        backup_manager.pack_backup(self.staging, out, "pw", lambda m: None)
         self.assertTrue(backup_crypto.is_encrypted_backup(out))
         dest = os.path.join(self.tmpdir, "dest")
         os.makedirs(dest)
-        self.assertEqual(self.cli.cmd_extract_backup(out, dest, "wrong"), 1)
+        with self.assertRaises(Exception):
+            backup_manager.extract_backup(out, "wrong", lambda m: None, staging=dest)
         self.assertEqual(os.listdir(dest), [])
-        self.assertEqual(self.cli.cmd_extract_backup(out, dest, "pw"), 0)
+        backup_manager.extract_backup(out, "pw", lambda m: None, staging=dest)
         self.assertEqual(self._extracted_key(dest), self.pem)
         with open(os.path.join(dest, "metadata.json")) as f:
             self.assertEqual(json.load(f)["backup_format"], 2)
@@ -1584,7 +1586,7 @@ class TestBashBackupHelpers(unittest.TestCase):
                        cwd=self.staging, capture_output=True, check=True)
         dest = os.path.join(self.tmpdir, "dest")
         os.makedirs(dest)
-        self.assertEqual(self.cli.cmd_extract_backup(legacy, dest, "pw"), 0)
+        backup_manager.extract_backup(legacy, "pw", lambda m: None, staging=dest)
         self.assertEqual(self._extracted_key(dest), self.pem)
 
     def test_launchers_no_longer_use_zip_encryption(self):
@@ -1594,22 +1596,6 @@ class TestBashBackupHelpers(unittest.TestCase):
             with self.subTest(rel):
                 self.assertNotRegex(code, r"\bzip\b[^\n]*\s-P\s")
                 self.assertNotRegex(code, r"\bunzip\b[^\n]*\s-P\s")
-                if rel.startswith("linux"):  # the Mac's restore and setup are the CLI's
-                    self.assertIn("extract-backup", code)
-
-    def test_launchers_pass_the_password_on_stdin(self):
-        for rel in self.LAUNCHERS:
-            for line in self._read(rel).splitlines():
-                if re.search(r"\b(pack|extract)-backup\b", line) \
-                        and not line.lstrip().startswith("#"):
-                    with self.subTest(rel, line=line.strip()):
-                        self.assertRegex(line, r"""printf '%s' "\$\w+" \| """)
-        # create_backup embeds a python3 -c snippet with a bare "}" line, so
-        # take everything up to the next function instead.
-        linux = self._read("linux/onionpress")
-        start = linux.index("\ncreate_backup() {")
-        body = linux[start:linux.index("\nrestore_backup() {", start)]
-        self.assertIn('op_py pack-backup --staging "$staging" --output "$output_path"', body)
 
     def test_python_writer_does_not_use_zip_encryption(self):
         src = self._read("src/onionpress/backup_archive.py")

@@ -81,8 +81,8 @@ ONIONHOME_REGISTRY_FILES = ("onionnames.db", "onionnames.db-wal")
 # admin password WordPress sees in plain text: code running there would have
 # both. On an OnionHeaven hub or on OnionHome that backup is refused, and
 # on a node whose checks did not answer, since that could be either
-# (create_backup(include_hub_data=False) raises SettingsPageBackupRefused;
-# Linux: create_backup --without-hub-data returns 3): even without the hub's
+# (create_backup(include_hub_data=False) raises SettingsPageBackupRefused,
+# exit 3 from cli.cmd_settings_page_backup on both platforms): even without the hub's
 # registry and registrants' keys it carries the node's own onion service
 # key, and with it code in WordPress could run a rival hub that collects
 # registrants' keys from their heartbeats, or a rival OnionHome answering
@@ -147,12 +147,12 @@ UNVERIFIED_RESTORE_REFUSED_MSG = (
 # The site's own onion service key never changes through WordPress without
 # the owner at the host. Anything running in WordPress can write the
 # Settings page's requests, so:
-# - The Mac's Settings page backup leaves the key out
-#   (create_backup(include_onion_key=False), metadata excludes_onion_key,
+# - The Settings page's backup leaves the key out on both platforms
+#   (cli.cmd_settings_page_backup, the one path since issue #406:
+#   create_backup(include_onion_key=False), metadata excludes_onion_key,
 #   ONION_KEY_LEFT_OUT_NOTE with the result and in README.txt): the backup
 #   and its password are both WordPress's to read. The app's Backup... and
-#   `onionpress backup` keep it. Linux's Settings page backup keeps it for
-#   now (headless installs back up from the page).
+#   `onionpress backup` keep it.
 # - A restore of a backup without a key keeps the address of the install it
 #   is restored onto (staged_onion_key_address is '': no key written, no
 #   volume removed, no hub asked to let go), or is refused when that address
@@ -160,8 +160,9 @@ UNVERIFIED_RESTORE_REFUSED_MSG = (
 # - The Settings page's restore of a backup of another address needs the
 #   person at the Mac (restore_from_backup(confirm_address_change=), a
 #   native dialog; ADDRESS_CHANGE_NOT_CONFIRMED_MSG otherwise). Linux, which
-#   has no one to ask, refuses it (ADDRESS_CHANGE_REFUSED_MSG, restore_backup
-#   --from-settings-page) and refuses the page's key import outright.
+#   has no one to ask, refuses it (ADDRESS_CHANGE_REFUSED_MSG, raised by
+#   cmd_settings_page_restore's confirm_address_change) and refuses the
+#   page's key import outright.
 ONION_KEY_LEFT_OUT_NOTE = (
     "This backup does not contain your onion address's key; to move your "
     "address to another machine, use Backup... in the OnionPress menu.")
@@ -185,15 +186,14 @@ KEY_IN_KEYLESS_BACKUP_MSG = (
     "service key, but it does.")
 
 # The host's secrets never pass through WordPress in a backup either. The
-# Settings page's backup (create_backup(include_host_secrets=False); Linux:
-# create_backup --without-host-secrets) carries only the config WordPress's
-# status page already shows (config.redact_config, SAFE_CONFIG_KEYS): never
-# the Cloudflare tunnel token, which the page's write-only field keeps out of
-# WordPress, nor (Linux, whose backups carry the whole config file) image
-# overrides, bind host or hub admission. Linux also leaves out the
-# healthcheck onion service's key, which a start regenerates. The site's
-# own onion key stays on Linux; the Mac leaves it out too
-# (ONION_KEY_LEFT_OUT_NOTE above). metadata.json says so
+# Settings page's backup (create_backup(include_host_secrets=False), both
+# platforms') carries only the config WordPress's status page already shows
+# (config.redact_config, SAFE_CONFIG_KEYS): never the Cloudflare tunnel
+# token, which the page's write-only field keeps out of WordPress, nor
+# image overrides, bind host or hub admission. The healthcheck onion
+# service's key is in no backup (a start regenerates it), and the site's
+# own onion key is left out of the page's (ONION_KEY_LEFT_OUT_NOTE above).
+# metadata.json says so
 # (excludes_host_secrets) and names the secrets that were set
 # (secret_config_left_out, names only). No restore takes a secret from a
 # backup anyway (RESTORABLE_CONFIG): this install's token is kept, and on a
@@ -212,7 +212,7 @@ ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.on
 # that data, and says so: the log (the WARNINGs), metadata.json
 # (onionheaven_data_unchecked, onionhome_registry_unchecked) and, with the
 # finished backup, the NOTEs (unchecked_notes: the Mac's finished-backup
-# message, `onionpress backup`; Linux create_backup prints the hub's).
+# message, `onionpress backup` on both platforms).
 HUB_DATA_UNCHECKED_WARNING = (
     "Backup: WARNING: the onionheaven container did not say whether it holds "
     "OnionHeaven data; this backup does not")
@@ -228,6 +228,23 @@ ONIONHOME_REGISTRY_UNCHECKED_NOTE = (
     "OnionPress could not check whether this node is OnionHome (its "
     "onionpress-tor container did not answer), so this backup does not hold "
     "OnionHome's name registry. If this is OnionHome, make another backup "
+    "once OnionPress is running.")
+# No onion service key could be read from the tor container (issue #519:
+# a Linux first run whose key seed failed left a key Tor minted itself, in
+# C Tor's form only; extract_keys reads that form too, so this is a tor
+# container that does not answer, or holds no key). The backup is made
+# without it and says so (metadata excludes_onion_key and
+# onion_key_unreadable): a restore of it keeps the key and address of the
+# install it is restored onto (staged_onion_key_address), never an archive
+# no restore accepts, and never a new address.
+ONION_KEY_UNREADABLE_WARNING = (
+    "Backup: WARNING: no onion service key could be read from the tor "
+    "container: this backup carries none, and a restore of it keeps the key "
+    "and address of the install it is restored onto")
+ONION_KEY_UNREADABLE_NOTE = (
+    "No onion service key could be read from the tor container, so this "
+    "backup carries none: a restore of it keeps the address of the install it "
+    "is restored onto. To back up this site's address, make another backup "
     "once OnionPress is running.")
 
 
@@ -415,8 +432,8 @@ def verify_wp_admin_password_any(password):
 
     Returns (True, username) on success, or (False, error_message).
 
-    The Linux launcher's create_backup and scrub/uninstall checks call
-    this through `onionpress.cli verify-admin-password`, and password-only
+    The Linux launcher's uninstall check calls this through
+    `onionpress.cli verify-admin-password`, and password-only
     UI flows (e.g. the Linux tray's backup dialog) call it directly to give
     inline feedback without asking the user to remember their admin
     username. Uses wp_check_password directly so it bypasses login
@@ -511,8 +528,7 @@ def wp_content_tar_argv(*excludes):
 def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None):
     """Copy wp-content out of the WordPress container into *dest* as plain
     files and folders (wp_content_tar_argv, unpack_plain_tar), then
-    scrub_staged_tree. The Linux launcher's create_backup runs this through
-    `onionpress.cli stage-wp-content`. The time allowed is sized from
+    scrub_staged_tree. The time allowed is sized from
     *wpcontent_bytes*, measured in the container when not given."""
     if wpcontent_bytes is None:
         wpcontent_bytes = _du_bytes('onionpress-wordpress',
@@ -586,6 +602,7 @@ def unchecked_notes(metadata):
     if not isinstance(metadata, dict):
         return []
     return [note for key, note in (
+        ('onion_key_unreadable', ONION_KEY_UNREADABLE_NOTE),
         ('onionheaven_data_unchecked', HUB_DATA_UNCHECKED_NOTE),
         ('onionhome_registry_unchecked', ONIONHOME_REGISTRY_UNCHECKED_NOTE))
         if metadata.get(key) is True]
@@ -670,6 +687,50 @@ def served_onion_address():
         return ''
 
 
+def _stage_onion_key(staging, onion_address, include_onion_key, log_func):
+    """create_backup's step 1: the key out of the tor container, the PEM
+    into <staging>/tor-keys/ when *include_onion_key*. Returns (the
+    address the key derives to, whether no key could be read).
+
+    The address is derived from the key being zipped, never the caller's
+    (self.onion_address from the menubar, a cached value updated only on
+    its status poll): a backup made in the window after a vanity rotation,
+    restore or key import and before that poll was born with
+    metadata.onion_address pointing at the PRIOR address while tor-keys/
+    held the NEW key, the corrupted shape that propagated the mismatch
+    into KEYS_DIR on the hub when it was restored and heartbeated. With no
+    key readable the caller's address is kept only if it is a whole v3
+    address (metadata.json is validated on restore), else ''.
+    """
+    try:
+        priv, pub = key_manager.extract_keys()
+    except Exception as e:
+        log_func(f"{ONION_KEY_UNREADABLE_WARNING} ({e})")
+        kept = onion_address if key_manager.is_valid_onion_address(onion_address) else ''
+        return kept, True
+    if include_onion_key:
+        log_func("Backup: extracting Tor keys...")
+        tor_dir = os.path.join(staging, 'tor-keys')
+        os.makedirs(tor_dir)
+        pem_data = key_manager.build_openssh_key(priv, pub)
+        with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
+            f.write(pem_data)
+    else:
+        log_func("Backup: the onion service key is left out of this "
+                 "backup, which is handed to WordPress")
+    derived_address = key_manager.derive_onion_address(pub)
+    if onion_address and onion_address != derived_address:
+        log_func(f"Backup: KEY-MISMATCH — caller-supplied "
+                 f"onion_address={onion_address} does not match "
+                 f"key_derives_to={derived_address}. Recording "
+                 f"DERIVED in metadata (key is authoritative). The "
+                 f"caller's cached onion_address was stale — likely "
+                 f"a backup taken in the window after a vanity "
+                 f"rotation / restore / key import but before "
+                 f"update_status repolled the container.")
+    return derived_address, False
+
+
 def create_backup(onion_address, username, password, output_path, version, log_func, *,
                   data_dir=None, include_hub_data=True, include_host_secrets=True,
                   include_onion_key=True):
@@ -702,7 +763,11 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             README.txt and ONION_KEY_LEFT_OUT_NOTE; a restore of it keeps
             the address it is restored onto (staged_onion_key_address). The
             address is still derived from the key, for the hub check and
-            metadata.json. Every caller passes it.
+            metadata.json. Every caller passes it. With it True and no key
+            readable from the tor container, the backup is made without one
+            and says so (ONION_KEY_UNREADABLE_WARNING, metadata
+            excludes_onion_key and onion_key_unreadable, issue #519): a
+            restore of it keeps the install's own key and address.
     """
     backup_start = time.monotonic()
     _data_dir = data_dir if data_dir is not None else _default_data_dir()
@@ -714,48 +779,16 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         db_creds = _get_db_credentials()
         stats = _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
 
-        # 1. Extract Tor keys (OpenSSH PEM, the delivered-key format). Not
-        #    into a backup handed to WordPress on the Mac
-        #    (include_onion_key=False): only the address is derived.
+        # 1. Extract Tor keys (OpenSSH PEM, the delivered-key format) out of
+        #    the tor container (key_manager.extract_keys: the delivered PEM,
+        #    else C Tor's files, the one read on both platforms). Not into a
+        #    backup handed to WordPress on the Mac (include_onion_key=False):
+        #    only the address is derived. No key readable at all: the
+        #    backup goes ahead without one and says so (issue #519,
+        #    ONION_KEY_UNREADABLE_WARNING; metadata excludes_onion_key).
         with _phase_timer(log_func, 'BACKUP', 'tor_keys'):
-            if include_onion_key:
-                log_func("Backup: extracting Tor keys...")
-                tor_dir = os.path.join(staging, 'tor-keys')
-                os.makedirs(tor_dir)
-
-                priv = key_manager.extract_private_key()
-                pub = key_manager.extract_public_key()
-                pem_data = key_manager.build_openssh_key(priv, pub)
-                with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
-                    f.write(pem_data)
-            else:
-                log_func("Backup: the onion service key is left out of this "
-                         "backup, which is handed to WordPress")
-                pub = key_manager.extract_public_key()
-
-            # Override caller-supplied onion_address with the address derived
-            # from the actual key being zipped. The caller passes
-            # self.onion_address from the menubar, which is a cached value
-            # updated only on the ~30s update_status poll. If a backup runs
-            # in the window after a vanity rotation / restore / key import
-            # but before that poll, the caller's value is stale and the
-            # backup is born with metadata.onion_address pointing at the
-            # PRIOR address while tor-keys/ holds the NEW key — exactly the
-            # corrupted-backup shape that propagates the mismatch into
-            # KEYS_DIR on the hub when this backup is later restored and
-            # heartbeated. Derive from the key and the backup is internally
-            # consistent regardless of the caller's view.
-            derived_address = key_manager.derive_onion_address(pub)
-            if onion_address and onion_address != derived_address:
-                log_func(f"Backup: KEY-MISMATCH — caller-supplied "
-                         f"onion_address={onion_address} does not match "
-                         f"key_derives_to={derived_address}. Recording "
-                         f"DERIVED in metadata (key is authoritative). The "
-                         f"caller's cached onion_address was stale — likely "
-                         f"a backup taken in the window after a vanity "
-                         f"rotation / restore / key import but before "
-                         f"update_status repolled the container.")
-            onion_address = derived_address
+            onion_address, key_unreadable = _stage_onion_key(
+                staging, onion_address, include_onion_key, log_func)
 
         # 1b. Is this an OnionHeaven hub (its volume holds registrants' keys
         #     or registry rows)? A backup handed to WordPress (the Settings
@@ -937,11 +970,15 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # restore says what to enter again (restore_backup_config).
             metadata['excludes_host_secrets'] = True
             metadata['secret_config_left_out'] = secrets_left_out
-        if not include_onion_key:
+        if not include_onion_key or key_unreadable:
             # No tor-keys/: a restore keeps the address it is restored onto
             # (staged_onion_key_address refuses a backup that says this and
             # holds a key all the same).
             metadata['excludes_onion_key'] = True
+        if key_unreadable:
+            # Not left out on purpose: the tor container gave no key
+            # (unchecked_notes says it with the finished backup).
+            metadata['onion_key_unreadable'] = True
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
@@ -992,28 +1029,6 @@ def keep_installed_address(metadata, log_func):
              f"or one whose key could not be read, issue #519); this install keeps its key and its address "
              f"{address}")
     metadata['onion_address'] = address
-    return address
-
-
-def staged_backup_address(staging, log_func):
-    """Validate an extracted backup and return the onion address its key
-    belongs to ('' if it carries no key).
-
-    For the bash launchers' `setup --from-backup` and Linux's
-    restore_backup, which name a directory after the address and write its
-    prefix into config: they take the address from here, never from
-    metadata.json. A metadata address that is well formed but differs from
-    the key's is logged, as the Python restore paths do (older clients left
-    it stale). Raises ValueError on invalid metadata or key files; nothing
-    is touched.
-    """
-    metadata = read_staged_metadata(staging)
-    address = staged_onion_key_address(staging, metadata)
-    metadata_address = metadata.get('onion_address', '')
-    if address and metadata_address and metadata_address != address:
-        log_func(f"Restore: KEY-MISMATCH — backup metadata.onion_address="
-                 f"{metadata_address} != key_derives_to={address}; "
-                 f"using DERIVED address for all persisted state.")
     return address
 
 
@@ -1069,8 +1084,7 @@ def extract_backup(zip_path, password, log_func, staging=None):
     install-from-backup. Validates the password as a side effect — a wrong
     password raises ValueError here before any state is touched.
 
-    Handles both backup formats (extract_archive); also the bash launchers'
-    restore paths, via `onionpress.cli extract-backup`.
+    Handles both backup formats (extract_archive).
     """
     own_staging = staging is None
     if own_staging:
@@ -1338,6 +1352,7 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
         else:
             _restore_backup_key(tor_dir, metadata, log_func, data_dir,
                                 _data_dir, before_key_change)
+        leave_healthcheck_key_out(tor_dir, _data_dir, log_func)
 
         # 2-6. Container-side artifacts + config overrides — shared with the
         # install-from-backup path (restore_container_artifacts / apply_config_overrides).
@@ -1459,6 +1474,27 @@ def _restore_backup_key(tor_dir, metadata, log_func, data_dir, _data_dir,
                 metadata.get('username', '').strip(), log_func)
 
 
+# Where a Linux restore through 2.5.x staged a backup's healthcheck key for
+# the next start to put back (tests/test_healthcheck_key_never_backed_up.py).
+HEALTHCHECK_KEY_STAGING = os.path.join('shared', 'healthcheck-keys')
+
+
+def leave_healthcheck_key_out(tor_dir, data_dir, log_func):
+    """The healthcheck onion service's key is in no backup and no restore
+    (issue #455: whoever runs that service can make the hub release a
+    takeover). A start without one makes a new key and the heartbeat gives
+    the hub its address. A backup that carries one (Linux's through 2.5.x,
+    tor-keys/healthcheck/) is restored without it, said in the log; a key
+    an older restore staged under the data dir goes too."""
+    if tor_dir and os.path.isdir(os.path.join(tor_dir, 'healthcheck')):
+        log_func("Restore: the backup's healthcheck key left out (a start makes a new one)")
+    staged = os.path.join(data_dir, HEALTHCHECK_KEY_STAGING)
+    if os.path.islink(staged) or os.path.isfile(staged):
+        os.unlink(staged)
+    elif os.path.isdir(staged):
+        shutil.rmtree(staged, ignore_errors=True)
+
+
 def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True,
                                 name_registry=True, hub_data=None, data_dir=None):
     """Import a backup's container-side state into the RUNNING db + wordpress
@@ -1508,9 +1544,9 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
         # otherwise ride into the ALTER USER below.
         db_password = _restore_db_password(data_dir, db_creds['password'])
 
-        # The one sandboxed import (db_import below; the Linux launcher's
-        # db_import runs it as `onionpress db-import`): the client's command
-        # parsing OFF, the dump on stdin after the password line.
+        # The one sandboxed import (db_import below, both platforms'): the
+        # client's command parsing OFF, the dump on stdin after the
+        # password line.
         db_import(sql_path, db_password,
                   user=db_creds['user'], name=db_creds['name'])
 
@@ -1967,18 +2003,6 @@ def wordpress_safe_config(values, log_func):
     return kept, secrets
 
 
-def write_wordpress_safe_config(config_path, dest, log_func):
-    """Write the config file at *config_path*, cut by wordpress_safe_config,
-    to *dest* (a new file, owner-only); return the secrets left out. For
-    the Linux launcher's create_backup --without-host-secrets, whose
-    backups carry the config file itself."""
-    kept, secrets = wordpress_safe_config(read_config(config_path), log_func)
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        f.writelines(f"{k}={v}\n" for k, v in kept.items())
-    return secrets
-
-
 def apply_config_overrides(staging, log_func, *, data_dir=None, onion_address=''):
     """Restore a backup's user preferences into ~/.onionpress/config
     (restore_backup_config)."""
@@ -2077,46 +2101,3 @@ def backup_filename_username(path):
         return None
     user = m.group('user').strip()
     return user if _BACKUP_USERNAME_RE.fullmatch(user) else None
-
-
-def linux_backup_metadata(onion_address, version, *, has_onionheaven=False,
-                          excludes_image_derivatives=False, hub_fields=None,
-                          hub_unchecked=False, with_host_secrets=True,
-                          secrets_left_out=(), excludes_onion_key=False, now=None):
-    """metadata.json's content for a backup the Linux launcher stages
-    (issue #406; it was an inline python3 -c in create_backup).
-
-    *excludes_onion_key*: no onion service key could be read (issue
-    #519), so the archive carries none and says so, the way the Mac page's
-    backup does: a restore keeps the install's own key and address
-    (staged_onion_key_address) instead of failing on the missing PEM.
-
-    *hub_fields* are what stage_hub_backup printed (onionheaven_data and
-    its sealed-format and recovery-key fields). pack_backup stamps
-    backup_format afterwards.
-    """
-    metadata = {
-        'onion_address': onion_address,
-        'backup_date': (now or datetime.now(timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'onionpress_version': version,
-        'platform': 'linux',
-        'has_onionheaven': bool(has_onionheaven),
-        # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
-        'excludes_image_derivatives': bool(excludes_image_derivatives),
-    }
-    for key in ('onionheaven_data', 'onionheaven_sealed_format',
-                'onionheaven_recovery_key_id'):
-        if hub_fields and key in hub_fields:
-            metadata[key] = hub_fields[key]
-    if hub_unchecked:
-        # The onionheaven container did not say whether this is a hub: the
-        # hub data may be missing (unchecked_notes).
-        metadata['onionheaven_data_unchecked'] = True
-    if not with_host_secrets:
-        # Handed to WordPress: no host secrets, and the names of those that
-        # were set (TUNNEL_TOKEN_KEY).
-        metadata['excludes_host_secrets'] = True
-        metadata['secret_config_left_out'] = list(secrets_left_out)
-    if excludes_onion_key:
-        metadata['excludes_onion_key'] = True
-    return metadata

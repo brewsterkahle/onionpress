@@ -222,80 +222,64 @@ class TestUpdate(_Case):
 
 
 class TestBackup(_Case):
-    STUBS = ("setup_db_passwords", "create_backup")
+    """`backup` is the CLI's, as the Mac's (issue #406): every argument
+    passed on, the password left in the environment for the CLI to read
+    (it refuses a positional one, issue #504, and parses the flags), the
+    CLI's exit status the launcher's."""
 
-    def test_the_backup_is_create_backups_at_the_path_given(self):
-        for flag in (("-o", "/b/x.zip"), ("--output", "/b/x.zip"), ("--output=/b/x.zip",)):
-            with self.subTest(flag=flag):
-                r = self.l.run("backup", *flag, env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn("fn create_backup pw /b/x.zip", self.l.calls())
-                self.assertIn("Backup saved to: /b/x.zip", r.stdout)
+    STUBS = ("setup_db_passwords",)
 
-    def test_the_default_path_is_under_onionpress_backups(self):
-        r = self.l.run("backup", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        call = [c for c in self.l.calls() if c.startswith("fn create_backup")][0]
-        self.assertRegex(call, re.escape(os.path.join(self.l.home, "OnionPress", "backups"))
-                         + r"/onionpress-\d{4}-\d\d-\d\d-\d+\.zip$")
-
-    def test_json_adds_the_answer(self):
-        r = self.l.run("backup", "-o", "/b/x.zip", "--json", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                         {"ok": True, "output": "/b/x.zip"})
-
-    def test_the_old_positional_password_is_refused(self):
-        # Issue #504: nothing runs, the message names no password.
-        r = self.l.run("backup", "oldpw", "/b/y.zip")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertNotIn("create_backup", self.l.fn_calls())
-        self.assertIn("refused", r.stderr)
-        self.assertNotIn("oldpw", r.stderr + r.stdout)
-
-    def test_user_equals_reaches_the_check(self):
-        r = self.l.run("backup", "--check", "--user=bob", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-        self.assertEqual(self.l.py_calls(), [f"{self.dd()} backup --check --user bob"])
-
-    def test_a_bad_command_line_is_refused_before_anything_runs(self):
-        for argv, msg in ((("--confirmed", "x"), "unknown option --confirmed"),
-                          (("--bogus",), "unknown option --bogus"),
-                          (("a", "b", "c"), "too many arguments")):
+    def test_the_backup_is_the_clis_with_the_arguments_passed_on(self):
+        for argv in (("-o", "/b/x.zip"), ("--output", "/b/x.zip"), ("--output=/b/x.zip",),
+                     (), ("--check", "--user=bob"), ("-o", "/b/x.zip", "--json"),
+                     ("--confirmed", "x"), ("oldpw", "/b/y.zip")):
             with self.subTest(argv=argv):
                 r = self.l.run("backup", *argv, env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 2)
-                self.assertIn(msg, r.stderr)
-                self.assertNotIn("create_backup", self.l.fn_calls())
-                self.assertEqual(self.l.py_calls(), [])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.l.py_calls(), [f"{self.dd()} backup" + "".join(" " + a for a in argv)])
+                self.assertIn("py-env pw", self.l.calls())
+                self.assertEqual(self.l.fn_calls(), [])
+
+    def test_the_clis_status_is_the_launchers(self):
+        r = self.l.run("backup", "--check", "--json", env={"STUB_RC_PY": "5"})
+        self.assertEqual(r.returncode, 5)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} backup --check --json"])
+        self.assertIn("py-env <none>", self.l.calls())
+
+    def test_nothing_of_the_backup_is_bash(self):
+        with open(LINUX) as f:
+            text = f.read()
+        for name in ("create_backup", "restore_backup", "key_volume_cat", "db_client", "db_import"):
+            self.assertNotIn(f"\n{name}() {{", text, name)
 
 
 class TestRestore(_Case):
-    STUBS = ("setup_db_passwords", "stop_heartbeat_client", "start_heartbeat_client")
+    STUBS = ("setup_db_passwords",)
 
     def py(self, *rest):
         return f"{self.dd()} restore " + " ".join(rest)
 
-    def test_the_restore_runs_between_the_heartbeat_stop_and_start(self):
+    def test_the_restore_is_the_clis_which_pauses_the_heartbeat(self):
+        # The heartbeat client is stopped and started by the CLI
+        # (onionpress.heartbeat_unit, issue #406), not here.
         r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "s3cret"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.l.calls()
-        self.assertLess(calls.index("fn stop_heartbeat_client"), calls.index(f"py {self.py('/b/x.zip')}"))
-        self.assertEqual(calls[-1], "fn start_heartbeat_client")
-        self.assertIn("py-env s3cret", calls)
+        self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip")])
+        self.assertIn("py-env s3cret", self.l.calls())
+        self.assertEqual([c for c in self.l.calls() if "heartbeat" in c], [])
         self.assertIn("Done! OnionPress rebuilt from backup.", r.stdout)
 
-    def test_a_failed_restore_starts_the_heartbeat_again_and_fails(self):
+    def test_a_failed_restore_fails(self):
         r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "pw",
                                                    "STUB_RC_PY": "1"})
         self.assertEqual(r.returncode, 1)
-        self.assertEqual(self.l.calls()[-1], "fn start_heartbeat_client")
+        self.assertEqual([c for c in self.l.calls() if "heartbeat" in c], [])
         self.assertIn("Restore failed", r.stderr)
 
     def test_check_changes_nothing_and_hands_back_the_clis_answer(self):
         r = self.l.run("restore", "/b/x.zip", "--check", "--json", env={"STUB_RC_PY": "5"})
         self.assertEqual(r.returncode, 5)
         self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--check", "--json")])
-        self.assertNotIn("stop_heartbeat_client", self.l.fn_calls())
 
     def test_the_old_positional_password_is_refused(self):
         r = self.l.run("restore", "oldpw", "/b/x.zip")
@@ -332,7 +316,6 @@ class TestRestore(_Case):
                 self.assertEqual(r.returncode, 2)
                 self.assertIn(msg, r.stderr)
                 self.assertEqual(self.l.py_calls(), [])
-                self.assertNotIn("stop_heartbeat_client", self.l.fn_calls())
 
 
 class TestUsage(_Case):

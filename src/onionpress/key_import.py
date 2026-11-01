@@ -26,12 +26,11 @@ on a Mac it asks the person at the Mac, then runs this with
 
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
 
-from . import config, confirm as _confirm, key_manager, onion_hostname
+from . import config, confirm as _confirm, heartbeat_unit, key_manager, onion_hostname
 from .containers import IMPORT_KEY_PENDING, forget_key_volume_migration
 from .onionheaven import _RETRYABLE
 
@@ -41,7 +40,6 @@ KEY_VOLUMES = ("onionpress-onion-keys", "onionpress-arti-state",
                "onionpress-tor-state")
 # The two whose presence means "there is an address to replace".
 ADDRESS_VOLUMES = ("onionpress-onion-keys", "onionpress-arti-state")
-HEARTBEAT_UNIT = "onionpress-heartbeat.service"
 
 HELP_TEXT = """\
 Usage: onionpress import-key <base32-secret-key> [--check] [--json]
@@ -139,50 +137,6 @@ prefix_for_address = config.prefix_for_address
 follow_address_prefix = config.follow_address_prefix
 
 
-# ---- Linux's heartbeat client ----
-# It holds the key it loaded at start and sends it with every /online:
-# stopped before the hubs are asked to forget the key, or its next beat
-# would put the key back. Gone with the daemon on Linux (#407).
-
-def _systemctl(args, log, *, sudo=False):
-    argv = (["sudo"] if sudo else []) + ["systemctl"] + args
-    try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
-        log(f"WARNING: {' '.join(argv)} did not run: {e}")
-        return None
-
-
-def _ok(result):
-    return result is not None and result.returncode == 0
-
-
-def stop_heartbeat_client(log):
-    if _ok(_systemctl(["--user", "is-active", HEARTBEAT_UNIT], log)):
-        log("Stopping heartbeat client...")
-        _systemctl(["--user", "stop", HEARTBEAT_UNIT], log)
-    if _ok(_systemctl(["is-active", HEARTBEAT_UNIT], log)):
-        log("Stopping heartbeat client (system unit)...")
-        _systemctl(["stop", HEARTBEAT_UNIT], log, sudo=True)
-
-
-def heartbeat_client_held(log):
-    result = _systemctl(["--user", "is-enabled", HEARTBEAT_UNIT], log)
-    return result is not None and result.stdout.strip().startswith("masked")
-
-
-def start_heartbeat_client(log):
-    if heartbeat_client_held(log):
-        log("Heartbeat client stays held: WordPress is not installed yet")
-        return
-    if _ok(_systemctl(["--user", "is-enabled", HEARTBEAT_UNIT], log)):
-        if not _ok(_systemctl(["--user", "start", HEARTBEAT_UNIT], log)):
-            log("WARNING: Failed to start heartbeat client")
-    elif _ok(_systemctl(["is-enabled", HEARTBEAT_UNIT], log)):
-        if not _ok(_systemctl(["start", HEARTBEAT_UNIT], log, sudo=True)):
-            log("WARNING: Failed to start heartbeat client")
-
-
 # ---- The replacement ----
 
 def _error_line(text):
@@ -263,7 +217,7 @@ def replace_key(key_b32, *, data_dir, docker, containers, log, release,
 
     # 3. Only now: the hubs, then OnionPress.
     if linux:
-        stop_heartbeat_client(log)
+        heartbeat_unit.stop(log)
     try:
         remaining = release("key-import")
     except Exception as e:
@@ -271,7 +225,7 @@ def replace_key(key_b32, *, data_dir, docker, containers, log, release,
         remaining = [{"why": "unanswered"}]
     if not hub_held_ok(remaining):
         if linux:
-            start_heartbeat_client(log)
+            heartbeat_unit.start(log)
         return fail("Cancelled: an OnionHeaven hub may still hold the current key",
                     address=address, kept=kept)
     try:

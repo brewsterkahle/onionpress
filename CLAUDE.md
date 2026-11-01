@@ -164,12 +164,14 @@
 - **Linux's first run pulls the tor image before `generate-vanity`** (#519:
   the postinst's first start had pulled nothing, "no image" read as "no
   mkp224o", Tor minted a key that never reached the key volume as a PEM,
-  and every backup of that site was unrestorable). **A Linux backup holds
-  the PEM or says it has no key**: a C-Tor-only key is converted
-  (`key_manager.py ctor-to-arti`, the public key from `hostname` when tor
-  wrote none); no key at all is a WARNING and `excludes_onion_key` in
-  metadata (the restore then keeps the install's key, as for the Mac
-  page's backup), never an archive no restore accepts.
+  and every backup of that site was unrestorable). **A backup holds the
+  PEM or says it has no key** (`backup._stage_onion_key`, both platforms):
+  the key is read out of the tor container by `key_manager.extract_keys`
+  (the delivered PEM, else C Tor's files, the public key from `hostname`
+  when tor wrote none); no key readable is a WARNING and
+  `excludes_onion_key` + `onion_key_unreadable` in metadata (the restore
+  then keeps the install's key, as for the page's backup; `unchecked_notes`
+  says so with the finished backup), never an archive no restore accepts.
   `TestLinux` in `tests/test_first_run_key_seed.py`,
   `tests/test_linux_backup_key_pem.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
@@ -378,12 +380,13 @@
   anything else keeps the marker and stops the start.
   `tests/test_pending_key_import.py`.
 - **Code in WordPress never reads or replaces the site's onion key without
-  the owner at the host**: the Mac page's backup excludes it
-  (`include_onion_key=False`; every `create_backup` call says which); a
-  keyless backup never mints an address on any path; a page restore of
-  another address asks (Mac) or is refused (Linux); a hub/OnionHome node,
-  or one that cannot say, restores nothing from the page.
-  `tests/test_settings_page_onion_key.py`.
+  the owner at the host**: the page's backup excludes it on both platforms
+  (`cmd_settings_page_backup`, `include_onion_key=False`; every
+  `create_backup` call says which); a keyless backup never mints an
+  address on any path; a page restore of another address asks (Mac) or is
+  refused (Linux: `cmd_settings_page_restore`, `ADDRESS_CHANGE_REFUSED_MSG`);
+  a hub/OnionHome node, or one that cannot say, restores nothing from the
+  page. `tests/test_settings_page_onion_key.py`.
 
 ## The Mac Daemon (issue #367, CLI-first phase 3)
 - **`onionpress daemon` runs every loop; the menubar is a view** (menu,
@@ -940,10 +943,24 @@
 
 ## Backups Carry Original Images Only (issue #257)
 - Backups prune WordPress derivatives by `src/onionpress/derivatives.py`'s
-  rule (shared with Linux via `prune-image-derivatives`); restores
+  rule (`backup.create_backup`, both platforms); restores
   regenerate them in the background (`--only-missing`, marker cleared
   only when complete) and the `onionpress-image-fallback.php` mu-plugin
   serves originals meanwhile. The two halves ship together.
+
+## Backup and Restore Are the CLI's on Both Platforms (issue #406)
+- **No backup or restore runs in bash**: both launchers' `backup`,
+  `restore`, `settings-page-backup` and `settings-page-restore` cases
+  delegate to `onionpress.cli` (`cmd_backup` → `backup.create_backup`,
+  `cmd_restore`, `cmd_settings_page_backup`, `cmd_settings_page_restore`
+  → `restore_from_backup(through_wordpress=True)`). The one platform seam
+  is `heartbeat_unit`: on Linux the heartbeat client unit is stopped before
+  a restore replaces the key (`cmd_restore` runs inside
+  `heartbeat_unit.paused`; the page's restore stops it in
+  `before_key_change`) and started again after, held only while #464's
+  install mask holds it. `tests/test_heartbeat_unit.py`,
+  `TestLinuxSettingsPageBranches` in `tests/test_backup_hub_data_off_wordpress.py`,
+  `tests/test_launcher_dispatch_linux.py`.
 
 ## Backup/Restore Time Limits Grow With the Site (issue #317)
 - No fixed copy limit: floor + size at `wp_files.COPY_BYTES_PER_S`
@@ -986,8 +1003,9 @@
   `build/py2app-extensions.sh`; `python3-nacl (>= 1.5.0)` on Linux),
   imported guarded so format 1 works without it.
 - **Format 1 (`zip -P`) must restore forever; never write `zip -P` again.**
-- Launchers go through `onionpress.cli pack-backup` / `extract-backup`
-  (password on stdin).
+- Every backup is written by `backup.pack_backup` and read by
+  `extract_backup` (both platforms', through the CLI's backup and
+  restores); nothing else zips or unzips one.
 
 ## Restores Extract Plain Files Only
 - `validate_archive_members` runs before any extractor (no links, devices,

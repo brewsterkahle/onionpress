@@ -755,9 +755,7 @@ def hub_data_state():
 def stage_hub_data(dest, log_func):
     """Copy the hub's registry (a consistent copy, HUB_DATA_TAR_SH) and
     keys/ out of the onionheaven container into *dest*, as plain files and
-    folders (unpack_plain_tar), then scrub_staged_tree. The Linux
-    launcher's create_backup runs this through `onionpress.cli
-    stage-hub-data`."""
+    folders (unpack_plain_tar), then scrub_staged_tree."""
     os.makedirs(dest, exist_ok=True)
     _stage_container_tar(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
                          dest, log_func, 'onionheaven')
@@ -807,8 +805,7 @@ def stage_hub_backup(staging, log_func, *, data_dir=None):
     (stage_hub_data) under the backup's password only, as before, with a
     loud warning every time. A recovery key file that is there but cannot
     be read fails the backup (RecoveryKeyError) rather than
-    leave the keys unsealed. Shared by create_backup and, through
-    `onionpress.cli stage-hub-backup`, the Linux launcher's."""
+    leave the keys unsealed. create_backup's, on both platforms."""
     _data_dir = data_dir if data_dir is not None else _default_data_dir()
     public_raw = load_public_key(_data_dir)
     if public_raw is None:

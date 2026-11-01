@@ -282,8 +282,7 @@ def _onion_key_readme_text(metadata):
 
 def pack_backup(staging, output_path, password, log_func):
     """Write the staged backup tree *staging* to *output_path* as a format-2
-    encrypted backup (see backup_crypto). Shared by create_backup and, via
-    `onionpress.cli pack-backup`, the Linux launcher's bash create_backup.
+    encrypted backup (see backup_crypto); create_backup's, on both platforms.
 
     The system `zip` builds the same archive it always has (same member
     names, same -n list) but without -P; its output streams from stdout

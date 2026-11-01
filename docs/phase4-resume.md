@@ -584,3 +584,37 @@ older versions go, while the same digest under the old name is the pinned
 image itself and stays. The launchers' conflicting hunks were #502's new
 pins in `update_images`, which this branch removed.
 
+
+## Slice 8 (2026-10-31): Linux's backup and restore (issue #406, #203 item 3)
+
+`linux/onionpress`'s `create_backup` (299 lines), `key_volume_cat`,
+`restore_backup` (252 lines), `db_client` and `db_import` went; the
+`backup`, `settings-page-backup` and `settings-page-restore` cases are the
+Mac's delegations (`op_py --data-dir "$DATA_DIR" <verb> ...`), the
+`restore` case keeps its argv parse and loses its heartbeat calls, and the
+uninstall runs `op_py ... backup -o`. One Python path for both platforms:
+`cmd_backup` → `backup.create_backup`, `cmd_restore`,
+`cmd_settings_page_backup`, `cmd_settings_page_restore`. Drift resolved in
+the Python: the key is read by `key_manager.extract_keys` on both (PEM,
+else C Tor's files; `_stage_onion_key`), and #519's keyless-backup rule
+applies to both (WARNING, `excludes_onion_key` + `onion_key_unreadable`,
+a note with the result); the page's backup is keyless on Linux too; the
+address prefix rule is `match_config_to_restored_address`'s (no bash
+copy); the refusal strings are the Python constants alone (Linux's
+address-change refusal raised in `cmd_settings_page_restore`). The seam:
+`heartbeat_unit` (new module, in setup.py's includes) stops and starts the
+Linux heartbeat unit around `cmd_restore` (`paused`) and the page
+restore's key change. `restore_from_backup` now leaves a backup's
+healthcheck key out and removes one an older restore staged
+(`leave_healthcheck_key_out`), what the bash restore did. The 16 helper
+subcommands the bash spine called (`extract-backup`, `backup-address`,
+`settings-page-*-check`, `stage-wp-content`, `pack-backup`, `db-import`,
+`backup-metadata`, `wordpress-safe-config`, `stage-hub-backup`,
+`stage-hub-data`, `restore-config`, `restore-hub-data`,
+`prune-image-derivatives`, `scrub-staging`) and `key_manager.py
+ctor-to-arti` have no caller left; `put-wp-tree` (bundled_plugins) and
+`verify-admin-password` (uninstall) stay. `KEY_HELPER_IMAGE` /
+`ensure_key_helper_image` are now dead in both launchers (test-pinned;
+not removed here). Not live-tested on Linux: the page restore writes the
+key the Mac's way (`write_private_key`: docker cp into the live tor
+container and a tor restart) instead of `.import-key-pending`.
