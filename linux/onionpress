@@ -142,55 +142,6 @@ PIDFILE="$DATA_DIR/onionpress.pid"
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-# One-time host-side migration: ~/Documents/onionpress (Linux default)
-# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
-# source tree recursively so empty subdirs in the destination (from a
-# previous launcher pass) don't block the mv. Issue #239.
-#
-# REMOVE-AFTER 2026-08-01: by then every active install will have
-# migrated. Delete this block and _op_migrate_tree.
-_op_migrate_tree() {
-    local src="$1" dst="$2"
-    [ -d "$src" ] || return 0
-    mkdir -p "$dst"
-    shopt -s dotglob nullglob 2>/dev/null || true
-    local entry base target
-    for entry in "$src"/*; do
-        [ -e "$entry" ] || continue
-        base=$(basename "$entry")
-        target="$dst/$base"
-        if [ -d "$entry" ] && [ -d "$target" ]; then
-            _op_migrate_tree "$entry" "$target"
-            rmdir "$entry" 2>/dev/null || true
-        else
-            mv -n "$entry" "$target" 2>/dev/null || true
-        fi
-    done
-}
-
-if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    _migration_residual=0
-    _migration_did_work=0
-    for OLD in "$HOME/Documents/onionpress" "$HOME/Documents/OnionPress"; do
-        [ -d "$OLD" ] || continue
-        _migration_did_work=1
-        rm -f "$OLD/MOVED.txt" 2>/dev/null || true
-        _op_migrate_tree "$OLD" "$DOCUMENTS_DIR"
-        rmdir "$OLD" 2>/dev/null || true
-        if [ -d "$OLD" ]; then
-            _migration_residual=1
-            echo "OnionPress content moved to $DOCUMENTS_DIR" \
-                > "$OLD/MOVED.txt" 2>/dev/null || true
-        fi
-    done
-    if [ "$_migration_did_work" = "0" ]; then
-        mkdir -p "$DOCUMENTS_DIR"
-    fi
-    if [ "$_migration_residual" = "0" ]; then
-        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-    fi
-fi
-
 # Ensure subtree exists for compose bind-mounts.
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
@@ -435,8 +386,9 @@ KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:l
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing
 # image is pulled by its pinned reference, never when the stack runs locally
-# built images. Returns 1 when it is not here and cannot be. Kept identical
-# in the macOS and Linux launchers; a test enforces that.
+# built images. Returns 1 when it is not here and cannot be. Linux only:
+# create_backup's key read runs the helper; the Python start steps use
+# containers.ensure_key_helper_image.
 ensure_key_helper_image() {
     if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
         return 0
@@ -489,8 +441,9 @@ fi
 # that stop or remove take COMPOSE_WITH_CF, so a tunnel whose token was just
 # removed still goes down with the rest (#352), and start_cloudflare_tunnel
 # names both files itself.
-# apply_config_updates reads it again: the Settings page's Restart applies
-# the page's changes in this same process before start_containers.
+# The Settings page's Restart applies the page's changes (handle-action
+# runs `apply-config`, then `restart`: this process reads the config
+# fresh).
 COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
 read_cloudflare_token() {
     CLOUDFLARE_TUNNEL_TOKEN=""
@@ -1535,19 +1488,6 @@ onionheaven_cmd() {
     op_py --data-dir "$DATA_DIR" onionheaven "$@"
 }
 
-get_onion_address() {
-    cd "$DOCKER_DIR"
-    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    # The whole value must be an onion address: callers cache it and put it
-    # into URLs. Anything else reads as not generated yet.
-    if is_onion_address "$ONION_ADDR"; then
-        echo "$ONION_ADDR"
-        return 0
-    fi
-    echo "Generating..."
-    return 1
-}
-
 # Read and cache healthcheck onion address
 get_healthcheck_address() {
     cd "$DOCKER_DIR"
@@ -2293,71 +2233,11 @@ restore_backup() {
 # ─── Write status (on-demand) ────────────────────────────────────────
 
 write_status() {
-    # Apply any pending config changes from the WordPress settings page
-    # (apply_config_updates ends in write_status itself: the guard).
-    if [ -z "${_IN_WRITE_STATUS:-}" ]; then
-        _IN_WRITE_STATUS=1 apply_config_updates 2>/dev/null || true
-    fi
     # One status writer for both platforms (onionpress.status_writer,
     # issue #523): the daemon's two documents from one pass over the
     # stack. Its lines reach the log and the terminal as log's did;
     # a failure is in the log, never a stopped caller.
     op_py --data-dir "$DATA_DIR" write-status 2>&1 | tee -a "$LOG_FILE"
-}
-
-# ─── Config watcher (on-demand) ──────────────────────────────────────
-
-apply_config_updates() {
-    # Check if settings page wrote config-updates.json
-    local updates result changed rejected
-    updates=$(wp_exec cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
-
-    if [ -z "$updates" ] || [ "$updates" = "{}" ]; then
-        return 0
-    fi
-
-    log "Applying config updates from settings page..."
-
-    # Anything running in WordPress can write that file, so the shared
-    # allowlist (config.SETTINGS_PAGE_KEYS, as on the Mac) applies only the
-    # settings page's own keys with valid values. It reports key names,
-    # never values.
-    if ! result=$(printf '%s' "$updates" | op_py --data-dir "$DATA_DIR" apply-settings-updates 2>>"$LOG_FILE"); then
-        log "WARNING: Could not apply config updates from settings page"
-        return 1
-    fi
-    changed=$(printf '%s\n' "$result" | sed -n 's/^changed //p' | tr '\n' ' ')
-    rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
-    [ -z "$changed" ] || log "Settings page changed: ${changed% }"
-    [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
-    # A tunnel token is never set from the page (#463): its owner would
-    # see this host's IP. Removing it is applied above.
-    if printf '%s\n' "$result" | grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'; then
-        log "WARNING: Settings page asked to set CLOUDFLARE_TUNNEL_TOKEN; not set. On this computer run: onionpress config set CLOUDFLARE_TUNNEL_TOKEN -"
-    fi
-
-    # Clear the updates file
-    wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
-
-    # A token set or removed on the page counts from the next start_containers
-    # (the page's Restart runs it in this process).
-    read_cloudflare_token
-
-    # Handle START_ON_BOOT (re-applied whenever the page sends it)
-    if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
-        local boot_val
-        boot_val=$(config_value START_ON_BOOT)
-        if [ "$boot_val" = "yes" ]; then
-            systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
-        else
-            systemctl --user disable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
-        fi
-    fi
-
-    # Write updated status
-    write_status
-
-    log "Config updates applied"
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -2992,17 +2872,18 @@ update_finish() {
         log "Updated plugins deployed to WordPress container"
     fi
 
-    # Pull latest docker images. Unlike the start path this has no
-    # --policy guard, so it would clobber a local build outright.
+    # Pull the release's images: every pin is a digest, so `--policy
+    # missing` fetches exactly what the new release moved (as the start
+    # does) and never clobbers a local build.
     cd "$INSTALL_DIR/docker"
     setup_db_passwords
     if using_local_images; then
         log "Skipping image pull: running locally built images"
         echo "  Skipping image pull (running locally built images)"
     else
-        log "Pulling latest Docker images..."
-        echo "  Pulling latest Docker images..."
-        docker compose "${CF_COMPOSE[@]}" pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+        log "Pulling the release's Docker images..."
+        echo "  Pulling the release's Docker images..."
+        docker compose "${CF_COMPOSE[@]}" pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
     fi
 
     # Restart, the heartbeat client too (its script was replaced):
@@ -3474,8 +3355,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         apply-config)
-            setup_db_passwords
-            apply_config_updates
+            # The Settings page's config-updates.json, through the allowlist
+            # (config.SETTINGS_PAGE_KEYS) and config.apply_side_effects
+            # (START_ON_BOOT's units): onionpress.handle_action.apply_config,
+            # as on the Mac. handle-action applies it on every run too.
+            op_py --data-dir "$DATA_DIR" apply-config
             ;;
 
         onionheaven)
@@ -3857,9 +3741,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         *)
-            echo "onionpress: unknown command: $1" >&2
-            usage >&2
-            exit 1
+            # Every other verb is onionpress.cli's: a subcommand with no
+            # case of its own reaches it here (check-for-update,
+            # ensure-archive-s3-keys, ...), and one the CLI does not have
+            # either gets the CLI's usage and exit status.
+            op_py --data-dir "$DATA_DIR" "$@"
             ;;
     esac
 }

@@ -1701,16 +1701,13 @@ class OnionPressTray:
     def _on_check_updates(self, *_):
         def _run():
             try:
-                r = subprocess.run(
-                    [sys.executable, "-m", "onionpress.cli",
-                     "check-for-update", "--json"],
-                    capture_output=True, text=True, timeout=20,
-                    env={**os.environ, "PYTHONPATH": _LIB_DIR},
-                )
-                # ui_client.update_outcome reads the report (the Mac's
-                # Check for Updates reads the same one); with #525 this
-                # becomes Launcher.run_json("update", "--check", "--json").
-                outcome = ui_client.update_outcome(r.returncode, r.stdout, r.stderr)
+                # Through the launcher, as every tray action: the verb has
+                # no case of its own, so the launcher's default case hands
+                # it to onionpress.cli. ui_client.update_outcome reads the
+                # report (the Mac's Check for Updates reads the same one);
+                # with #525 this becomes `update --check --json`.
+                rc, _ans, out, err = Launcher.run_json("check-for-update", "--json")
+                outcome = ui_client.update_outcome(rc, out, err)
                 body = outcome.body
                 if outcome.kind == "available":
                     body = ("Run 'onionpress update' in a terminal to install it "

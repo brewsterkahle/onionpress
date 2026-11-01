@@ -373,6 +373,22 @@ class Daemon(PortAttributes):
             return None, None
         return r.returncode, (r.stdout or "").strip()
 
+    def run_cli(self, args, timeout=60):
+        """`onionpress --data-dir <data dir> <args>` in this interpreter
+        (derivatives.isolated_cli_argv, never `-m`): the returncode and
+        stdout (stripped), or (None, None) when it could not run. For a
+        subcommand that is the CLI's alone, with no launcher case."""
+        from .derivatives import isolated_cli_argv
+        try:
+            r = subprocess.run(
+                isolated_cli_argv("--data-dir", self.app_support, *args),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout, stdin=subprocess.DEVNULL, cwd=self.app_support)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(f"Error running onionpress {' '.join(args)}: {e}")
+            return None, None
+        return r.returncode, (r.stdout or "").strip()
+
     def _marker(self, name):
         return os.path.join(self.app_support, name)
 
@@ -1305,9 +1321,11 @@ class Daemon(PortAttributes):
 
     def _reconcile_archive_s3_keys(self):
         """Once per run when the site is up: archive.org keys for the
-        Wayback sweep (`onionpress ensure-archive-s3-keys`)."""
+        Wayback sweep (`onionpress ensure-archive-s3-keys`, the CLI's own
+        subcommand: no launcher case has it, and run through the launcher
+        it only ever answered usage and exit 1)."""
         try:
-            rc, out = self.run_launcher(["ensure-archive-s3-keys"], timeout=300)
+            rc, out = self.run_cli(["ensure-archive-s3-keys"], timeout=300)
             if rc is None:
                 return
             if rc != 0:

@@ -617,6 +617,39 @@ class TestSleepWake(_DaemonCase):
             self.assertEqual(f.read().strip(), str(self.d.port_offset))
 
 
+class TestCliOnlySubcommands(_DaemonCase):
+    """A subcommand with no launcher case (ensure-archive-s3-keys) is run
+    as the CLI's own, in this interpreter and isolated from the current
+    directory (derivatives.isolated_cli_argv), never through the launcher:
+    through the launcher it reached the Mac launcher's default case, which
+    answered usage and exit 1 on every run until 2026-10-31 (the launchers'
+    default case now delegates too, but the daemon does not depend on it)."""
+
+    def setUp(self):
+        super().setUp()
+        self.logged = []
+        self.d._log_func = self.logged.append
+
+    def test_the_archive_keys_reconcile_runs_the_cli(self):
+        from onionpress import derivatives
+        with mock.patch.object(op_daemon.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="archive.org keys: present\n")
+            self.d._reconcile_archive_s3_keys()
+        self.assertEqual(run.call_args.args[0],
+                         derivatives.isolated_cli_argv("--data-dir", self.dir, "ensure-archive-s3-keys"))
+        self.assertEqual(run.call_args.kwargs["cwd"], self.dir)
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(self.launcher_calls, [])
+        self.assertIn("archive.org keys: archive.org keys: present", "\n".join(self.logged))
+
+    def test_a_failed_reconcile_is_a_log_line(self):
+        with mock.patch.object(op_daemon.subprocess, "run", side_effect=OSError("no interpreter")):
+            self.d._reconcile_archive_s3_keys()
+        self.assertEqual(self.launcher_calls, [])
+        self.assertIn("Error running onionpress ensure-archive-s3-keys: no interpreter",
+                      "\n".join(self.logged))
+
+
 class TestStateFile(unittest.TestCase):
 
     def setUp(self):

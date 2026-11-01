@@ -287,8 +287,10 @@
 - Anything in WordPress can write the request files in
   `/var/lib/onionpress/`. Config changes go only through
   `config.apply_settings_updates` (`SETTINGS_PAGE_KEYS`, every value
-  checked; the rest dropped, logged by key name only).
-  `tests/test_settings_page_updates.py`.
+  checked; the rest dropped, logged by key name only), applied by
+  `handle_action.apply_config` on every `handle-action` run and by
+  `onionpress apply-config`, on both platforms (each launcher's case
+  delegates; no bash twin). `tests/test_settings_page_updates.py`.
 - **Never add to `SETTINGS_PAGE_KEYS`** image overrides,
   `ONIONHEAVEN_ADDRESS`, `ONIONHEAVEN_ACCEPT_REGISTRATIONS`,
   `ADDRESS_PREFIX`, ports, paths or secrets other than
@@ -469,6 +471,13 @@
   live in `src/onionpress/app_commands.py`, shared by both platforms, never
   constructing `OnionPressCLI`. The browser never gets the login token.
   `tests/test_cli_app_commands.py`.
+- **Each launcher's default case delegates to `onionpress.cli`**: a verb
+  with no case of its own (`ensure-archive-s3-keys`, `check-for-update`)
+  is the CLI's, and every verb the daemon, menubar, tray, `handle_action`,
+  `setup_logic` and `launcher_ops` run through a launcher is a case or a
+  subcommand. The daemon runs a CLI-only subcommand itself
+  (`Daemon.run_cli`). `tests/test_launcher_verbs_reach_the_cli.py`,
+  `TestTrayRunsOnlyLauncherVerbs` in `tests/test_launcher_dispatch_linux.py`.
 
 ## Check/Confirm Protocol
 - **Every destructive command speaks it** (`confirm.py`): `--check --json`

@@ -71,11 +71,13 @@ class TestLauncherWiring(unittest.TestCase):
                             "the token must not be blanked at top level")
         self.assertRegex(self.text, r"(?m)^read_cloudflare_token$")
 
-    def test_token_is_read_again_after_settings_updates(self):
-        """The page's Restart applies the update and starts in one process."""
-        body = _function(self.text, "apply_config_updates")
-        self.assertLess(body.index("config-updates.json 2>>"),
-                        body.index("read_cloudflare_token"))
+    def test_the_pages_settings_are_applied_in_their_own_process(self):
+        """The page's Restart is handle-action's `apply-config` then
+        `restart`, two launcher runs: the restart's top level reads the
+        token the apply just wrote. Nothing applies settings in-process."""
+        self.assertNotIn("apply_config_updates", self.text)
+        self.assertRegex(self.text, r'\n        apply-config\)\n(?:            #.*\n)*'
+                                    r'            op_py --data-dir "\$DATA_DIR" apply-config\n')
 
     def test_start_runs_the_tunnel_after_post_up(self):
         # start.post_up: Tor, the plugins, provisioning (tests/test_start_post_up.py).

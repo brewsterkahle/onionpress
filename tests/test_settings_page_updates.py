@@ -8,10 +8,8 @@ apply_config_updates) used to merge every key and value from it into
 ~/.onionpress/config: image overrides, the OnionHeaven hub address, values
 with newlines that add config lines. They now go through one allowlist,
 config.SETTINGS_PAGE_KEYS, with a check per value, and never log the
-Cloudflare Tunnel token.
-
-The Linux test runs the launcher's own function in bash with `docker`
-stubbed as a shell function, so no daemon is ever contacted.
+Cloudflare Tunnel token: handle_action.apply_config, on both platforms
+(`onionpress apply-config`, and every handle-action run).
 """
 
 import ast
@@ -460,86 +458,51 @@ class TestMacApplyConfig(unittest.TestCase):
         self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" apply-config', mac)
         handler = _read("src/onionpress/handle_action.py")
         self.assertIn('host.run_launcher(["apply-config"]', handler)
-        # and every Mac tick applies it itself (tests/test_handle_action.py)
-        self.assertIn('applied = apply_config(host) if host.os_name == "macos" else []', handler)
+        # and every handle-action run applies it itself, on both platforms
+        # (tests/test_handle_action.py)
+        self.assertIn("    applied = apply_config(host)\n", handler)
+        self.assertNotIn('if host.os_name == "macos" else []', handler)
 
 
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
-class TestLinuxApplyConfigUpdates(unittest.TestCase):
-    """Run linux/onionpress's apply_config_updates() against a stubbed
-    WordPress volume."""
-
-    STUBS = r"""
-docker() {
-    # `docker exec -u www-data onionpress-wordpress cat <file>` reads
-    # $OUT/<file>; `... rm -f <file>` removes it. Never as root: www-data
-    # writes that folder, and root's cat would follow a link planted there.
-    [ "$1 $2 $3 $4" = "exec -u www-data onionpress-wordpress" ] || return 1
-    case "$5" in
-        cat) cat "$OUT/${6##*/}" ;;
-        rm) rm -f "$OUT/${7##*/}" ;;
-        *) return 1 ;;
-    esac
-}
-systemctl() { echo "systemctl $*" >> "$OUT/calls"; }
-write_status() { echo write_status >> "$OUT/calls"; }
-read_cloudflare_token() { echo read_cloudflare_token >> "$OUT/calls"; }
-log() { echo "$1" >> "$LOG_FILE"; }
-"""
+class TestLinuxApplyConfig(unittest.TestCase):
+    """Linux's `onionpress apply-config` is the same handle_action.apply_config
+    (until 2026-10-31 the launcher's bash apply_config_updates, run from its
+    status loop every 30 s, with its own systemctl copy of the START_ON_BOOT
+    side effect): the allowlist, the tunnel token refused outright (#463;
+    on a Mac it waits for the person at the Mac), START_ON_BOOT re-applied
+    through config.apply_side_effects (whose Linux branch runs the user
+    units: tests/test_cli_config.py) even when unchanged."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="op-apply-config-")
-        self.data = os.path.join(self.tmp, "data")
-        self.out = os.path.join(self.tmp, "volume")
-        bin_dir = os.path.join(self.tmp, "bin")
-        for d in (self.data, self.out, bin_dir):
-            os.makedirs(d)
-        # The launcher runs `python3`; make that this interpreter, which can
-        # import the package (the system python3 may be too old for it).
-        os.symlink(sys.executable, os.path.join(bin_dir, "python3"))
-        with open(os.path.join(self.data, "config"), "w") as f:
+        import test_handle_action as tha
+        from onionpress import handle_action as ha
+        from onionpress.platform import resolve_paths
+        self.dir = tempfile.mkdtemp(prefix="op-apply-config-linux-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.config = os.path.join(self.dir, "config")
+        with open(self.config, "w") as f:
             f.write(CONFIG)
-        self.log_file = os.path.join(self.tmp, "onionpress.log")
-        self.env = {
-            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": self.tmp,
-            "DATA_DIR": self.data,
-            "LOG_FILE": self.log_file,
-            "ONIONPRESS_PYTHONPATH": SRC,
-            "OUT": self.out,
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
+        self.docker = tha.FakeDocker(os.path.join(self.dir, "sandbox"))
+        self.lines = []
+        self.host = ha.Host(launcher="/nonexistent/onionpress",
+                            paths=resolve_paths(data_dir=self.dir, app_bundle=""),
+                            docker=self.docker, log=self.lines.append, os_name="linux")
+        self.effects = []
+        p = mock.patch.object(op_config, "apply_side_effects",
+                              side_effect=lambda keys, *a, **k: self.effects.append(sorted(keys)) or [])
+        p.start()
+        self.addCleanup(p.stop)
+        self.ha = ha
 
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _function(self, text, name):
-        start = text.index(f"\n{name}() {{")
-        end = text.index("\n}\n", start)
-        return text[start:end] + "\n}\n"
-
-    def _run(self, payload, call="set -e\napply_config_updates\n"):
-        with open(os.path.join(self.out, "config-updates.json"), "w") as f:
-            f.write(payload)
-        launcher = _read("linux/onionpress")
-        script = (config_value_function() + self._function(launcher, "op_py")
-                  + self._function(launcher, "wp_exec")
-                  + self._function(launcher, "apply_config_updates")
-                  + self.STUBS + call)
-        return subprocess.run(["bash", "-c", script], env=self.env,
-                              capture_output=True, text=True, timeout=120)
-
-    def _read_out(self, name):
-        path = os.path.join(self.out, name)
-        if not os.path.exists(path):
-            return ""
-        with open(path) as f:
-            return f.read()
+    def _apply(self, payload):
+        self.docker.put("config-updates.json", payload)
+        with open(os.devnull, "w") as devnull:
+            return self.ha.apply_config(self.host, out=devnull)
 
     def test_hostile_payload(self):
-        result = self._run(json.dumps(dict(HOSTILE, START_ON_BOOT="yes")))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        config = op_config.read_config(os.path.join(self.data, "config"))
+        accepted = self._apply(json.dumps(dict(HOSTILE, START_ON_BOOT="yes")))
+        self.assertEqual(sorted(accepted), ["SHARE_ANALYTICS_WITH_ONIONHOME", "START_ON_BOOT"])
+        config = op_config.read_config(self.config)
         self.assertEqual(config["SHARE_ANALYTICS_WITH_ONIONHOME"], "no")
         self.assertEqual(config["START_ON_BOOT"], "yes")
         self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)  # refused on Linux (#463)
@@ -548,34 +511,39 @@ log() { echo "$1" >> "$LOG_FILE"; }
         for key in ("ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE",
                     "ONIONHEAVEN_ACCEPT_REGISTRATIONS", "VM_DISK", "PREVENT_SLEEP"):
             self.assertNotIn(key, config)
-        with open(os.path.join(self.data, "config")) as f:
+        with open(self.config) as f:
             raw = f.read()
         self.assertTrue(raw.startswith("# OnionPress config\n"), "comments dropped")
         self.assertNotIn("evil", raw)
-
-        log = self._read_out(self.log_file)
+        log = "\n".join(self.lines)
         self.assertNotIn(TOKEN, log)
         self.assertNotIn("evil", log)
         self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", log)
         self.assertRegex(log, r"ignored.*ONIONPRESS_TOR_IMAGE")
         self.assertRegex(log, r"ignored.*ONIONHEAVEN_ADDRESS")
-        self.assertIn("systemctl --user enable onionpress.service onionpress-heartbeat.service", self._read_out("calls"))
-        self.assertIn("write_status", self._read_out("calls"))
-        self.assertFalse(os.path.exists(os.path.join(self.out, "config-updates.json")))
+        self.assertEqual(self.effects, [["SHARE_ANALYTICS_WITH_ONIONHOME", "START_ON_BOOT"]])
+        self.assertIsNone(self.docker.get("config-updates.json"))
+        # Read and removed as www-data, whose folder it is.
+        for call in self.docker.calls:
+            self.assertEqual(call[:3], ["exec", "-u", "www-data"], call)
 
     def test_start_on_boot_is_reapplied_when_unchanged(self):
-        result = self._run(json.dumps({"START_ON_BOOT": "no"}))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("systemctl --user disable onionpress.service onionpress-heartbeat.service", self._read_out("calls"))
+        self.assertEqual(self._apply(json.dumps({"START_ON_BOOT": "no"})), ["START_ON_BOOT"])
+        self.assertEqual(self.effects, [["START_ON_BOOT"]])
 
-    def test_invalid_json_is_kept_and_nothing_written(self):
-        result = self._run('{"SHARE_ANALYTICS_WITH_ONIONHOME": "n',
-                           call="apply_config_updates || echo rc=$?\n")
-        self.assertIn("rc=1", result.stdout)
-        with open(os.path.join(self.data, "config")) as f:
+    def test_truncated_json_is_left_for_the_next_run(self):
+        self.assertIsNone(self._apply('{"SHARE_ANALYTICS_WITH_ONIONHOME": "n'))
+        self.assertEqual(self.docker.get("config-updates.json"), '{"SHARE_ANALYTICS_WITH_ONIONHOME": "n')
+        with open(self.config) as f:
             self.assertEqual(f.read(), CONFIG)
-        self.assertTrue(os.path.exists(os.path.join(self.out, "config-updates.json")))
-        self.assertEqual(self._read_out("calls"), "")
+        self.assertEqual(self.effects, [])
+
+    def test_the_launcher_delegates(self):
+        linux = _read("linux/onionpress")
+        self.assertRegex(linux, r'\n        apply-config\)\n(?:            #.*\n)*'
+                                r'            op_py --data-dir "\$DATA_DIR" apply-config\n')
+        self.assertNotIn("apply_config_updates", linux)
+        self.assertNotIn("systemctl --user enable onionpress.service", linux)
 
 
 class TestOldLogLinesAreScrubbed(unittest.TestCase):

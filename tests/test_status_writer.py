@@ -661,8 +661,9 @@ class TestWiring(unittest.TestCase):
         start = launcher.index("\nwrite_status() {")
         body = launcher[start:launcher.index("\n}\n", start)]
         self.assertTrue(body.endswith('\n    op_py --data-dir "$DATA_DIR" write-status 2>&1 | tee -a "$LOG_FILE"'), body)
-        self.assertIn("_IN_WRITE_STATUS=1 apply_config_updates", body)
-        self.assertNotIn("docker", body, "the bash is the delegation and the config guard")
+        self.assertNotIn("apply_config_updates", body, "the page's settings are handle-action's (#522)")
+        self.assertNotIn("docker", body, "the bash is the delegation")
+        self.assertEqual(len([ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]), 2)
         for gone in ("write_recent_logs", "linux-status", "sqlite3 /var/lib/onionheaven/registry.db",
                      "WEDGE WARNING", ".onionpress-health", "started_epoch", "wordpress-status",
                      "wordpress-logs", "reachability.json"):

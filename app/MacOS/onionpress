@@ -66,7 +66,6 @@ config_value() {
     printf '%s\n' "$value"
 }
 DOCUMENTS_DIR="$HOME/OnionPress"
-OLD_DOCUMENTS_DIR="$HOME/Documents/OnionPress"
 
 # DOCUMENTS_DIR lives at the top of $HOME (not under ~/Documents/) so the
 # Apple Virtualization framework can mount it into the Colima VM without
@@ -179,52 +178,6 @@ write_shared_onion_address() {
 # at creation, so an install made under a looser umask is fixed too.
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
-
-# One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
-# Walks the source tree recursively so an empty pre-existing subdir in
-# the destination (e.g. left over from a previous launcher pass) doesn't
-# block the mv. Marker is set only when the old dir is actually gone,
-# so a TCC-denied attempt retries on next launch. See issue #239.
-#
-# REMOVE-AFTER 2026-08-01: by then every active install will have
-# migrated. Delete this block, _op_migrate_tree, and OLD_DOCUMENTS_DIR.
-_op_migrate_tree() {
-    local src="$1" dst="$2"
-    [ -d "$src" ] || return 0
-    mkdir -p "$dst"
-    shopt -s dotglob nullglob 2>/dev/null || true
-    local entry base target
-    for entry in "$src"/*; do
-        [ -e "$entry" ] || continue
-        base=$(basename "$entry")
-        target="$dst/$base"
-        if [ -d "$entry" ] && [ -d "$target" ]; then
-            _op_migrate_tree "$entry" "$target"
-            rmdir "$entry" 2>/dev/null || true
-        else
-            mv -n "$entry" "$target" 2>/dev/null || true
-        fi
-    done
-}
-
-if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    if [ -d "$OLD_DOCUMENTS_DIR" ]; then
-        # Skip leftover breadcrumb from earlier attempts so it doesn't
-        # follow the user into the new dir.
-        rm -f "$OLD_DOCUMENTS_DIR/MOVED.txt" 2>/dev/null || true
-        _op_migrate_tree "$OLD_DOCUMENTS_DIR" "$DOCUMENTS_DIR"
-        rmdir "$OLD_DOCUMENTS_DIR" 2>/dev/null || true
-        if [ -d "$OLD_DOCUMENTS_DIR" ]; then
-            echo "OnionPress content moved to $DOCUMENTS_DIR" \
-                > "$OLD_DOCUMENTS_DIR/MOVED.txt" 2>/dev/null || true
-        else
-            printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-        fi
-    else
-        mkdir -p "$DOCUMENTS_DIR"
-        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-    fi
-fi
 
 # Idempotent subtree setup. No TCC concerns now that DOCUMENTS_DIR is at
 # the top of $HOME — call eagerly at startup.
@@ -476,27 +429,6 @@ using_local_images() {
 # mirror could swap for an image that reads the key. Each run overrides the
 # entrypoint and joins no network (tests/test_container_capabilities.py).
 KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
-
-# Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
-# volume migration and the first-run seed come before any pull. A missing
-# image is pulled by its pinned reference, never when the stack runs locally
-# built images. Returns 1 when it is not here and cannot be. Kept identical
-# in the macOS and Linux launchers; a test enforces that.
-ensure_key_helper_image() {
-    if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
-        return 0
-    fi
-    if using_local_images; then
-        log "ERROR: the locally built tor image $KEY_HELPER_IMAGE is not here (build it with build/build-images.sh)"
-        return 1
-    fi
-    log "Pulling $KEY_HELPER_IMAGE for the onion service key helpers..."
-    if ! docker pull "$KEY_HELPER_IMAGE" >> "$LOG_FILE" 2>&1; then
-        log "ERROR: could not pull $KEY_HELPER_IMAGE"
-        return 1
-    fi
-    docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
-}
 
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
@@ -1703,20 +1635,6 @@ get_status() {
     docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
 }
 
-# Function to get onion address (non-blocking, single attempt)
-get_onion_address() {
-    cd "$DOCKER_DIR"
-    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    # The whole value must be an onion address: callers cache it and put it
-    # into URLs. Anything else reads as not generated yet.
-    if is_onion_address "$ONION_ADDR"; then
-        echo "$ONION_ADDR"
-        return 0
-    fi
-    echo "Generating..."
-    return 1
-}
-
 # Function to get healthcheck onion address (non-blocking, single attempt)
 get_healthcheck_address() {
     cd "$DOCKER_DIR"
@@ -2707,8 +2625,11 @@ EOF
             ;;
 
         *)
-            echo "Usage: $0 <command> [args]   (run '$0 help' for the full list)" >&2
-            exit 1
+            # Every other verb is onionpress.cli's: a subcommand with no
+            # case of its own reaches it here (ensure-archive-s3-keys,
+            # check-for-update, ...), and one the CLI does not have either
+            # gets the CLI's usage and exit status.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$@"
             ;;
     esac
 }
