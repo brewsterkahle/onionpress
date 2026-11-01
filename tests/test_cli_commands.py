@@ -1371,9 +1371,13 @@ class TestSettingsPageBackup(Sandbox):
 
 
 class TestSettingsPageRestore(Sandbox):
+    """The Mac's: the address-change question and the hub release. Linux
+    refuses the change and pauses the heartbeat unit instead
+    (tests/test_settings_page_onion_key.py), so the OS is pinned here."""
 
     def _restore(self, confirmed=frozenset(), json_output=True):
-        return cli.cmd_settings_page_restore("/up.zip", "pw", self.dir, json_output, confirmed)
+        with mock.patch("onionpress.cli.detect_os", return_value=cli.OS.MACOS):
+            return cli.cmd_settings_page_restore("/up.zip", "pw", self.dir, json_output, confirmed)
 
     def test_the_hubs_are_asked_before_the_key_changes_and_a_refusal_is_logged(self):
         seen = {}
