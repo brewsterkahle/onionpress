@@ -131,7 +131,8 @@ def dumps(doc):
 def last_json_line(text):
     """The JSON object the last line(s) of *text* hold, or None: one line
     `{...}`, or an indented object ending the text (`json.dumps(indent=2)`,
-    as check-for-update prints)."""
+    as check-for-update prints; a `{` line inside it, a nested object in
+    a list, is passed over for the one that parses)."""
     lines = (text or "").splitlines()
     while lines and not lines[-1].strip():
         lines.pop()
@@ -140,7 +141,7 @@ def last_json_line(text):
             try:
                 doc = json.loads("\n".join(lines[start:]))
             except ValueError:
-                return None
+                continue
             return doc if isinstance(doc, dict) else None
         if start == len(lines) - 1 and not lines[start].strip().startswith("}"):
             return None

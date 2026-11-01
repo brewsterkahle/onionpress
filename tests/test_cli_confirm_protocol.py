@@ -90,30 +90,43 @@ class TestConfirmModule(unittest.TestCase):
         self.assertIsNone(confirm.last_json_line("nothing"))
         self.assertIsNone(confirm.last_json_line('{"a": 1}\nthen text'))
         self.assertIsNone(confirm.last_json_line("[1, 2]"))
+        # An indented dump with objects nested in a list (check-for-update's
+        # other_instances): the `{` that parses is the outer one.
+        self.assertEqual(confirm.last_json_line('x\n{\n  "a": [\n    {\n      "b": 1\n    }\n  ]\n}\n'),
+                         {"a": [{"b": 1}]})
 
-    def test_every_question_has_a_dialog_in_the_menubar(self):
-        menubar = _read("src/menubar.py")
-        asked = menubar[menubar.index("def _ask_cli_question("):menubar.index("def _ask_to_replace_address(")]
+    def test_every_question_has_one_wording_for_both_uis(self):
+        """ui_client.question_text words each question once (#526); the
+        menubar's _ask_cli_question and the tray's _ask_question render
+        it, Cancel the default (tests/test_ui_client.py runs them)."""
+        from onionpress import ui_client
+        ui_src = _read("src/onionpress/ui_client.py")
+        worded = ui_src[ui_src.index("def question_text("):ui_src.index("def typed_confirmation(")]
         for what in confirm.QUESTIONS:
             with self.subTest(what=what):
                 if what == "sealed-hub-data-left-out":
-                    # Its dialog takes the key too: _ask_hub_recovery_key
-                    self.assertIn('"sealed-hub-data-left-out"', menubar)
+                    self.assertIn("if what == SEALED_HUB_DATA_QUESTION:", worded)
                 else:
-                    self.assertIn(f'what == "{what}"', asked)
-        # Cancel is the default in every dialog (tests/test_menubar_actions.py
-        # runs them)
+                    self.assertIn(f'if what == "{what}":', worded)
+                self.assertIsNotNone(ui_client.question_text(what, {}))
+        menubar = _read("src/menubar.py")
+        asked = menubar[menubar.index("def _ask_cli_question("):menubar.index("def _ask_settings_page_question(")]
+        self.assertIn("ui_client.question_text(what, facts, action)", asked)
         self.assertNotIn("default_button=1", asked)
-
-    def test_the_tray_asks_the_restore_question(self):
-        """The Linux tray's Restore... (issue #375) meets one question,
-        "sealed-hub-data-left-out" (plan_restore, tests/test_linux_tray_protocol.py);
-        any other it cancels and says so."""
         tray = _read("linux/onionpress-tray")
-        self.assertIn('SEALED_HUB_DATA_QUESTION = "sealed-hub-data-left-out"', tray)
-        flow = tray[tray.index("def plan_restore("):tray.index("# ─── 4. Notifier")]
+        asked = tray[tray.index("def _ask_question("):tray.index("class _GtkRestoreUI")]
+        self.assertIn("ui_client.question_text(what, facts, action)", asked)
+        self.assertIn("dlg.set_default_response(Gtk.ResponseType.CANCEL)", asked)
+
+    def test_the_restore_flow_asks_every_question(self):
+        """ui_client.plan_restore (issue #375, both UIs) meets
+        "sealed-hub-data-left-out" with a recovery-key dialog; any other
+        question goes to the UI's ask_question (tests/test_ui_client.py)."""
+        src = _read("src/onionpress/ui_client.py")
+        self.assertIn('SEALED_HUB_DATA_QUESTION = "sealed-hub-data-left-out"', src)
+        flow = src[src.index("def plan_restore("):src.index("def run_restore(")]
         self.assertIn("if question == SEALED_HUB_DATA_QUESTION:", flow)
-        self.assertIn("elif question:", flow)
+        self.assertIn('elif ui.ask_question(question, answer, action="Restore"):', flow)
         self.assertIn("ui.ask_recovery_key(facts, problem)", flow)
 
     def test_the_parser_refuses_an_unknown_question(self):

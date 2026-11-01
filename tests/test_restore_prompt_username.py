@@ -55,19 +55,27 @@ class TestBackupFilenameUsername(unittest.TestCase):
 
 
 class TestMenubarRestorePrompt(unittest.TestCase):
-    """src/menubar.py's Restore... (AppKit, so checked as source)."""
+    """The restore flow (ui_client.plan_restore, #526) and the menubar's
+    password dialog (_MacRestoreUI, AppKit, so checked as source)."""
 
     def setUp(self):
+        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "ui_client.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.flow = src[src.index("def plan_restore("):src.index("def run_restore(")]
         with open(os.path.join(PROJECT_ROOT, "src", "menubar.py"), encoding="utf-8") as f:
             src = f.read()
-        start = src.index("    def restore(self, _):")
-        self.body = src[start:src.index("\n    @rumps.clicked", start + 1)]
+        start = src.index("class _MacRestoreUI")
+        self.body = src[start:src.index("class OnionPressApp", start)]
+        start = self.body.index("    def ask_password(self, backup_user):")
+        self.body = self.body[start:self.body.index("\n    def ", start + 1)]
 
     def test_uses_the_checked_parser(self):
         # The CLI answers `restore --check --json` without a password with
         # {"ask": "password", "backup_user": ...} from the checked parser.
         self.assertIn('backup_user = (ans or {}).get("backup_user") if (ans or {}).get("ask") == "password" else None',
-                      self.body)
+                      self.flow)
+        self.assertIn("password = ui.ask_password(backup_user)", self.flow)
+        self.assertNotIn(".split(\"-\")", self.flow)
         self.assertNotIn(".split(\"-\")", self.body)
         with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "cli.py"), encoding="utf-8") as f:
             cli_src = f.read()

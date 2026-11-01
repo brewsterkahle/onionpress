@@ -878,18 +878,22 @@ class TestMenubarRestoreDialog(unittest.TestCase):
         # (cli.cmd_restore_check), which sanitizes them.
         cli_src = _read("src/onionpress/cli.py")
         check = cli_src[cli_src.index("    def cmd_restore_check("):cli_src.index("    def cmd_restore(")]
+        # The dialog's text is ui_client.restore_facts_text's (#526).
+        ui_src = _read("src/onionpress/ui_client.py")
+        text = ui_src[ui_src.index("def restore_facts_text("):ui_src.index("def plan_restore(")]
         for field in ("backup_date", "username", "onionpress_version"):
             self.assertIn(f'metadata_text(metadata, "{field}")', check)
-            self.assertIn(f"facts.get('{field}')", self.body)
-        self.assertIn('["restore", zip_path, "--check", "--json"]', self.body)
+            self.assertIn(f"facts.get('{field}')", text)
+        self.assertIn('launcher.run_json("restore", backup_path, "--check", "--json"', ui_src)
+        self.assertIn("ui_client.plan_restore(self.launcher, zip_path, _MacRestoreUI(self)", self.body)
 
     def test_a_failed_launcher_restore_is_reported_as_a_failure(self):
         # run_launcher_restore's message starts "Restore failed" and says
         # why (tests/test_restore_failure_details.py).
-        failed = self.body[self.body.index("if not ok:"):]
+        failed = self.body[self.body.index("if not result.ok:"):]
         failed = failed[:failed.index("return\n") + 7]
         self.assertIn('title="Restore Failed"', failed)
-        self.assertIn("pw.finish(failure,", failed)
+        self.assertIn("pw.finish(result.failure,", failed)
 
     def test_the_restored_address_is_not_taken_from_metadata(self):
         self.assertNotIn("metadata.get('onion_address', addr)", self.body)

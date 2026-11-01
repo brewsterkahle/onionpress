@@ -78,8 +78,11 @@ class TestHandlerSettingsRestore(unittest.TestCase):
         src = mv._read("src/menubar.py")
         start = src.index("    def do_restore():")
         body = src[start:src.index("threading.Thread(target=do_restore", start)]
+        self.assertIn("ui_client.run_restore(", body)
+        src = mv._read("src/onionpress/ui_client.py")
+        body = src[src.index("def run_restore("):src.index("def restore_summary(")]
         call = body[body.index("launcher_ops.run_launcher_restore("):]
-        self.assertIn("timeout=None)", call[:call.index("if not ok:")])
+        self.assertIn("timeout=None)", call[:call.index("return RestoreResult")])
 
     def test_the_copy_is_sized_and_checked(self):
         self.assertNotIn("timeout=60\n", self.body)

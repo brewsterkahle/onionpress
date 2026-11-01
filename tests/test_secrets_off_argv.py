@@ -494,9 +494,9 @@ class TestConfigSetTokenOnStdin(unittest.TestCase):
             src = f.read()
         node = next(n for n in ast.walk(ast.parse(src))
                     if isinstance(n, ast.FunctionDef) and n.name == "write_config_value")
-        from onionpress import confirm as op_confirm
+        from onionpress import ui_client
         ns = {"os": os, "subprocess": subprocess, "op_config": op_config,
-              "op_confirm": op_confirm}
+              "ui_client": ui_client}
         exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
         app = mock.Mock()
         app.config_file = os.path.join(self.tmpdir, "config")
@@ -505,6 +505,8 @@ class TestConfigSetTokenOnStdin(unittest.TestCase):
         app.launcher_script = "/Applications/OnionPress.app/Contents/MacOS/onionpress"
         app.lines = []
         app.log = app.lines.append
+        # The launcher client the menubar runs the command through (#526)
+        app.launcher = ui_client.Launcher(app.launcher_script, app.log)
         rec = _Recorder()
         with mock.patch("subprocess.run", rec):
             self.assertTrue(ns["write_config_value"](app, "CLOUDFLARE_TUNNEL_TOKEN", self.TOKEN))

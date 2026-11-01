@@ -113,7 +113,8 @@ class TestLicenseDeclarations(unittest.TestCase):
         self.assertIn(f"license='{SPDX}'", setup)
 
     def test_about_boxes_say_or_later(self):
-        self.assertIn('License: AGPL v3 or later"""', _read("src/menubar.py"))
+        self.assertIn('ABOUT_LICENSE = "License: AGPL v3 or later"', _read("src/onionpress/ui_client.py"))
+        self.assertIn('ui_client.about_text(self.version, "your Mac")', _read("src/menubar.py"))
         # GTK's AGPL_3_0 is "version 3 or later"; AGPL_3_0_ONLY is the other.
         self.assertIn("dlg.set_license_type(Gtk.License.AGPL_3_0)", _read("linux/onionpress-tray"))
 

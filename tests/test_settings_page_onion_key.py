@@ -377,7 +377,7 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         self.assertLess(check, body.index("self.restore_mode = True"))
         # The facts come from `onionpress prepare-restore --check --json`
         # (issue #475), which reads the backup with peek_backup_metadata.
-        self.assertIn('["prepare-restore", zip_path, "--check", "--json"]',
+        self.assertIn('"prepare-restore", zip_path, "--check", "--json", password=password',
                       mv._read("src/menubar.py"))
         cli_src = mv._read("src/onionpress/cli.py")
         body = cli_src[cli_src.index("def cmd_prepare_restore_check"):]
@@ -389,9 +389,15 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         src = mv._read("src/menubar.py")
         body = src[src.index("    def restore(self, _):"):]
         body = body[:body.index("\n    @rumps.clicked", 1)]
-        # The facts come from `onionpress restore --check --json`.
-        self.assertIn("facts.get('excludes_onion_key') is True", body)
-        self.assertIn("keeps its onion address", body)
+        self.assertIn("_MacRestoreUI(self)", body)
+        self.assertIn("ui_client.restore_facts_text(facts)",
+                      src[src.index("class _MacRestoreUI"):src.index("class OnionPressApp")])
+        # The facts come from `onionpress restore --check --json`; the
+        # text is ui_client's (both UIs).
+        text = mv._read("src/onionpress/ui_client.py")
+        text = text[text.index("def restore_facts_text("):text.index("def plan_restore(")]
+        self.assertIn('facts.get("excludes_onion_key") is True', text)
+        self.assertIn("keeps its onion address", text)
         cli_src = mv._read("src/onionpress/cli.py")
         self.assertIn('"excludes_onion_key": metadata.get("excludes_onion_key") is True', cli_src)
 
@@ -592,8 +598,9 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         """`onionpress handle-action` stops at {"confirm": "address-change"}
         for a restore of another address; the menubar's
         _ask_settings_page_question asks in a native dialog."""
-        ns = {}
-        exec(textwrap.dedent(_menubar_method("_ask_to_replace_address")), ns)
+        from onionpress import ui_client
+        ns = {"ui_client": ui_client, "rumps": mock.Mock()}
+        exec(textwrap.dedent(_menubar_method("_ask_cli_question")), ns)
         exec(textwrap.dedent(_menubar_method("_ask_settings_page_question")), ns)
         question = {"confirm": "address-change", "current": OLD_ADDR, "new": ADDR,
                     "action": "restore-backup", "handled": "restore-backup"}
@@ -601,10 +608,9 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
             with self.subTest(answer=answer):
                 app = types.SimpleNamespace(
                     log=mock.Mock(), show_native_alert=mock.Mock(return_value=answer))
-                app._ask_to_replace_address = types.MethodType(
-                    ns["_ask_to_replace_address"], app)
+                app._ask_cli_question = types.MethodType(ns["_ask_cli_question"], app)
                 self.assertIs(ns["_ask_settings_page_question"](app, question), want)
-                title, message = app.show_native_alert.call_args.args[:2]
+                message = app.show_native_alert.call_args.kwargs["message"]
                 self.assertIn(OLD_ADDR, message)
                 self.assertIn(ADDR, message)
                 self.assertIn("restore a backup of another onion address", message)

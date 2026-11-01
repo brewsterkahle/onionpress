@@ -42,7 +42,7 @@ def _read(rel):
 
 def _methods(src):
     tree = ast.parse(src)
-    cls = [n for n in tree.body if isinstance(n, ast.ClassDef)][0]
+    cls = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OnionPressApp"][0]
     return {n.name: ast.get_source_segment(src, n)
             for n in cls.body if isinstance(n, ast.FunctionDef)}
 
@@ -1045,13 +1045,13 @@ class TestMenubarIsAView(unittest.TestCase):
 
     def test_the_menubar_starts_the_daemon_when_there_is_none(self):
         body = self.methods["ensure_daemon_running"]
-        self.assertIn('[self.launcher_script, "daemon", "start"]', body)
+        self.assertIn('self.launcher.run("daemon", "start"', body)
         self.assertIn("op_daemon.daemon_pid(self.app_support)", body)
         self.assertIn("op_daemon.agent_loaded_pid(self.app_support)", body)
 
     def test_quit_goes_through_the_launcher(self):
         body = self.methods["_perform_quit_cleanup"]
-        self.assertIn('[self.launcher_script, "quit", "--leave-menubar"]', body)
+        self.assertIn('self.launcher.run("quit", "--leave-menubar"', body)
         self.assertIn('"--no-offline"', body)
         self.assertIn("QUIT_KEEPS_SITE_RUNNING", self.methods["_quit_keeps_site_running"])
         self.assertNotIn("colima_bin", body)
