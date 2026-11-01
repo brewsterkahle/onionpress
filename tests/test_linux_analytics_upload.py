@@ -113,7 +113,7 @@ class TestDaemonImportPath(unittest.TestCase):
 
     def test_main_starts_analytics_before_hub_self_check(self):
         src = _read("linux/onionpress-heartbeat.py")
-        main_body = src[src.index("\ndef main():"):src.index("\ndef _cached_content_address")]
+        main_body = src[src.index("\ndef main():"):src.index('\nif __name__ == "__main__":')]
         start = main_body.index("_start_analytics_sharing(_content_addr, _hc_addr)")
         hub_check = main_body.index("This node IS the OnionHeaven hub")
         self.assertLess(

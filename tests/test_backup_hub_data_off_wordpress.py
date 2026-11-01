@@ -383,12 +383,14 @@ class TestCreateBackup(unittest.TestCase):
         self.assertIn("include_hub_data=True", body)
         self.assertIn("notes.extend(unchecked_notes(metadata))", body)
         self.assertIn("notes=notes)", body)
-        text = mv._read("src/menubar.py")
-        run = text.index('["backup", "--json", "-o", output_path, "--user", username]')
-        body = text[run:text.index("threading.Thread(target=do_backup", run)]
-        notes = body.index('for note in ans.get("notes") or []:')
-        self.assertLess(notes, body.index("pw.finish(\n                msg,"))
+        text = mv._read("src/onionpress/ui_client.py")
+        body = text[text.index("def backup_done_message("):text.index("class RestoreUI")]
+        notes = body.index('for note in answer.get("notes") or []:')
         self.assertIn('msg += "\\n\\n" + note', body[notes:])
+        self.assertIn("BackupResult(True, backup_done_message(ans, plan), ans)", body)
+        menubar = mv._read("src/menubar.py")
+        run = menubar.index("ui_client.run_backup(self.launcher, plan")
+        self.assertIn("result.message", menubar[run:menubar.index("threading.Thread(target=do_backup", run)])
 
     def test_unchecked_notes(self):
         notes = backup.unchecked_notes
@@ -487,7 +489,10 @@ class TestEveryWordPressDeliveredBackupLeavesItOut(unittest.TestCase):
 
     def test_the_tray_and_scrub_go_through_the_launchers_backup(self):
         """They write to ~/OnionPress/backups, never to WordPress."""
-        self.assertIn('Launcher.run("backup"', mv._read("linux/onionpress-tray"))
+        self.assertIn('ui_client.run_backup(Launcher, plan', mv._read("linux/onionpress-tray"))
+        self.assertIn('launcher.run_json("backup", "--check", "--json"', mv._read("src/onionpress/ui_client.py"))
+        self.assertIn('args = ["backup", "--json", *(["-o", output] if output else []), *user_args]',
+                      mv._read("src/onionpress/ui_client.py"))
         self.assertIn('[LAUNCHER_BIN, "backup", "--output"', mv._read("src/onionpress/scrub.py"))
 
 

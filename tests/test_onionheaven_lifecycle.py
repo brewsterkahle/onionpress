@@ -507,7 +507,7 @@ class TestMaintain(_MacCase):
         self.assertLess(uninstall.index('"hub-holds-key", confirmed'),
                         uninstall.index('"uninstall", confirmed'))
         proceed = menubar[menubar.index("def _proceed_with_uninstall(self):"):]
-        self.assertLess(proceed.index('["uninstall", "--check", "--json", *flags]'),
+        self.assertLess(proceed.index('["uninstall", "--check", "--json"], self._ask_cli_question'),
                         proceed.index("def do_uninstall():"))
         # The Settings page's restore releases before the key is replaced
         # (the CLI's settings-page-restore).

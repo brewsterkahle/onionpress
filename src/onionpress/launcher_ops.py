@@ -215,28 +215,30 @@ def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
         raise RuntimeError(f"failed to launch browser ({cmd[0]}): {e}") from e
 
 
-def tor_image_has_mkp224o(image: str = DEFAULT_TOR_IMAGE) -> bool:
+def tor_image_has_mkp224o(image: str = DEFAULT_TOR_IMAGE, docker=None) -> bool:
     """Return True iff the tor container image is pulled AND contains mkp224o.
 
     Verifies via a `docker run --rm --entrypoint test` probe so we don't
     fall through to attempting vanity generation on an older image that
-    predates the mkp224o build stage.
+    predates the mkp224o build stage. Through *docker* (an
+    onionpress.docker.Docker: the status writer's, a test's fake) when
+    given, else `docker` from PATH.
     """
-    inspect = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True, timeout=15,
-    )
-    if inspect.returncode != 0:
+    def returncode(args, timeout):
+        if docker is not None:
+            return docker.run(args, timeout=timeout, quiet=True).returncode
+        return subprocess.run(["docker", *args], capture_output=True,
+                              timeout=timeout).returncode
+
+    if returncode(["image", "inspect", image], 15) != 0:
         return False
     # A file test needs no capability, and no network.
-    probe = subprocess.run(
-        ["docker", "run", "--rm", "--network", "none",
+    return returncode(
+        ["run", "--rm", "--network", "none",
          "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
          "--entrypoint", "test", image,
          "-x", "/usr/local/bin/mkp224o"],
-        capture_output=True, timeout=30,
-    )
-    return probe.returncode == 0
+        30) == 0
 
 
 def generate_vanity_in_container(

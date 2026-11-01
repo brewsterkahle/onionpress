@@ -64,7 +64,7 @@ class TestNoImageRefresh(unittest.TestCase):
         menubar = _read("src/menubar.py")
         body = menubar[menubar.index("    def check_for_updates(self, _):"):]
         body = body[:body.index("\n    def ", 10)]
-        self.assertIn('["update", "--check", "--json"]', body)
+        self.assertIn('run_json("update", "--check", "--json"', body)
         self.assertNotRegex(body, r"(?i)container images|docker")
 
     def test_the_start_pulls_what_is_missing_only(self):

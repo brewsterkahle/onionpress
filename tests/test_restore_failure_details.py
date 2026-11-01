@@ -136,8 +136,12 @@ class TestMenubarRestoreUsesIt(unittest.TestCase):
         self.body = src[start:src.index("threading.Thread(target=do_restore", start)]
 
     def test_failure_dialog_shows_the_details(self):
-        self.assertIn("launcher_ops.run_launcher_restore(", self.body)
-        self.assertIn('pw.finish(failure,', self.body)
+        self.assertIn("ui_client.run_restore(", self.body)
+        self.assertIn('pw.finish(result.failure,', self.body)
+        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "ui_client.py"), encoding="utf-8") as f:
+            ui_src = f.read()
+        self.assertIn("launcher_ops.run_launcher_restore(",
+                      ui_src[ui_src.index("def run_restore("):ui_src.index("def restore_summary(")])
         self.assertNotIn("Check the log for details", self.body)
         self.assertIsNone(re.search(r"subprocess\.run\(\s*\[self\.launcher_script, \"restore\"",
                                     self.body))

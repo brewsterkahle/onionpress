@@ -1433,8 +1433,7 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     )
 
     def test_launchers_carry_the_same_docker_helpers(self):
-        for name in ("docker_volume_state", "wait_for_docker",
-                     "ensure_key_helper_image"):
+        for name in ("docker_volume_state", "wait_for_docker"):
             bodies = [self._function_body(_read(f), name) for f in self.LAUNCHERS]
             with self.subTest(function=name):
                 self.assertEqual(
@@ -1950,7 +1949,9 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
         text = _read(self.MENUBAR)
         self.assertNotIn('subprocess.run([self.launcher_script, "start"])\n', text,
                          "start_service must not discard the launcher's return code")
-        self.assertIn('rc = subprocess.run([self.launcher_script, "start"], stdin=subprocess.DEVNULL).returncode', text)
+        self.assertIn('rc = self.launcher.wait("start")', text)
+        self.assertIn("return self.run(*args, capture=False, timeout=timeout).returncode",
+                      _read("src/onionpress/ui_client.py"))
         self.assertIn('"Status: Start failed — see View Logs"', text)
 
 
@@ -1968,7 +1969,7 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
                  "config_value",
-                 "using_local_images", "ensure_key_helper_image",
+                 "using_local_images",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
     # Without a limactl on PATH they report the VM as not Running, so the

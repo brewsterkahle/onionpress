@@ -18,11 +18,14 @@
 
 """OnionPress tray app for Ubuntu / Linux desktops.
 
-A thin presentation layer around the bash launcher + shared Python ops
-(src/onionpress/launcher_ops.py). Polls ~/.onionpress/status.json every
-2 seconds and reflects state via the AppIndicator. State changes are
-invoked through `/usr/local/bin/onionpress <subcommand>` so the
-headless / SSH-only path remains the single source of truth.
+A thin presentation layer around the bash launcher: the widgets only.
+Polls the daemon's state file (~/.onionpress/daemon-state.json, written
+by `onionpress write-status` until the daemon runs on Linux, #407; read
+through onionpress.daemon_client as the Mac menubar reads it) every 2
+seconds and reflects state via the AppIndicator. Every action is `/opt/onionpress/onionpress <subcommand>`
+run through the UIs' shared client (src/onionpress/ui_client.py, issue
+#526: the Mac menubar runs the same code), so the headless / SSH-only
+path remains the single source of truth.
 
 The file deliberately stays one module — at ~700 lines it's easier to
 audit and ship than a sprawling package. Split if it grows past 1000.
@@ -39,15 +42,13 @@ if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
     sys.exit(0)
 
 import fcntl
-import json
 import logging
 import logging.handlers
-import re
 import signal
 import subprocess
 import threading
 import time
-from typing import NamedTuple, Optional
+from typing import Optional
 
 # Ensure the shared `onionpress` package is importable. The .deb installs
 # it at /opt/onionpress/lib/onionpress/; let callers override via PYTHONPATH.
@@ -62,26 +63,21 @@ gi.require_version("AyatanaAppIndicator3", "0.1")
 gi.require_version("Notify", "0.7")
 from gi.repository import Gtk, GLib, AyatanaAppIndicator3 as AppIndicator, Notify, Gdk  # noqa: E402
 
-try:
-    from onionpress import launcher_ops  # type: ignore
-except ImportError:
-    launcher_ops = None  # tray still runs; some features degrade gracefully
-
-try:
-    from onionpress import setup_logic as _setup_logic  # type: ignore
-except ImportError:
-    _setup_logic = None
-
-try:
-    from onionpress import confirm as _confirm  # type: ignore
-except ImportError:
-    _confirm = None
+# The .deb installs the package beside this script (linux/install-tree.sh):
+# a tray without it is a broken install, not a degraded mode.
+from onionpress import config as _op_config  # noqa: E402
+from onionpress import daemon_client  # noqa: E402
+from onionpress import launcher_ops  # noqa: E402
+from onionpress import setup_logic as _setup_logic  # noqa: E402
+from onionpress import ui_client  # noqa: E402
 
 
 # ─── Constants ──────────────────────────────────────────────────────────
 
 DATA_DIR = os.path.expanduser("~/.onionpress")
-STATUS_FILE = os.path.join(DATA_DIR, "status.json")
+# The daemon's state file (one status writer for both platforms, #523):
+# its "status" is status.json's content, the fields read below.
+STATE_FILE = daemon_client.state_path(DATA_DIR)
 PIDFILE = os.path.join(DATA_DIR, "tray.pid")
 TRAY_LOG = os.path.join(DATA_DIR, "tray.log")
 ASSETS_DIR = os.path.join(INSTALL_DIR, "assets")
@@ -115,6 +111,10 @@ APP_ICON_PATH = os.path.join(INSTALL_DIR, "app-icon.png")
 
 POLL_INTERVAL_SEC = 2
 NOTIFY_DEBOUNCE_SEC = 60
+# status.json's `state` is the daemon's display state (daemon_client):
+# "running", "stopped", or one of these, the containers up but the site
+# not reachable yet (or no longer).
+STARTING_STATES = ("starting", "stuck", "offline")
 
 
 
@@ -155,11 +155,19 @@ def acquire_single_instance_lock() -> Optional[int]:
     return fd
 
 
-# ─── 2. Status reader (host-side status.json poller) ────────────────────
+# ─── 2. Status reader (the daemon's state file, polled) ─────────────────
+
+def _read_status() -> Optional[dict]:
+    """status.json's content from the daemon's state file, or None."""
+    state = daemon_client.read_state(DATA_DIR)
+    status = state.get("status") if state else None
+    return status if isinstance(status, dict) else None
+
 
 class Status:
-    """Owns the latest status.json snapshot. Polls every POLL_INTERVAL_SEC
-    seconds via GLib so callbacks fire on the GTK main thread.
+    """Owns the latest status snapshot (the daemon's state file's
+    "status"). Polls every POLL_INTERVAL_SEC seconds via GLib so
+    callbacks fire on the GTK main thread.
     """
 
     def __init__(self, on_change):
@@ -172,7 +180,6 @@ class Status:
         self.bootstrap_pct = 0
         self.uptime_seconds = 0
         self.containers = {}
-        self.error_message = None
         self.wp_port = 8080
         self.raw = {}
         self._mtime = 0.0
@@ -181,18 +188,16 @@ class Status:
 
     def _poll(self) -> bool:
         try:
-            mtime = os.path.getmtime(STATUS_FILE)
+            mtime = os.path.getmtime(STATE_FILE)
         except OSError:
             return True
         if mtime == self._mtime:
             return True
         self._mtime = mtime
 
-        try:
-            with open(STATUS_FILE) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log(f"status.json read failed: {e}")
+        data = _read_status()
+        if data is None:
+            log("the daemon's state file holds no status")
             return True
 
         old = (self.state, self.wp_installed, self.onboarded,
@@ -207,7 +212,6 @@ class Status:
         self.bootstrap_pct = int(data.get("bootstrap_pct", 0))
         self.uptime_seconds = int(data.get("uptime_seconds", 0))
         self.containers = dict(data.get("containers", {}))
-        self.error_message = data.get("error_message")
         # wp_port reflects the launcher's port-offset detection so the
         # tray opens the right localhost URL on multi-user / port-conflict
         # installs (e.g. system tor on 9050 pushes WP to 18080).
@@ -226,266 +230,27 @@ class Status:
         return True
 
 
-# ─── 3. Launcher wrapper ────────────────────────────────────────────────
-
-# The launcher reads a backup password from this variable (see
-# launcher_ops.BACKUP_PASSWORD_ENV). Argv would put it in every local
-# user's `ps` and in tray.log; the environment is readable by us only.
-BACKUP_PASSWORD_ENV = "ONIONPRESS_BACKUP_PASSWORD"
-# And an OnionHeaven hub's backup recovery key, for a restore of its
-# sealed registry and registrants' keys (launcher_ops.HUB_RECOVERY_KEY_ENV).
-HUB_RECOVERY_KEY_ENV = "ONIONPRESS_HUB_RECOVERY_KEY"
-
-# Launcher subcommands whose arguments can carry a secret (the old
-# `backup <password>` / `restore <password> <zip>` forms, setup --pass,
-# import-key). tray.log gets their name only.
-_UNLOGGED_ARGS = frozenset({"backup", "restore", "setup", "scrub", "import-key"})
-
-
-def _loggable(cmd: list) -> str:
-    """The launcher command line as tray.log may show it."""
-    if len(cmd) > 2 and cmd[1] in _UNLOGGED_ARGS:
-        return f"{cmd[0]} {cmd[1]} <{len(cmd) - 2} args not logged>"
-    return " ".join(cmd)
-
-
-class Launcher:
-    """Subprocess wrapper around `/usr/local/bin/onionpress`."""
-
-    @staticmethod
-    def run(*args, capture: bool = False, timeout: Optional[int] = 60,
-            password: Optional[str] = None,
-            extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
-        """password: handed to `backup`/`restore` in the environment, as is
-        *extra_env* (a hub's recovery key). timeout=None waits for the
-        launcher however long it takes. The launcher gets no terminal:
-        stdin is /dev/null, so a command that would read a password there
-        answers {"ask": "password"} (onionpress.confirm) instead of waiting."""
-        cmd = [LAUNCHER, *args]
-        log(f"launcher: {_loggable(cmd)}")
-        env = None
-        if password is not None or extra_env:
-            env = {**os.environ, **(extra_env or {})}
-            if password is not None:
-                env[BACKUP_PASSWORD_ENV] = password
-        try:
-            return subprocess.run(
-                cmd, capture_output=capture, text=True, timeout=timeout,
-                env=env, stdin=subprocess.DEVNULL,
-            )
-        except subprocess.TimeoutExpired:
-            # str(TimeoutExpired) is the whole argv.
-            log(f"launcher timed out after {timeout}s: {_loggable(cmd)}")
-            raise
-        except FileNotFoundError as e:
-            log(f"launcher failed: {e}")
-            raise
-
-    @staticmethod
-    def run_async(*args) -> None:
-        """Fire and forget — used for actions where we don't wait."""
-        cmd = [LAUNCHER, *args]
-        log(f"launcher (async): {_loggable(cmd)}")
-        try:
-            subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except (OSError, FileNotFoundError) as e:
-            log(f"launcher async failed: {e}")
-
-
-class UpdateCheckOutcome(NamedTuple):
-    """What Check for Updates… tells the user: a notification."""
-    category: str
-    title: str
-    body: str
-    urgency: str = "normal"
-    release_url: Optional[str] = None
-
-
-def update_check_outcome(returncode: int, stdout: str, stderr: str) -> UpdateCheckOutcome:
-    """The notification for one `onionpress.cli check-for-update --json`
-    run. The CLI exits 0 whatever happened and says so in its JSON: an
-    `error` (no network, GitHub not answering, curl refusing to start) is
-    "Update check failed", never "Up to date" (issue #355: the tray used
-    to read every failure as the current version)."""
-    failed = UpdateCheckOutcome("update-check", "Update check failed", "")
-    if returncode != 0:
-        return failed._replace(body=(stderr or "").strip()[:200]
-                               or f"onionpress check-for-update exited {returncode}")
-    try:
-        data = json.loads(stdout)
-    except ValueError:
-        return failed._replace(body="The update check gave no answer.")
-    if not isinstance(data, dict) or data.get("error") or "update_available" not in data:
-        why = data.get("error") if isinstance(data, dict) else None
-        return failed._replace(body=str(why or "The update check gave no answer.")[:200])
-    if data.get("update_available"):
-        return UpdateCheckOutcome(
-            "update-available",
-            f"OnionPress {data.get('latest')} is available",
-            "Run 'onionpress update' in a terminal to install it "
-            "(it checks the package against the release's SHA256SUMS).",
-            release_url=data.get("release_url") or None)
-    return UpdateCheckOutcome(
-        "update-check", "Up to date",
-        f"You're on the current version ({data.get('current')}).",
-        urgency="low")
-
-
-# ─── 3b. The check/confirm protocol (onionpress.confirm, issue #375) ────
+# ─── 3. The launcher client ─────────────────────────────────────────────
 #
-# `onionpress backup` and `onionpress restore` are asked first what they
-# would do (`--check --json`): the CLI answers {"ok": true, ...facts},
-# {"ask": "password"}, {"confirm": "<what>", ...facts} or {"error": ...},
-# changing nothing; the tray shows its own dialogs from the facts and runs
-# the command again with `--confirmed <what>` for every question it asked.
-# What follows is the client without GTK: the dialogs are an object the
-# caller supplies (RestoreUI below; the GTK one is _GtkRestoreUI), so the
-# flow is tested against a stub launcher. Cancel is the default in every
-# dialog, and no answer in QUESTION_TIMEOUT_SEC is Cancel (_run_dialog).
+# Every action runs `/opt/onionpress/onionpress <subcommand>` through the
+# UIs' shared client (onionpress.ui_client, issue #526): a password or a
+# hub's recovery key in the environment, never on argv (tray.log gets
+# the subcommand's name only), stdin /dev/null, the CLI's last JSON line
+# as the answer. The check/confirm protocol (onionpress.confirm, issue
+# #375) is its too: `onionpress backup` and `onionpress restore` are
+# asked first what they would do (`--check --json`), the dialogs here
+# are built from the facts (_GtkBackupUI, _GtkRestoreUI, _ask_question),
+# and the command runs again with `--confirmed <what>` for every
+# question asked. Cancel is the default in every dialog, and no answer
+# in QUESTION_TIMEOUT_SEC is Cancel (_run_dialog).
 
-SEALED_HUB_DATA_QUESTION = "sealed-hub-data-left-out"
-QUESTION_TIMEOUT_SEC = 300
-
-
-def _last_json_line(text: str) -> Optional[dict]:
-    """The JSON object the CLI printed last (onionpress.confirm), or None."""
-    if _confirm is not None:
-        return _confirm.last_json_line(text)
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-    try:
-        doc = json.loads(lines[-1]) if lines else None
-    except ValueError:
-        return None
-    return doc if isinstance(doc, dict) else None
+Launcher = ui_client.Launcher(LAUNCHER, log)
+QUESTION_TIMEOUT_SEC = ui_client.QUESTION_TIMEOUT_SEC
 
 
-def _without_log_stamp(line: str) -> str:
-    """A launcher log line without its `[YYYY-MM-DD HH:MM:SS] ` or
-    `YYYY-MM-DD HH:MM:SS ` stamp (launcher_ops.strip_log_stamp)."""
-    if launcher_ops is not None:
-        line = launcher_ops.strip_log_stamp(line)
-    return re.sub(r"^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\]?\s*", "", line)
-
-
-def launcher_failure(stdout: str, stderr: str, default: str) -> str:
-    """What a failed `onionpress` run said: its last ERROR line, else its
-    last line, else *default* (the menubar's reading of it)."""
-    lines = [_without_log_stamp(ln.strip())
-             for ln in (stderr or "").splitlines() + (stdout or "").splitlines()
-             if ln.strip()]
-    errors = [ln for ln in lines if ln.startswith("ERROR")]
-    if errors:
-        return errors[-1][len("ERROR:"):].strip() or default
-    return lines[-1] if lines else default
-
-
-def launcher_answer(*args, password: Optional[str] = None,
-                    extra_env: Optional[dict] = None):
-    """Run `onionpress <args>` and read the JSON object it printed last:
-    (rc, answer or None, stdout, stderr). A launcher that could not be run
-    is (-1, None, "", why)."""
-    try:
-        r = Launcher.run(*args, capture=True, timeout=None,
-                         password=password, extra_env=extra_env)
-    except Exception as e:
-        log(f"launcher {args[0]}: could not run: {e}")
-        return -1, None, "", str(e)
-    return r.returncode, _last_json_line(r.stdout), r.stdout or "", r.stderr or ""
-
-
-def check_backup(password: str):
-    """`onionpress backup --check --json`: the CLI verifies *password* as
-    the owner's and names the file. (facts, None) when it is, else
-    (None, why) for the dialog."""
-    rc, ans, out, err = launcher_answer("backup", "--check", "--json", password=password)
-    if ans and ans.get("ok"):
-        return ans, None
-    return None, (ans or {}).get("error") or launcher_failure(
-        out, err, "Could not verify the password.")
-
-
-class RestoreUI:
-    """The dialogs plan_restore asks of the person at this desktop. Each
-    returns the answer or None for Cancel; the GTK ones give up after
-    QUESTION_TIMEOUT_SEC, which is Cancel."""
-
-    def ask_password(self, backup_user: Optional[str]) -> Optional[str]:
-        raise NotImplementedError
-
-    def confirm(self, facts: dict) -> bool:
-        raise NotImplementedError
-
-    def ask_recovery_key(self, facts: dict, problem: Optional[str]) -> Optional[str]:
-        """The hub's recovery key as typed, "" to restore without the hub
-        data, None to cancel. *problem*: why the last key was refused."""
-        raise NotImplementedError
-
-    def error(self, title: str, message: str) -> None:
-        raise NotImplementedError
-
-
-class RestorePlan(NamedTuple):
-    """What the checks established: the real run is
-    `Launcher.run("restore", *args, password=password, extra_env=extra_env)`."""
-    args: list
-    password: str
-    extra_env: dict
-
-
-def plan_restore(backup_path: str, ui: RestoreUI) -> Optional[RestorePlan]:
-    """The protocol up to the real run of `onionpress restore <zip>`: the
-    password the CLI asks for, the facts for the confirmation dialog
-    (address, date, user, version, whether the key is in the backup), and
-    a hub's sealed data question ("sealed-hub-data-left-out": the recovery
-    key, checked by the CLI against the backup, or restore without it, with
-    --confirmed). None when cancelled or refused (the error shown)."""
-    rc, ans, out, err = launcher_answer("restore", backup_path, "--check", "--json")
-    backup_user = (ans or {}).get("backup_user") if (ans or {}).get("ask") == "password" else None
-    password = ui.ask_password(backup_user)
-    if not password:
-        return None
-    rc, facts, out, err = launcher_answer("restore", backup_path, "--check", "--json",
-                                          password=password)
-    if not facts or facts.get("error") or not (facts.get("ok") or facts.get("confirm")):
-        failure = (facts or {}).get("error") or launcher_failure(out, err, "Could not read backup")
-        log(f"restore: failed to read backup metadata: {failure}")
-        ui.error("Invalid backup", failure)
-        return None
-    if not ui.confirm(facts):
-        return None
-    extra_env: dict = {}
-    confirmed: list = []
-    question = facts.get("confirm")
-    if question == SEALED_HUB_DATA_QUESTION:
-        problem = None
-        while True:
-            key = ui.ask_recovery_key(facts, problem)
-            if key is None:
-                return None
-            if not key:
-                log("restore: the hub's sealed data will not be restored (no recovery key given)")
-                confirmed = ["--confirmed", SEALED_HUB_DATA_QUESTION]
-                break
-            rc, ans, out, err = launcher_answer(
-                "restore", backup_path, "--check", "--json",
-                password=password, extra_env={HUB_RECOVERY_KEY_ENV: key})
-            if ans and ans.get("ok"):
-                extra_env[HUB_RECOVERY_KEY_ENV] = key
-                break
-            problem = (ans or {}).get("error") or launcher_failure(
-                out, err, "The key could not be checked.")
-    elif question:
-        log(f"restore: unexpected question '{question}' (cancelled)")
-        ui.error("Restore not started",
-                 f"OnionPress asked a question this tray cannot answer ({question}). "
-                 f"Run 'onionpress restore' in a terminal.")
-        return None
-    return RestorePlan([backup_path, "--json", *confirmed], password, extra_env)
+def _onionname() -> str:
+    """The site's onionname from the config, "" when none."""
+    return _op_config.read_value(os.path.join(DATA_DIR, "config"), "ONIONNAME", "") or ""
 
 
 # ─── 4. Notifier ────────────────────────────────────────────────────────
@@ -543,31 +308,18 @@ def show_about_dialog():
     except OSError:
         pass
 
-    # Mirrors the Mac menubar "About OnionPress" copy (src/menubar.py
-    # show_about) so users get the same pitch regardless of platform.
-    comments = (
-        "Run your own website from your computer.\n"
-        "Just Works. Free, forever.\n"
-        "WordPress + Tor Onion Service\n"
-        "\n"
-        "• Full WordPress that you own and run\n"
-        "• Internet Archive's Wayback Machine integration\n"
-        "• Tor Onion Service with an address you own, forever\n"
-        "• Requires visitors to use Tor or Brave browsers\n"
-        "• Privacy-first design\n"
-        "• Free and open source"
-    )
-
+    # The Mac menubar's "About OnionPress" copy (ui_client.about_comments)
+    # so users get the same pitch regardless of platform.
     dlg = Gtk.AboutDialog()
     dlg.set_program_name("OnionPress")
     dlg.set_version(version)
-    dlg.set_comments(comments)
-    dlg.set_website("https://onionpress.org")
+    dlg.set_comments(ui_client.about_comments("your computer"))
+    dlg.set_website(ui_client.ABOUT_WEBSITE)
     dlg.set_website_label("onionpress.org")
     # GtkAboutDialog has no dedicated "credits" line, but the copyright
     # slot renders as plain text under the title — re-use it for the
     # attribution line that matches the Mac About body.
-    dlg.set_copyright("Created by the Internet Archive")
+    dlg.set_copyright(ui_client.ABOUT_CREDIT)
     # AGPL_3_0 surfaces a "License" button in the dialog footer that
     # opens the full text — matches the "License: AGPL v3 or later" line on Mac.
     dlg.set_license_type(Gtk.License.AGPL_3_0)
@@ -786,10 +538,11 @@ def _on_main_thread(fn):
     return box.get("result")
 
 
-def _error_dialog(parent, title: str, message: str) -> None:
+def _error_dialog(parent, title: str, message: str,
+                  message_type=Gtk.MessageType.ERROR) -> None:
     dlg = Gtk.MessageDialog(
         parent=parent, flags=0,
-        message_type=Gtk.MessageType.ERROR,
+        message_type=message_type,
         buttons=Gtk.ButtonsType.CLOSE,
         text=title,
     )
@@ -798,7 +551,51 @@ def _error_dialog(parent, title: str, message: str) -> None:
     dlg.destroy()
 
 
-class _GtkRestoreUI(RestoreUI):
+def _info_dialog(parent, title: str, message: str) -> None:
+    _error_dialog(parent, title, message, message_type=Gtk.MessageType.INFO)
+
+
+def _ask_question(parent, what: str, facts: dict, action: str = "Continue") -> bool:
+    """A question the CLI stopped at (onionpress.confirm), as a GTK dialog
+    worded by ui_client.question_text (one wording for both UIs); True
+    only for the explicit yes. Cancel is the default, and no answer in
+    QUESTION_TIMEOUT_SEC is Cancel (_run_dialog). A question with a word
+    to type (the uninstall's DELETE) is a yes only when it was typed."""
+    q = ui_client.question_text(what, facts, action)
+    if q is None:
+        log(f"unknown question from the CLI: '{what}' (cancelled)")
+        return False
+    dlg = Gtk.MessageDialog(
+        parent=parent, flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.NONE,
+        text=q.title,
+    )
+    dlg.format_secondary_text(q.message)
+    entry = None
+    if q.typed:
+        entry = Gtk.Entry()
+        entry.set_placeholder_text(q.typed)
+        dlg.get_content_area().pack_end(entry, False, False, 8)
+    dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    yes_btn = dlg.add_button(q.yes, Gtk.ResponseType.OK)
+    if q.style == "critical":
+        yes_btn.get_style_context().add_class("destructive-action")
+    dlg.set_default_response(Gtk.ResponseType.CANCEL)
+    dlg.show_all()
+    response = _run_dialog(dlg)
+    typed = entry.get_text() if entry is not None else None
+    dlg.destroy()
+    if response != Gtk.ResponseType.OK:
+        return False
+    if q.typed and not ui_client.typed_confirmation(typed, q.typed):
+        _error_dialog(parent, f"{action} Cancelled",
+                      ui_client.typed_mismatch_message(typed, q.typed, action))
+        return False
+    return True
+
+
+class _GtkRestoreUI(ui_client.RestoreUI):
     """plan_restore's dialogs, each run in the GTK main loop; the flow
     itself runs in a worker thread, so the tray stays responsive while
     the launcher reads the backup."""
@@ -839,32 +636,14 @@ class _GtkRestoreUI(RestoreUI):
 
     def _confirm(self, facts):
         # The CLI validated the address and username and sanitized the
-        # rest (cli.cmd_restore_check).
-        addr = facts.get("onion_address") or "unknown"
-        if facts.get("excludes_onion_key") is True:
-            # A Settings page backup holds no key: this site keeps its
-            # address (the restore refuses one whose metadata says so but
-            # which holds a key).
-            addr += " (its key is not in this backup)"
-            warning = ("This will overwrite your current site and database. "
-                       "This backup was made from the Settings page and holds "
-                       "no onion address key, so this site keeps its onion "
-                       "address. This cannot be undone.")
-        else:
-            warning = ("This will overwrite your current site, database, and "
-                       "onion address. This cannot be undone.")
+        # rest (cli.cmd_restore_check); the text is ui_client's.
         dlg = Gtk.MessageDialog(
             parent=self.parent, flags=0,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.NONE,
-            text="Restore from this backup?",
+            text=ui_client.RESTORE_CONFIRM_TITLE,
         )
-        dlg.format_secondary_text(
-            f"Onion address: {addr}\n"
-            f"Backup date: {facts.get('backup_date') or 'unknown'}\n"
-            f"Username: {facts.get('username') or 'unknown'}\n"
-            f"OnionPress version: {facts.get('onionpress_version') or 'unknown'}\n\n"
-            f"{warning}")
+        dlg.format_secondary_text(ui_client.restore_facts_text(facts))
         dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         restore_btn = dlg.add_button("_Restore", Gtk.ResponseType.OK)
         restore_btn.get_style_context().add_class("destructive-action")
@@ -877,23 +656,16 @@ class _GtkRestoreUI(RestoreUI):
         return _on_main_thread(lambda: self._ask_recovery_key(facts, problem))
 
     def _ask_recovery_key(self, facts, problem):
-        kid = facts.get("recovery_key_id") or "unknown"
-        dlg = Gtk.Dialog(title="Restore the hub's registrants' keys?",
-                         parent=self.parent, flags=0)
+        q = ui_client.question_text(ui_client.SEALED_HUB_DATA_QUESTION, facts)
+        dlg = Gtk.Dialog(title=q.title, parent=self.parent, flags=0)
         dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-        dlg.add_button("Restore _Without", Gtk.ResponseType.REJECT)
-        dlg.add_button("Restore With _Key", Gtk.ResponseType.OK)
+        dlg.add_button(q.alternative, Gtk.ResponseType.REJECT)
+        dlg.add_button(q.yes, Gtk.ResponseType.OK)
         dlg.set_default_response(Gtk.ResponseType.CANCEL)
         body = dlg.get_content_area()
         body.set_border_width(16)
         body.set_spacing(8)
-        blurb = Gtk.Label(label=(
-            f"This backup holds an OnionHeaven hub's registry and its "
-            f"registrants' onion service keys, sealed to the hub's recovery "
-            f"key (key id {kid}). Paste that key to restore them.\n\n"
-            f"Without it, everything else is restored: registrants that are "
-            f"online send their keys again within a minute; sites that are "
-            f"offline cannot be taken over until they come back."))
+        blurb = Gtk.Label(label=q.message)
         blurb.set_line_wrap(True)
         blurb.set_xalign(0)
         blurb.set_max_width_chars(60)
@@ -919,126 +691,99 @@ class _GtkRestoreUI(RestoreUI):
             return None
         return text
 
+    def ask_question(self, what, facts, action="Restore"):
+        return _on_main_thread(lambda: _ask_question(self.parent, what, facts, action))
+
     def error(self, title, message):
         _on_main_thread(lambda: _error_dialog(self.parent, title, message))
 
 
-def show_backup_dialog(parent=None):
-    # Custom Gtk.Dialog (not MessageDialog) so we can verify the password
-    # before kicking off the long-running backup: `onionpress backup
-    # --check --json` (check_backup) verifies it as the owner's and names
-    # the file, as the Mac's Backup... asks before its save panel. Bash
-    # re-verifies inside create_backup, so this is a UX improvement: the
-    # user sees "Password does not match" in 1-2s instead of waiting for
-    # the full backup to fail.
-    dlg = Gtk.Dialog(
-        title="Create OnionPress backup",
-        parent=parent,
-        flags=0,
-    )
-    dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-    ok_btn = dlg.add_button("_Back Up", Gtk.ResponseType.OK)
-    dlg.set_default_response(Gtk.ResponseType.OK)
-    ok_btn.get_style_context().add_class("suggested-action")
+class _GtkBackupUI(ui_client.BackupUI):
+    """plan_backup's dialogs: the admin password (the CLI knows the
+    owner's login), a refused one shown in the dialog asked again; the
+    file is the one the CLI named (~/OnionPress/backups/<address>-<login>-
+    <date>.zip: no chooser). Each runs in the GTK main loop; the flow
+    itself runs in a worker thread."""
 
-    body = dlg.get_content_area()
-    body.set_border_width(16)
-    body.set_spacing(8)
+    def __init__(self, parent):
+        self.parent = parent
 
-    blurb = Gtk.Label(label=(
-        "A password-protected .zip will be created in "
-        "~/OnionPress/backups/. Enter your WordPress admin password to "
-        "authorise the backup."))
-    blurb.set_line_wrap(True)
-    blurb.set_xalign(0)
-    body.add(blurb)
+    def ask_credentials(self, default_user, problem):
+        return _on_main_thread(lambda: self._ask_password(problem))
 
-    entry = Gtk.Entry()
-    entry.set_visibility(False)
-    entry.set_activates_default(True)
-    entry.set_placeholder_text("admin password")
-    body.add(entry)
-
-    error_lbl = Gtk.Label()
-    error_lbl.set_xalign(0)
-    error_lbl.set_line_wrap(True)
-    body.add(error_lbl)
-
-    body.show_all()
-
-    def _verify_then_start():
-        password = entry.get_text()
-        if not password:
-            error_lbl.set_markup(
-                "<span foreground='red'>"
-                "Please enter your admin password.</span>")
-            return False
-        # Disable input + button during verification so accidental
-        # double-clicks don't fire a second wp eval.
-        ok_btn.set_sensitive(False)
-        entry.set_sensitive(False)
-        error_lbl.set_markup(
-            "<i>Verifying password…</i>")
-
-        def _verify():
-            facts, msg = check_backup(password)
-            ok = facts is not None
-            if ok:
-                checked["output"] = facts.get("output") or ""
-
-            def _apply():
-                if ok:
-                    dlg.response(Gtk.ResponseType.APPLY)
-                    return False
-                error_lbl.set_markup(
-                    f"<span foreground='red'>{GLib.markup_escape_text(msg)}</span>")
-                ok_btn.set_sensitive(True)
-                entry.set_sensitive(True)
-                entry.grab_focus()
-                return False
-            GLib.idle_add(_apply)
-        threading.Thread(target=_verify, daemon=True).start()
-        return True
-
-    password = None
-    checked = {}
-    while True:
-        response = dlg.run()
-        if response == Gtk.ResponseType.OK:
-            if _verify_then_start():
-                continue  # wait for APPLY/error
-            # Empty password — just keep dialog open.
-            continue
-        if response == Gtk.ResponseType.APPLY:
+    def _ask_password(self, problem):
+        dlg = Gtk.Dialog(title="Create OnionPress backup", parent=self.parent, flags=0)
+        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        ok_btn = dlg.add_button("_Back Up", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        ok_btn.get_style_context().add_class("suggested-action")
+        body = dlg.get_content_area()
+        body.set_border_width(16)
+        body.set_spacing(8)
+        blurb = Gtk.Label(label=(
+            "A password-protected .zip will be created in "
+            "~/OnionPress/backups/. Enter your WordPress admin password to "
+            "authorise the backup."))
+        blurb.set_line_wrap(True)
+        blurb.set_xalign(0)
+        body.add(blurb)
+        entry = Gtk.Entry()
+        entry.set_visibility(False)
+        entry.set_activates_default(True)
+        entry.set_placeholder_text("admin password")
+        body.add(entry)
+        if problem:
+            problem_lbl = Gtk.Label()
+            problem_lbl.set_xalign(0)
+            problem_lbl.set_line_wrap(True)
+            problem_lbl.set_markup(
+                f"<span foreground='red'>{GLib.markup_escape_text(problem)}</span>")
+            body.add(problem_lbl)
+        body.show_all()
+        while True:
+            response = _run_dialog(dlg)
             password = entry.get_text()
-            break
-        # Cancel / close.
-        break
-    dlg.destroy()
+            if response != Gtk.ResponseType.OK:
+                dlg.destroy()
+                return None
+            if password:
+                dlg.destroy()
+                return None, password
+            # Empty password: keep the dialog open.
 
-    if not password:
-        return
+    def choose_output(self, facts):
+        # The file the check named (the CLI's backup_filename: address and
+        # login in the name, which the restore's password prompt reads).
+        return facts.get("output") or ""
+
+
+def show_backup_dialog(parent=None):
+    """Create a backup through `onionpress backup` (ui_client.plan_backup:
+    `backup --check --json` verifies the password as the owner's and names
+    the file before the long-running backup, so a typo is "Password does
+    not match" in 1-2 s instead of a backup that fails at the end; then
+    run_backup). The password goes in the environment, never on argv."""
+    ui = _GtkBackupUI(parent)
 
     def _run():
+        try:
+            plan = ui_client.plan_backup(Launcher, ui, log=log)
+        except Exception as e:
+            log(f"backup check error: {e}")
+            _notify_failed("Backup failed")
+            return
+        if plan is None:
+            return
         # No time limit here (issue #317): a fixed 300 s ended large sites'
         # backups, and killing the launcher stopped only the shell, not the
         # docker and Python steps under it. The copies there carry their own
         # limits, sized to the site, and fail the launcher when one is hit.
-        # The file the check named (the CLI's backup_filename: address and
-        # login in the name, which the restore's password prompt reads).
-        output_args = ["-o", checked["output"]] if checked.get("output") else []
         try:
-            r = Launcher.run("backup", *output_args, capture=True, timeout=None,
-                             password=password)
-            if r.returncode == 0:
-                Notify.Notification.new(
-                    "Backup complete", r.stdout.strip() or "Saved.",
-                    "onionpress",
-                ).show()
-            else:
-                Notify.Notification.new(
-                    "Backup failed", (r.stderr or "")[:200], "onionpress",
-                ).show()
+            result = ui_client.run_backup(Launcher, plan, log=log)
+            Notify.Notification.new(
+                "Backup complete" if result.ok else "Backup failed",
+                result.message[:400], "onionpress",
+            ).show()
         except Exception as e:
             log(f"backup error: {e}")
             _notify_failed("Backup failed")
@@ -1048,10 +793,11 @@ def show_backup_dialog(parent=None):
 def show_restore_dialog(parent=None):
     """Restore from a backup .zip through `onionpress restore` (install-
     from-backup). The launcher is asked first what the backup is
-    (`restore <zip> --check --json`, plan_restore): the password it needs,
-    the facts for the confirmation dialog, and whether a hub's sealed data
-    needs the recovery key. The dialogs are this process's (_GtkRestoreUI);
-    the password and the key go in the environment, never on argv."""
+    (`restore <zip> --check --json`, ui_client.plan_restore): the password
+    it needs, the facts for the confirmation dialog, and whether a hub's
+    sealed data needs the recovery key. The dialogs are this process's
+    (_GtkRestoreUI); the password and the key go in the environment,
+    never on argv."""
     chooser = Gtk.FileChooserNative.new(
         "Choose a backup .zip", parent, Gtk.FileChooserAction.OPEN,
         "_Restore", "_Cancel",
@@ -1073,7 +819,7 @@ def show_restore_dialog(parent=None):
         # The checks wait on the launcher (reading a large backup takes a
         # while); each dialog is marshalled to the main loop.
         try:
-            plan = plan_restore(backup_path, ui)
+            plan = ui_client.plan_restore(Launcher, backup_path, ui, log=log)
         except Exception as e:
             log(f"restore check error: {e}")
             _notify_failed("Restore failed")
@@ -1083,22 +829,21 @@ def show_restore_dialog(parent=None):
         # No time limit, as for the backup above: a fixed 600 s ended large
         # sites' restores halfway, the launcher's own steps still running.
         try:
-            r = Launcher.run("restore", *plan.args,
-                             capture=True, timeout=None, password=plan.password,
-                             extra_env=plan.extra_env)
-            if r.returncode == 0:
+            result = ui_client.run_restore(
+                Launcher, plan, data_dir=DATA_DIR,
+                log_path=os.path.join(DATA_DIR, "onionpress.log"))
+            if result.ok:
                 Notify.Notification.new(
                     "Restore complete",
                     "OnionPress has been restored. Containers restarting.",
                     "onionpress",
                 ).show()
+                _on_main_thread(lambda: _info_dialog(
+                    parent, "Restore complete",
+                    ui_client.restore_summary(result.answer, plan.facts)))
             else:
-                answer = _last_json_line(r.stdout) or {}
                 Notify.Notification.new(
-                    "Restore failed",
-                    (answer.get("error") or launcher_failure(
-                        r.stdout, r.stderr, "See the OnionPress log."))[:200],
-                    "onionpress",
+                    "Restore failed", result.failure[:200], "onionpress",
                 ).show()
         except Exception as e:
             log(f"restore error: {e}")
@@ -1131,9 +876,7 @@ class SetupDialog:
     GLib.idle_add bridges thread → GTK.
 
     on_done(success: bool) is called on the GTK thread after provisioning
-    completes.  If _setup_logic is unavailable (import failed), the dialog
-    shows a fallback directing the user to `onionpress provision` in a
-    terminal.
+    completes.
     """
 
     _STEPS = [
@@ -1196,21 +939,6 @@ class SetupDialog:
         heading.set_valign(Gtk.Align.CENTER)
         header.pack_start(heading, True, True, 0)
         box.add(header)
-
-        if _setup_logic is None:
-            note = Gtk.Label(label=(
-                "The onionpress Python package is not installed.\n"
-                "Run  onionpress provision  in a terminal to finish setup."))
-            note.set_line_wrap(True)
-            note.set_xalign(0)
-            box.add(note)
-            close_btn = Gtk.Button(label="Close")
-            close_btn.connect("clicked",
-                              lambda *_: self._dlg.response(Gtk.ResponseType.CANCEL))
-            box.add(close_btn)
-            self._setup_btn = None
-            self._stack.add_named(box, "welcome")
-            return
 
         sub = Gtk.Label(label=(
             "Choose a username and password for your WordPress account. "
@@ -1327,8 +1055,6 @@ class SetupDialog:
         self._validate_form()
 
     def _on_suggest_clicked(self, *_):
-        if _setup_logic is None:
-            return
         name = _setup_logic.suggest_onionname() or ""
         if name:
             # Triggers _on_name_changed via the "changed" signal, which
@@ -1337,7 +1063,7 @@ class SetupDialog:
 
     def _on_name_changed(self, *_):
         name = self._name_entry.get_text().strip()
-        if name and _setup_logic:
+        if name:
             ok, reason = _setup_logic.validate_onionname(name)
             if not ok:
                 self._name_error.set_text(
@@ -1352,7 +1078,7 @@ class SetupDialog:
         title_ok = bool(self._title_entry.get_text().strip())
         name = self._name_entry.get_text().strip()
         name_ok = bool(name)
-        if name_ok and _setup_logic:
+        if name_ok:
             name_ok, _ = _setup_logic.validate_onionname(name)
         pw = self._pw_entry.get_text()
         pw2 = self._pw2_entry.get_text()
@@ -1404,8 +1130,6 @@ class SetupDialog:
     # ── Button click / provisioning ───────────────────────────────────
 
     def _on_setup_clicked(self, *_):
-        if _setup_logic is None:
-            return
         title = self._title_entry.get_text().strip()
         onionname = self._name_entry.get_text().strip()
         password = self._pw_entry.get_text()
@@ -1472,21 +1196,11 @@ class SetupDialog:
 
     def _status_wp_installed(self) -> bool:
         # The tray's Status snapshot lives on a different thread; this
-        # helper reads the raw dict to avoid races during provisioning.
-        try:
-            import json as _json
-            with open(STATUS_FILE) as f:
-                return bool(_json.load(f).get("wp_installed"))
-        except Exception:
-            return False
+        # helper reads the file to avoid races during provisioning.
+        return bool((_read_status() or {}).get("wp_installed"))
 
     def _status_onion_address(self) -> str:
-        try:
-            import json as _json
-            with open(STATUS_FILE) as f:
-                return _json.load(f).get("onion_address", "") or ""
-        except Exception:
-            return ""
+        return (_read_status() or {}).get("onion_address", "") or ""
 
     # ── Thread-safe UI helpers ────────────────────────────────────────
 
@@ -1623,7 +1337,7 @@ class OnionPressTray:
         state = self.status.state
         if state == "running" and not self.status.serving_from_wayback:
             self.indicator.set_icon_full(ICON_RUNNING, "OnionPress running")
-        elif state == "starting":
+        elif state in STARTING_STATES:
             self.indicator.set_icon_full(ICON_STARTING, "OnionPress starting")
         else:
             self.indicator.set_icon_full(ICON_STOPPED, "OnionPress stopped")
@@ -1639,15 +1353,10 @@ class OnionPressTray:
             if self.status.onion_address:
                 # Truncate the 56-char .onion so it doesn't stretch the
                 # menu. Full address is available via "Copy Onion Address".
-                addr = self.status.onion_address
-                if len(addr) > 16 and addr.endswith(".onion"):
-                    short = f"{addr[:8]}…{addr[-6:]}"
-                else:
-                    short = addr
-                label = f"● {short}"
+                label = f"● {ui_client.short_onion(self.status.onion_address)}"
             else:
                 label = "● OnionPress is running"
-        elif self.status.state == "starting":
+        elif self.status.state in STARTING_STATES:
             if self.status.bootstrap_pct and self.status.bootstrap_pct < 100:
                 label = f"Starting… (Tor {self.status.bootstrap_pct}%)"
             elif not self.status.wp_installed:
@@ -1662,7 +1371,8 @@ class OnionPressTray:
         self.menu_status.set_label(label)
 
     def _maybe_announce(self):
-        if not self._announced_starting and self.status.state in ("starting", "running"):
+        if not self._announced_starting and (
+                self.status.state == "running" or self.status.state in STARTING_STATES):
             if not self.status.wp_installed:
                 self._announced_starting = True
                 if is_raspberry_pi():
@@ -1704,7 +1414,7 @@ class OnionPressTray:
         # installed. SetupDialog's _provision branches on wp_installed
         # to either install_fresh_wordpress (new path) or
         # provision_existing_wordpress (legacy auto-bootstrap path).
-        if self.status.state not in ("running", "starting"):
+        if self.status.state != "running" and self.status.state not in STARTING_STATES:
             return
         self._setup_shown = True
         self._show_setup_dialog()
@@ -1737,14 +1447,9 @@ class OnionPressTray:
         # straight to the user's site, not to the network root. NO login
         # token is appended — copied URLs are for sharing, and a token
         # would log anyone who follows the link in as admin. Use
-        # "Open in Tor Browser" for the personal auto-login flow.
-        try:
-            from onionpress import config as _op_config  # type: ignore
-            name = _op_config.read_value(
-                os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
-        except Exception:
-            name = ""
-        url = f"http://{addr}/{name}" if name else f"http://{addr}/"
+        # "Open in Tor Browser" for the personal auto-login flow. The URL
+        # is the one `onionpress address --url` gives (ui_client.site_url).
+        url = ui_client.site_url(addr, _onionname())
 
         # Gtk.Clipboard.set_text() from a window-less tray callback is
         # a silent no-op on Wayland (no window to own the clipboard;
@@ -1830,12 +1535,6 @@ class OnionPressTray:
         base_url with a one-time token (launcher_ops.login_target), never
         the token itself: /proc/<pid>/cmdline is readable by every local
         user, and whoever redeems the token first is the admin."""
-        if launcher_ops is None:
-            subprocess.Popen(
-                ["xdg-open", base_url],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return
         launcher_ops.open_in_browser(launcher_ops.login_target(base_url))
 
     def _on_open_settings(self, *_):
@@ -1845,12 +1544,7 @@ class OnionPressTray:
     def _on_open_local(self, *_):
         # Include /<onionname>/ so localhost takes the user to their
         # subsite, not the network root. Matches Open in Tor Browser.
-        try:
-            from onionpress import config as _op_config  # type: ignore
-            name = _op_config.read_value(
-                os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
-        except Exception:
-            name = ""
+        name = _onionname()
         # No trailing slash on the subsite path — sunrise.php's subsite
         # router (preg_match '#^/([^/]+)/#') only matches with BOTH
         # leading and trailing slashes, so /<name> (no trailing slash)
@@ -1868,21 +1562,9 @@ class OnionPressTray:
         # subsite, matching what Copy Onion Address and "Open Local Site"
         # already do. Login token IS included here (this is the
         # "view my own site" flow, not the share-with-others flow).
-        try:
-            from onionpress import config as _op_config  # type: ignore
-            name = _op_config.read_value(
-                os.path.join(DATA_DIR, "config"), "ONIONNAME", "")
-        except Exception:
-            name = ""
+        name = _onionname()
         # See _on_open_local for the no-trailing-slash rationale.
         base = f"http://{addr}/{name}" if name else f"http://{addr}/"
-
-        if launcher_ops is None:
-            subprocess.Popen(
-                ["xdg-open", base],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            return
 
         # If Tor Browser is already running, we cannot inject a new tab:
         # Tor Browser ships without DBus remoting registration (none of
@@ -2019,13 +1701,18 @@ class OnionPressTray:
     def _on_check_updates(self, *_):
         def _run():
             try:
-                r = subprocess.run(
-                    [sys.executable, "-m", "onionpress.cli",
-                     "check-for-update", "--json"],
-                    capture_output=True, text=True, timeout=20,
-                    env={**os.environ, "PYTHONPATH": _LIB_DIR},
-                )
-                outcome = update_check_outcome(r.returncode, r.stdout, r.stderr)
+                # Through the launcher, as every tray action: the verb has
+                # no case of its own, so the launcher's default case hands
+                # it to onionpress.cli. ui_client.update_outcome reads the
+                # report (the Mac's Check for Updates reads the same one);
+                # with #525 this becomes `update --check --json`.
+                rc, _ans, out, err = Launcher.run_json("check-for-update", "--json")
+                outcome = ui_client.update_outcome(rc, out, err)
+                body = outcome.body
+                if outcome.kind == "available":
+                    body = ("Run 'onionpress update' in a terminal to install it "
+                            "(it checks the package against the release's SHA256SUMS).")
+                category = "update-available" if outcome.kind == "available" else "update-check"
                 actions = None
                 if outcome.release_url:
                     actions = [(
@@ -2033,7 +1720,7 @@ class OnionPressTray:
                         lambda url=outcome.release_url: subprocess.Popen(["xdg-open", url]),
                     )]
                 self.notifier.notify(
-                    outcome.category, outcome.title, outcome.body,
+                    category, outcome.title, body,
                     urgency=outcome.urgency, actions=actions)
             except Exception as e:
                 log(f"update check error: {e}")
@@ -2064,13 +1751,14 @@ class OnionPressTray:
             buttons=Gtk.ButtonsType.OK_CANCEL,
             text="Uninstall OnionPress?",
         )
-        dlg.format_secondary_text(
-            "This removes OnionPress from your computer. Your data is preserved:\n"
-            "  ~/.onionpress    (config, secrets, .onion key, logs)\n"
-            "  ~/OnionPress     (backups, Creations)\n"
-            "Delete those manually later if you don't need them.\n\n"
-            "A terminal will open — enter your sudo password when prompted."
-        )
+        # The launcher's uninstall (linux/onionpress) deletes ~/.onionpress
+        # with the key; ~/OnionPress (backups, Creations) stays. It asks
+        # its questions at the terminal: the `uninstall --check --json`
+        # flow comes to Linux with #529.
+        dlg.format_secondary_text(ui_client.uninstall_warning(
+            "A terminal will open: the uninstaller offers a backup first, "
+            "then asks for your sudo password. ~/OnionPress (backups, "
+            "Creations) is kept."))
         response = dlg.run()
         dlg.destroy()
         if response != Gtk.ResponseType.OK:

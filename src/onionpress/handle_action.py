@@ -365,11 +365,12 @@ def handle(host, confirmed=frozenset(), cancel=False):
             return {"handled": None, "pending": pending["confirm"],
                     "action": pending.get("action"), **pending.get("facts", {})}
 
-    # The page's saved settings (config-updates.json), every run on a Mac
-    # (Linux's launcher applies them in write_status and before a start):
-    # the menubar's poll_config_updates until issue #366. The accepted
-    # keys come back so the menubar applies what it owes at once.
-    applied = apply_config(host) if host.os_name == "macos" else []
+    # The page's saved settings (config-updates.json), every run on both
+    # platforms (the menubar's poll_config_updates until issue #366; the
+    # Linux launcher's bash apply_config_updates, from its status loop,
+    # until the quick wins of 2026-10-31). The accepted keys come back so
+    # the menubar applies what it owes at once.
+    applied = apply_config(host)
     extra = {"config": applied} if applied else {}
     pending = _pending_load(host)
     if pending:
@@ -379,8 +380,6 @@ def handle(host, confirmed=frozenset(), cancel=False):
 
     action = host.read_shared(REQUEST_FILE).strip()
     if not action:
-        if host.os_name == "linux":
-            write_recent_logs(host)
         return {"handled": None, **extra}
     if action not in ACTIONS:
         # Not logged as written: the log is republished to WordPress.
@@ -847,24 +846,8 @@ def _update(host):
         "completed_at": now_iso()})
 
 
-# -- recent logs (Linux's quiet tick) --
-
-def write_recent_logs(host):
-    """recent-logs.txt for the status page: the launcher's log, scrubbed
-    (home path, user names) by redact.wordpress_log_excerpt."""
-    log_file = host.paths.log_file
-    if not os.path.isfile(log_file):
-        return
-    try:
-        text = redact.wordpress_log_excerpt(log_file, host.paths.data_dir)
-    except OSError:
-        text = (f"(Recent logs unavailable: could not scrub "
-                f"{os.path.basename(log_file)} for display.)")
-    host.put_shared("recent-logs.txt", text + "\n")
-
-
 # ---------------------------------------------------------------------------
-# `onionpress apply-config` (the Mac: Linux's launcher has its bash twin)
+# `onionpress apply-config` (both platforms; each launcher's case delegates)
 # ---------------------------------------------------------------------------
 
 def apply_config(host, out=None):
@@ -874,7 +857,8 @@ def apply_config(host, out=None):
     logged), then removed. The accepted keys go into the .config-changed
     marker for the running menubar (caffeinate, the analytics upload, the
     tunnel flag, status.json) and through config.apply_side_effects (the
-    login item). Prints `changed|unchanged|rejected KEY` lines to *out*
+    Mac's login item, Linux's start-on-boot units). Prints
+    `changed|unchanged|rejected KEY` lines to *out*
     (nothing without one). Returns the accepted keys ([] when there was
     nothing to apply; None when the file is not JSON yet)."""
     from . import config as op_config

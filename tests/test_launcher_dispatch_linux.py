@@ -290,20 +290,25 @@ class TestUsage(_Case):
                 self.assertIn("|backup|restore|", r.stdout)
                 self.assertNotIn("alerts", r.stdout)
 
-    def test_an_unknown_verb_is_refused_on_stderr(self):
-        r = self.l.run("frobnicate")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("unknown command: frobnicate", r.stderr)
+    def test_an_unknown_verb_reaches_the_cli(self):
+        """The default case hands every other verb to onionpress.cli (the
+        tray's check-for-update has no case of its own); the CLI's own
+        usage and exit status answer one it does not have either."""
+        r = self.l.run("frobnicate", "--json", env={"STUB_RC_PY": "2"})
+        self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
-        self.assertEqual(self.l.calls(), [])
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} frobnicate --json"])
+        self.assertEqual(self.l.fn_calls(), [])
 
 
 class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
-    """Every `Launcher.run*("<verb>", ...)` in linux/onionpress-tray names
-    a case of linux/onionpress's main; `handle-action` takes its request
-    from the request files, never a positional argument (the tray's old
-    Regenerate item ran `handle-action regenerate-vanity`, which the CLI
-    refuses with exit 2)."""
+    """Every `Launcher.run*("<verb>", ...)` in linux/onionpress-tray (the
+    shared ui_client.Launcher) names a case of linux/onionpress's main or
+    a subcommand of onionpress.cli (the main's default case hands those
+    to it); `handle-action` takes its request from the request files,
+    never a positional argument (the tray's old Regenerate item ran
+    `handle-action regenerate-vanity`, which the CLI refuses with exit 2).
+    The tray runs no `python -m onionpress.cli` of its own."""
 
     def _verbs(self):
         with open(LINUX, encoding="utf-8") as f:
@@ -312,16 +317,27 @@ class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
         verbs = set()
         for m in re.finditer(r"^        ([a-z|-]+)\)$", main, re.M):
             verbs.update(m.group(1).split("|"))
+        from test_cli_dispatch import parser_tree
+        verbs.update(key[0] for key in parser_tree())
         return verbs
 
     def _tray_calls(self):
         with open(TRAY, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "Launcher"
-                    and node.args and isinstance(node.args[0], ast.Constant)):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.args[0], ast.Constant)):
+                continue
+            f = node.func
+            if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                    and f.value.id == "Launcher"):
                 yield node.lineno, [a.value if isinstance(a, ast.Constant) else None for a in node.args]
+
+    def test_the_tray_runs_no_python_of_its_own(self):
+        with open(TRAY, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn('"onionpress.cli"', text)
+        self.assertNotIn("sys.executable", text)
 
     def test_every_verb_is_the_launchers(self):
         verbs = self._verbs()

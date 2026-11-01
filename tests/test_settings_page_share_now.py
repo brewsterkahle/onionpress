@@ -190,7 +190,7 @@ class TestHeartbeatLoopsPoll(unittest.TestCase):
 
     def test_both_loops_poll_after_the_opt_in(self):
         src = _read("linux/onionpress-heartbeat.py")
-        main_body = src[src.index("\ndef main():"):src.index("\ndef _cached_content_address")]
+        main_body = src[src.index("\ndef main():"):src.index('\nif __name__ == "__main__":')]
         polls = [m.start() for m in re.finditer(r"_poll_upload_trigger\(config\)", main_body)]
         opt_ins = [m.start() for m in re.finditer(
             r"analytics_opt_in = _poll_analytics_opt_in\(analytics_opt_in, config\)", main_body)]

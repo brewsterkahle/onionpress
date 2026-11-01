@@ -207,7 +207,8 @@
   10 min failing; 5 min for `desc-missing`/`desc-stale`) asks the watchdog
   for DEL_ONION + ADD_ONION via `launcher_ops.request_watchdog_republish`.
   Mac: the daemon's `check_status`; Linux: `onionpress-heartbeat.py`
-  (writes `reachability.json`, which `write_status` prefers).
+  (writes `reachability.json`, the status writer's one measure of
+  reachability on Linux).
 - Rate limits: 15 min host, 15 min watchdog, never within 5 min of an
   upload. `REPUBLISH_ON_UNREACHABLE=no` makes it log-only. Both wake
   handlers reset the window (test-enforced).
@@ -288,8 +289,10 @@
 - Anything in WordPress can write the request files in
   `/var/lib/onionpress/`. Config changes go only through
   `config.apply_settings_updates` (`SETTINGS_PAGE_KEYS`, every value
-  checked; the rest dropped, logged by key name only).
-  `tests/test_settings_page_updates.py`.
+  checked; the rest dropped, logged by key name only), applied by
+  `handle_action.apply_config` on every `handle-action` run and by
+  `onionpress apply-config`, on both platforms (each launcher's case
+  delegates; no bash twin). `tests/test_settings_page_updates.py`.
 - **Never add to `SETTINGS_PAGE_KEYS`** image overrides,
   `ONIONHEAVEN_ADDRESS`, `ONIONHEAVEN_ACCEPT_REGISTRATIONS`,
   `ADDRESS_PREFIX`, ports, paths or secrets other than
@@ -370,6 +373,17 @@
   `onionpress …` subcommand run through the launcher; it imports none of
   `backup`, `hub_backup`, `updater`. A new menu action gets its subcommand
   first. `tests/test_menubar_actions.py`.
+- **The menubar and the Linux tray are widgets of one client** (#526,
+  `src/onionpress/ui_client.py`: stdlib + `confirm` + `launcher_ops`, so
+  the menubar's docker-free import closure holds): both call the
+  launcher only through `ui_client.Launcher` (secrets in the environment,
+  stdin /dev/null) and read its answers only through `run_json` /
+  `run_confirmed` (the `--check --json` → ask → `--confirmed` loop),
+  `plan_backup` / `run_backup`, `plan_restore` / `run_restore` /
+  `restore_summary` (the dialogs an object the UI supplies: `BackupUI`,
+  `RestoreUI`) and `update_outcome`; no `subprocess` argv in either names
+  the launcher. The tray imports the package hard (the .deb installs it
+  beside the tray): no degraded fallbacks. `tests/test_ui_client.py`.
 - launchd agent `org.onionpress.daemon` (`KeepAlive` on failure only,
   `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
   The launcher's `stop` runs `daemon offline` before stopping containers;
@@ -395,6 +409,38 @@
   VM is a crash restart's or a terminal start's live site; its port is read
   (`resolve_port_offset`). `TestResolvePorts` in
   `tests/test_mac_daemon_paths.py`.
+
+## One Status Writer (issue #523, consolidation stage 2)
+- **`onionpress.status_writer` writes every status document on both
+  platforms**: `daemon-state.json` (`state_document`, with the status
+  document under `"status"`), the volume's `status.json`, `version`,
+  `config-current.json` and `recent-logs.txt` (`write_volume`, as
+  www-data, `redact.status_for_wordpress` and `wordpress_log_excerpt` on
+  the way in), and the full `~/.onionpress/status.json` host copy
+  (`write_host_copy`: the heartbeat's analytics snapshot, the launcher's
+  port detection). The daemon's `write_status_to_volume` and
+  `publish_state` are `write(self)` / `publish(self)`; Linux's launcher
+  `write_status` is `onionpress write-status` (`run_once` over
+  `OneShotStatus`, the daemon's pass as one run until #407), its 30 s
+  tick and every caller unchanged. Nothing else writes those names:
+  the census in `tests/test_status_writer.py`.
+- The fields Linux's bash gathered (`wp_installed`, `onboarded`,
+  `wayback_queue_count`, `mkp224o_available`, `vanity_in_progress`,
+  `serving_from_wayback`, `wp_admin_password_path`, `wp_port`) are one
+  function each there, gathered on both platforms, docker asked only
+  while the stack runs; `mkp224o_available` is `launcher_ops.
+  tor_image_has_mkp224o` on `DEFAULT_TOR_IMAGE` (generate-vanity's
+  image), its answer kept by image id in `.mkp224o-probe`. Platform
+  differences are `detect_os()` seams in the module (`platform_name`,
+  `host_boot_time`, `wedge_warning`), never a second writer.
+- **The one-shot never probes reachability**: the heartbeat's
+  `reachability.json` (fresh, for the served address) or nothing.
+  `state` is the daemon's display state (`running`/`starting`/`stuck`/
+  `offline`/`stopped`); the tray reads it, and everything else, from
+  `daemon-state.json` through `daemon_client.read_state` (`"status"`),
+  never `status.json`. `tests/test_status_writer.py`,
+  `tests/test_linux_tray_protocol.py`, `TestStatusPass` in
+  `tests/test_mac_daemon.py`.
 
 ## The Start Is onionpress.start (issue #442)
 - **Each launcher's `start_containers` is the Docker wait (Mac: VM
@@ -428,6 +474,13 @@
   live in `src/onionpress/app_commands.py`, shared by both platforms, never
   constructing `OnionPressCLI`. The browser never gets the login token.
   `tests/test_cli_app_commands.py`.
+- **Each launcher's default case delegates to `onionpress.cli`**: a verb
+  with no case of its own (`ensure-archive-s3-keys`, `check-for-update`)
+  is the CLI's, and every verb the daemon, menubar, tray, `handle_action`,
+  `setup_logic` and `launcher_ops` run through a launcher is a case or a
+  subcommand. The daemon runs a CLI-only subcommand itself
+  (`Daemon.run_cli`). `tests/test_launcher_verbs_reach_the_cli.py`,
+  `TestTrayRunsOnlyLauncherVerbs` in `tests/test_launcher_dispatch_linux.py`.
 
 ## Check/Confirm Protocol
 - **Every destructive command speaks it** (`confirm.py`): `--check --json`
@@ -436,9 +489,11 @@
   `--confirmed <what>`. Off a terminal it refuses without confirmation
   (exit 3). `{"ask": "password"}` (exit 5): secret via env or stdin.
 - A new question: `confirm.add_arguments`, `confirm.require`, the name in
-  `QUESTIONS`, a dialog in `_ask_cli_question`, a flow in
-  `tests/test_cli_confirm_protocol.py`. The Linux tray is a client too
-  (`tests/test_linux_tray_protocol.py`).
+  `QUESTIONS`, **its one wording in `ui_client.question_text`** (the
+  menubar's `_ask_cli_question` and the tray's `_ask_question` render it;
+  a word to type is `typed`), a flow in
+  `tests/test_cli_confirm_protocol.py` and `tests/test_ui_client.py`. The
+  tray's own side is `tests/test_linux_tray_protocol.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published: nothing private there under a name not
@@ -604,8 +659,8 @@
   `$(( ))`: root in that container chose what the next `onionpress start`
   ran as the Mac user. Every number read out of a container, or derived
   from docker's answer, is now held to `[[ "$x" =~ ^[0123456789]{1,N}$ ]]
-  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`; Linux's
-  `started_epoch`). `[ a -gt b ]` (the test builtin) does not evaluate
+  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`). `[ a -gt
+  b ]` (the test builtin) does not evaluate
   expressions, but write the guard anyway: the census in
   `tests/test_launcher_container_arithmetic.py` follows a value assigned
   from `docker`/`wp_cli`/`wp_exec` output (transitively) into any

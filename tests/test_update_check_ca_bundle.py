@@ -99,22 +99,13 @@ class TestCheckForUpdateReportSaysError(unittest.TestCase):
         self.assertIsNone(report["latest"])
 
 
-def _load_outcome():
-    """update_check_outcome and its NamedTuple out of the tray script
-    (the script itself imports GTK at module level)."""
-    tree = ast.parse(_read(TRAY))
-    keep = [node for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-            and node.name in ("update_check_outcome", "UpdateCheckOutcome")]
-    ns = {"json": json, "NamedTuple": NamedTuple, "Optional": Optional}
-    exec(compile(ast.Module(body=keep, type_ignores=[]), TRAY, "exec"), ns)
-    return ns["update_check_outcome"]
-
-
 class TestTrayOutcome(unittest.TestCase):
+    """ui_client.update_outcome (#526): what the tray's notification and
+    the menubar's dialog say about one check's answer."""
 
     def setUp(self):
-        self.outcome = _load_outcome()
+        from onionpress import ui_client
+        self.outcome = ui_client.update_outcome
 
     def _report(self, **fields):
         report = {"current": "2.5.6", "latest": "2.5.6", "update_available": False,
@@ -125,7 +116,7 @@ class TestTrayOutcome(unittest.TestCase):
     def test_an_error_is_never_up_to_date(self):
         o = self.outcome(0, self._report(
             latest=None, error="Update check curl failed: exit=77 stderr=..."), "")
-        self.assertEqual((o.category, o.title), ("update-check", "Update check failed"))
+        self.assertEqual((o.kind, o.title), ("failed", "Update check failed"))
         self.assertIn("exit=77", o.body)
         self.assertNotIn("Up to date", o.title)
         self.assertIsNone(o.release_url)
@@ -143,24 +134,32 @@ class TestTrayOutcome(unittest.TestCase):
 
     def test_up_to_date(self):
         o = self.outcome(0, self._report(), "")
-        self.assertEqual((o.category, o.title, o.urgency), ("update-check", "Up to date", "low"))
+        self.assertEqual((o.kind, o.title, o.urgency), ("current", "Up to date", "low"))
         self.assertIn("2.5.6", o.body)
 
     def test_update_available(self):
         url = "https://github.com/brewsterkahle/onionpress/releases/tag/v2.6.0"
         o = self.outcome(0, self._report(latest="2.6.0", update_available=True,
                                          release_url=url), "")
-        self.assertEqual((o.category, o.title), ("update-available", "OnionPress 2.6.0 is available"))
-        self.assertIn("onionpress update", o.body)
+        self.assertEqual((o.kind, o.title), ("available", "OnionPress 2.6.0 is available"))
         self.assertEqual(o.release_url, url)
 
     def test_the_menu_item_uses_it(self):
         tray = _read(TRAY)
         handler = tray[tray.index("def _on_check_updates("):tray.index("def _on_uninstall(")]
-        self.assertIn("update_check_outcome(r.returncode, r.stdout, r.stderr)", handler)
+        self.assertIn('Launcher.run_json("check-for-update", "--json")', handler)
+        self.assertIn("ui_client.update_outcome(rc, out, err)", handler)
+        self.assertNotIn("sys.executable", handler)
+        self.assertIn("onionpress update", handler)
         self.assertNotIn("Up to date", handler)
         # "Up to date" is said in one place, after the error field was read.
-        self.assertEqual(tray.count('"update-check", "Up to date"'), 1)
+        self.assertEqual(tray.count("Up to date"), 0)
+        ui_client = _read("src/onionpress/ui_client.py")
+        self.assertEqual(ui_client.count('UpdateOutcome("current", "Up to date"'), 1)
+        menubar = _read("src/menubar.py")
+        handler = menubar[menubar.index("def check_for_updates("):menubar.index("def _install_update(")]
+        self.assertIn("ui_client.update_outcome(rc, out, err)", handler)
+        self.assertIn('outcome.kind == "failed"', handler)
 
 
 if __name__ == "__main__":

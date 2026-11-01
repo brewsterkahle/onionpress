@@ -142,55 +142,6 @@ PIDFILE="$DATA_DIR/onionpress.pid"
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-# One-time host-side migration: ~/Documents/onionpress (Linux default)
-# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
-# source tree recursively so empty subdirs in the destination (from a
-# previous launcher pass) don't block the mv. Issue #239.
-#
-# REMOVE-AFTER 2026-08-01: by then every active install will have
-# migrated. Delete this block and _op_migrate_tree.
-_op_migrate_tree() {
-    local src="$1" dst="$2"
-    [ -d "$src" ] || return 0
-    mkdir -p "$dst"
-    shopt -s dotglob nullglob 2>/dev/null || true
-    local entry base target
-    for entry in "$src"/*; do
-        [ -e "$entry" ] || continue
-        base=$(basename "$entry")
-        target="$dst/$base"
-        if [ -d "$entry" ] && [ -d "$target" ]; then
-            _op_migrate_tree "$entry" "$target"
-            rmdir "$entry" 2>/dev/null || true
-        else
-            mv -n "$entry" "$target" 2>/dev/null || true
-        fi
-    done
-}
-
-if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    _migration_residual=0
-    _migration_did_work=0
-    for OLD in "$HOME/Documents/onionpress" "$HOME/Documents/OnionPress"; do
-        [ -d "$OLD" ] || continue
-        _migration_did_work=1
-        rm -f "$OLD/MOVED.txt" 2>/dev/null || true
-        _op_migrate_tree "$OLD" "$DOCUMENTS_DIR"
-        rmdir "$OLD" 2>/dev/null || true
-        if [ -d "$OLD" ]; then
-            _migration_residual=1
-            echo "OnionPress content moved to $DOCUMENTS_DIR" \
-                > "$OLD/MOVED.txt" 2>/dev/null || true
-        fi
-    done
-    if [ "$_migration_did_work" = "0" ]; then
-        mkdir -p "$DOCUMENTS_DIR"
-    fi
-    if [ "$_migration_residual" = "0" ]; then
-        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-    fi
-fi
-
 # Ensure subtree exists for compose bind-mounts.
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
@@ -435,8 +386,9 @@ KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:l
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing
 # image is pulled by its pinned reference, never when the stack runs locally
-# built images. Returns 1 when it is not here and cannot be. Kept identical
-# in the macOS and Linux launchers; a test enforces that.
+# built images. Returns 1 when it is not here and cannot be. Linux only:
+# create_backup's key read runs the helper; the Python start steps use
+# containers.ensure_key_helper_image.
 ensure_key_helper_image() {
     if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
         return 0
@@ -489,8 +441,9 @@ fi
 # that stop or remove take COMPOSE_WITH_CF, so a tunnel whose token was just
 # removed still goes down with the rest (#352), and start_cloudflare_tunnel
 # names both files itself.
-# apply_config_updates reads it again: the Settings page's Restart applies
-# the page's changes in this same process before start_containers.
+# The Settings page's Restart applies the page's changes (handle-action
+# runs `apply-config`, then `restart`: this process reads the config
+# fresh).
 COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
 read_cloudflare_token() {
     CLOUDFLARE_TUNNEL_TOKEN=""
@@ -1510,19 +1463,6 @@ onionheaven_cmd() {
     op_py --data-dir "$DATA_DIR" onionheaven "$@"
 }
 
-get_onion_address() {
-    cd "$DOCKER_DIR"
-    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    # The whole value must be an onion address: callers cache it and put it
-    # into URLs. Anything else reads as not generated yet.
-    if is_onion_address "$ONION_ADDR"; then
-        echo "$ONION_ADDR"
-        return 0
-    fi
-    echo "Generating..."
-    return 1
-}
-
 # Read and cache healthcheck onion address
 get_healthcheck_address() {
     cd "$DOCKER_DIR"
@@ -1700,418 +1640,11 @@ wait_for_services() {
 # ─── Write status (on-demand) ────────────────────────────────────────
 
 write_status() {
-    # Apply any pending config changes from the WordPress settings page
-    if [ -z "${_IN_WRITE_STATUS:-}" ]; then
-        _IN_WRITE_STATUS=1 apply_config_updates 2>/dev/null || true
-    fi
-
-    cd "$DOCKER_DIR"
-
-    # Get container states
-    local containers_json
-    containers_json=$(docker compose ps --format json 2>/dev/null | python3 -I -c "
-import sys, json
-containers = {}
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        c = json.loads(line)
-        name = c.get('Name', c.get('name', ''))
-        state = c.get('State', c.get('state', 'unknown'))
-        containers[name] = state
-    except json.JSONDecodeError:
-        pass
-print(json.dumps(containers))
-" 2>/dev/null || echo '{}')
-
-    # Get onion address
-    local onion_addr
-    onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    onion_addr=$(echo "$onion_addr" | tr -d '\n\r ')
-    # status.json's address becomes the tray's URLs and the WordPress
-    # status page's link: a whole onion address or nothing.
-    is_onion_address "$onion_addr" || onion_addr=""
-
-    # Get bootstrap percentage (use docker logs directly — compose logs needs env vars
-    # and tail 50 may miss the bootstrap message in verbose logs)
-    local bootstrap_pct=0
-    if docker logs onionpress-tor 2>&1 | grep -q -E "Bootstrapped 100%|Sufficiently bootstrapped"; then
-        bootstrap_pct=100
-    else
-        local pct_line
-        pct_line=$(docker logs --tail 200 onionpress-tor 2>&1 | grep -oE "Bootstrapped [0-9]+%" | tail -1 || echo "")
-        if [ -n "$pct_line" ]; then
-            bootstrap_pct=$(echo "$pct_line" | grep -oE "[0-9]+" || echo 0)
-        fi
-    fi
-
-    # Determine overall state
-    local state="unknown"
-    local tor_state
-    tor_state=$(echo "$containers_json" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-tor','stopped'))" 2>/dev/null || echo "stopped")
-    local wp_state
-    wp_state=$(echo "$containers_json" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-wordpress','stopped'))" 2>/dev/null || echo "stopped")
-
-    if [ "$tor_state" = "running" ] && [ "$wp_state" = "running" ] && [ "$bootstrap_pct" = "100" ]; then
-        # Verify onion service is actually reachable via Tor network
-        if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-            # The heartbeat daemon's recovery loop (onionpress.reachability)
-            # runs the dual probe every 30 s and records its verdict; use it
-            # while it is fresh and for this address. Otherwise probe here,
-            # the static /.onionpress-health first (no PHP) and the front
-            # page only for an image that answers it 404.
-            local reach_verdict reach_code=""
-            reach_verdict=$(python3 -I -c '
-import json, sys, time
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    if (0 <= time.time() - float(d["checked_at"]) <= 180
-            and d.get("onion_address") == sys.argv[2]
-            and d.get("reachable") in (True, False)):
-        print("yes" if d["reachable"] else "no")
-except Exception:
-    pass
-' "$DATA_DIR/reachability.json" "$onion_addr" 2>/dev/null || true)
-            if [ "$reach_verdict" = "yes" ]; then
-                reach_code=200
-            elif [ "$reach_verdict" = "no" ]; then
-                reach_code=000
-            else
-                reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/.onionpress-health" 2>/dev/null || echo "000")
-                if [ "$reach_code" = "404" ]; then
-                    reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
-                fi
-            fi
-            if [ "$reach_code" = "200" ] || [ "$reach_code" = "301" ] || [ "$reach_code" = "302" ]; then
-                state="running"
-            else
-                state="starting"
-            fi
-        else
-            state="starting"
-        fi
-    elif [ "$wp_state" = "running" ] || [ "$tor_state" = "running" ]; then
-        state="starting"
-    else
-        state="stopped"
-    fi
-
-    # Log state transitions — especially when the onion address first becomes reachable
-    local prev_state=""
-    local state_file="$DATA_DIR/.last_status_state"
-    if [ -f "$state_file" ]; then
-        prev_state=$(cat "$state_file" 2>/dev/null || echo "")
-    fi
-    if [ "$state" != "$prev_state" ]; then
-        if [ "$state" = "running" ]; then
-            log "Onion service is now reachable at http://${onion_addr}/"
-        elif [ "$state" = "starting" ] && [ "$prev_state" = "running" ]; then
-            log "Onion service is no longer reachable (state: starting)"
-        elif [ "$state" = "stopped" ] && [ "$prev_state" != "" ] && [ "$prev_state" != "stopped" ]; then
-            log "OnionPress stopped"
-        fi
-        echo "$state" > "$state_file"
-    fi
-
-    # One-shot WEDGE WARNING after 10+ min in "starting" without reaching
-    # "running". Mirrors src/menubar.py's wedge-recovery hint so a user
-    # whose Docker daemon or rootless socket is stuck gets actionable
-    # guidance in the log instead of an indefinitely yellow tray icon.
-    local yellow_since_file="$DATA_DIR/.yellow-since"
-    local wedge_marker="$DATA_DIR/.wedge-warning-fired"
-    if [ "$state" = "running" ]; then
-        rm -f "$yellow_since_file" "$wedge_marker" 2>/dev/null || true
-    elif [ "$state" = "starting" ]; then
-        if [ ! -f "$yellow_since_file" ]; then
-            date +%s > "$yellow_since_file"
-        elif [ ! -f "$wedge_marker" ]; then
-            local yellow_since now_epoch elapsed
-            yellow_since=$(cat "$yellow_since_file" 2>/dev/null || echo 0)
-            now_epoch=$(date +%s)
-            elapsed=$((now_epoch - yellow_since))
-            if [ "$elapsed" -ge 600 ]; then
-                log "WEDGE WARNING: WordPress unreachable for 10+ min. Try restarting the OnionPress service: \`systemctl --user restart onionpress\` (or the system equivalent). If still wedged, the Docker daemon may be stuck — restart it with \`systemctl --user restart docker\` (rootless) or \`sudo systemctl restart docker\` (system Docker)."
-                : > "$wedge_marker"
-            fi
-        fi
-    fi
-
-    # Get uptime (seconds since tor container started)
-    local uptime_seconds=0
-    local started_at
-    started_at=$(docker inspect --format '{{.State.StartedAt}}' onionpress-tor 2>/dev/null || echo "")
-    if [ -n "$started_at" ] && [ "$started_at" != "0001-01-01T00:00:00Z" ]; then
-        local started_epoch
-        started_epoch=$(date -d "$started_at" +%s 2>/dev/null || echo 0)
-        # Derived from docker's answer: only a plain number goes into
-        # bash arithmetic (issue #466).
-        [[ "$started_epoch" =~ ^[0123456789]{1,12}$ ]] || started_epoch=0
-        local now_epoch
-        now_epoch=$(date +%s)
-        if [ "$started_epoch" -gt 0 ] 2>/dev/null; then
-            uptime_seconds=$((now_epoch - started_epoch))
-        fi
-    fi
-
-    # Wayback queue count: posts not yet archived (waiting plus in flight),
-    # from the plugin's own totals. The onionpress_wayback_queue option this
-    # used to read was the v3 JSON queue, which the v4 plugin deleted, so
-    # the count was always 0.
-    local wayback_queue=0
-    wayback_queue=$(wp_cli eval 'echo json_encode(onionpress_wayback_queue_totals());' 2>/dev/null | python3 -I -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(int(data.get('remaining', 0)) + int(data.get('in_flight', 0)))
-except Exception:
-    print(0)
-" 2>/dev/null || echo 0)
-
-    local now_iso
-    now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-    # Gather OnionHeaven stats
-    local oh_server_active="false"
-    local oh_registered_count=0
-    local oh_online_count=0
-    local oh_taken_over_count=0
-    local oh_takeover_containers=0
-    local oh_client_registered="false"
-    local oh_client_hub=""
-    local oh_config_enabled="false"
-
-    # Read client registration state
-    if [ -f "$DATA_DIR/onionheaven-registration.json" ]; then
-        oh_client_registered=$(python3 -I -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    print('true' if d.get('registered') else 'false')
-except: print('false')
-" "$DATA_DIR/onionheaven-registration.json" 2>/dev/null || echo "false")
-    fi
-
-    # Read config
-    if [ -f "$DATA_DIR/config" ]; then
-        oh_config_enabled=$(config_value REGISTER_WITH_ONIONHEAVEN)
-        oh_client_hub=$(config_value ONIONHEAVEN_ADDRESS)
-    fi
-    # On by default: "yes" or unset is enabled, anything else is not.
-    oh_config_enabled=${oh_config_enabled:-yes}
-    [ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no
-    oh_client_hub=${oh_client_hub:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}
-
-    # Hub or client: by the served address (is_onionheaven_hub), as the Mac
-    # daemon decides it, never by a running onionheaven container, which
-    # every node has (issue #345). The registry is queried on the hub only.
-    if is_onionheaven_hub "$onion_addr"; then
-        oh_server_active="true"
-        # Query OH server stats from registry DB
-        local oh_stats
-        oh_stats=$(docker exec onionheaven sqlite3 /var/lib/onionheaven/registry.db \
-            "SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN status='online' THEN 1 ELSE 0 END) AS online,
-                SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) AS taken_over
-            FROM registry" 2>/dev/null || echo "0|0|0")
-        oh_registered_count=$(echo "$oh_stats" | cut -d'|' -f1)
-        oh_online_count=$(echo "$oh_stats" | cut -d'|' -f2)
-        oh_taken_over_count=$(echo "$oh_stats" | cut -d'|' -f3)
-        oh_registered_count=${oh_registered_count:-0}
-        oh_online_count=${oh_online_count:-0}
-        oh_taken_over_count=${oh_taken_over_count:-0}
-        oh_takeover_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE '^onionheaven-takeover-[0-9]+$' 2>/dev/null || true)
-        oh_takeover_containers=${oh_takeover_containers:-0}
-    fi
-
-    # System load averages and host uptime (Linux)
-    local load_avg_json="[]"
-    if [ -f /proc/loadavg ]; then
-        load_avg_json=$(awk '{printf "[%s, %s, %s]", $1, $2, $3}' /proc/loadavg 2>/dev/null || echo "[]")
-    fi
-    local host_uptime_seconds=0
-    if [ -f /proc/uptime ]; then
-        host_uptime_seconds=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
-    fi
-
-    # Extra fields for the Linux tray. Cheap probes that don't add measurable
-    # latency to the 10s watcher tick.
-    local wp_installed_str="false"
-    if wp_is_installed 2>/dev/null; then
-        wp_installed_str="true"
-    fi
-    local onboarded="false"
-    if [ "$wp_installed_str" = "true" ]; then
-        # Read via get_site_option — same call the onionpress-onboarding
-        # mu-plugin uses to decide whether to redirect the admin. Reading
-        # wp_options here would diverge after multisite-convert: per-blog
-        # options stay set, but the network-wide table (wp_sitemeta) is
-        # what the plugin checks, and that's where install_fresh_wordpress
-        # now writes the marker.
-        local _opt
-        _opt=$(wp_cli eval 'echo (string) get_site_option("onionpress_onboarded", "");' 2>/dev/null | tr -d '\r\n ')
-        if [ -n "$_opt" ] && [ "$_opt" != "0" ] && [ "$_opt" != "false" ]; then
-            onboarded="true"
-        fi
-    fi
-    local mkp224o_available="false"
-    # Tag-only by design: pinning this to a digest would make a locally built
-    # image fail the check and silently fall back to a random .onion (the
-    # v2.4.101 regression). It follows ONIONPRESS_TOR_IMAGE so a local build
-    # is recognised; build/build-images.sh also shadow-tags the GHCR name so
-    # the default below keeps working either way.
-    if docker image inspect "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >/dev/null 2>&1; then
-        # Image presence is enough; we trust the build had mkp224o.
-        mkp224o_available="true"
-    fi
-    local wp_admin_password_file=""
-    if [ -f "$DATA_DIR/wp-admin-password" ]; then
-        wp_admin_password_file="$DATA_DIR/wp-admin-password"
-    fi
-    local vanity_in_progress="false"
-    if [ -f "$DATA_DIR/.vanity-running" ]; then
-        vanity_in_progress="true"
-    fi
-    # OnionHeaven "serving from Wayback" — for now treat this as the case
-    # where local state is not 'running' but the client is registered with
-    # a hub. A more precise signal will come from the hub heartbeat.
-    local serving_from_wayback="false"
-    if [ "$state" != "running" ] && [ "$oh_client_registered" = "true" ]; then
-        serving_from_wayback="true"
-    fi
-
-    # Both OnionHeaven roles for the OnionHeaven page (onionheaven.overview:
-    # the record, the config, and the registry's rows on a hub).
-    local oh_overview_json
-    oh_overview_json=$(op_py --data-dir "$DATA_DIR" onionheaven overview --json 2>/dev/null || echo '{}')
-
-    # Build status.json
-    local status_json
-    status_json=$(op_py --data-dir "$DATA_DIR" linux-status \
-        --field "state=$state" --field "version=$ONIONPRESS_VERSION" \
-        --field "onion_address=$onion_addr" \
-        --field "uptime_seconds=$uptime_seconds" \
-        --field "bootstrap_pct=$bootstrap_pct" \
-        --field "containers=$containers_json" \
-        --field "wayback_queue_count=$wayback_queue" \
-        --field "updated_at=$now_iso" \
-        --field "oh_server_active=$oh_server_active" \
-        --field "oh_registered_count=$oh_registered_count" \
-        --field "oh_online_count=$oh_online_count" \
-        --field "oh_taken_over_count=$oh_taken_over_count" \
-        --field "oh_takeover_containers=$oh_takeover_containers" \
-        --field "oh_client_registered=$oh_client_registered" \
-        --field "oh_client_hub=$oh_client_hub" \
-        --field "oh_client_enabled=$oh_config_enabled" \
-        --field "load_avg=$load_avg_json" \
-        --field "host_uptime_seconds=$host_uptime_seconds" \
-        --field "wp_installed=$wp_installed_str" --field "onboarded=$onboarded" \
-        --field "mkp224o_available=$mkp224o_available" \
-        --field "wp_admin_password_path=$wp_admin_password_file" \
-        --field "vanity_in_progress=$vanity_in_progress" \
-        --field "serving_from_wayback=$serving_from_wayback" \
-        --field "wp_port=${ONIONPRESS_WP_PORT:-8080}" \
-        --field "onionheaven_overview=$oh_overview_json")
-
-    # Write to shared volume (consumed by the WP settings/status page): only
-    # the fields those pages show (redact.WORDPRESS_STATUS_KEYS, shared with
-    # the Mac app) — PHP can read the file, and wp_admin_password_path is a
-    # path under $HOME. If the filter fails, leave the old copy alone rather
-    # than write the full status.
-    local wp_status_json
-    if wp_status_json=$(printf '%s' "$status_json" | op_py --data-dir "$DATA_DIR" wordpress-status 2>>"$LOG_FILE"); then
-        echo "$wp_status_json" | wp_put /var/lib/onionpress/status.json 2>>"$LOG_FILE"
-    fi
-    # Also write to the host data dir — the tray app reads this directly,
-    # without going through docker exec on every poll.
-    printf '%s\n' "$status_json" > "$DATA_DIR/status.json.tmp" 2>>"$LOG_FILE" \
-        && mv -f "$DATA_DIR/status.json.tmp" "$DATA_DIR/status.json" 2>>"$LOG_FILE"
-
-    # Write version file for the settings page update checker
-    echo "$ONIONPRESS_VERSION" | wp_put /var/lib/onionpress/version 2>>"$LOG_FILE"
-
-    # Build config-current.json from ~/.onionpress/config — allowlisted keys
-    # only (SAFE_CONFIG_KEYS, shared with the Mac app): the file is readable
-    # by WordPress/PHP and the config can hold secrets such as
-    # CLOUDFLARE_TUNNEL_TOKEN. On failure write {}, never the raw config,
-    # so an older full copy in the volume is still overwritten.
-    local config_json
-    config_json=$(op_py --data-dir "$DATA_DIR" safe-config 2>>"$LOG_FILE") || config_json="{}"
-
-    echo "$config_json" | wp_put /var/lib/onionpress/config-current.json 2>>"$LOG_FILE"
-
-    write_recent_logs
-}
-
-# The end of the log, for the status page's Recent Logs. PHP can read
-# recent-logs.txt, so it is scrubbed first (redact.scrub_for_wordpress:
-# no home path or user name, credentials or non-loopback IPs) and never
-# copied raw: if the scrub fails, a placeholder goes instead.
-write_recent_logs() {
-    [ -f "$LOG_FILE" ] || return 0
-    local logs
-    logs=$(op_py --data-dir "$DATA_DIR" wordpress-logs --log-file "$LOG_FILE" 2>/dev/null) \
-        || logs="(Recent logs unavailable: could not scrub $(basename "$LOG_FILE") for display.)"
-    printf '%s\n' "$logs" | wp_put /var/lib/onionpress/recent-logs.txt 2>/dev/null
-}
-
-# ─── Config watcher (on-demand) ──────────────────────────────────────
-
-apply_config_updates() {
-    # Check if settings page wrote config-updates.json
-    local updates result changed rejected
-    updates=$(wp_exec cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
-
-    if [ -z "$updates" ] || [ "$updates" = "{}" ]; then
-        return 0
-    fi
-
-    log "Applying config updates from settings page..."
-
-    # Anything running in WordPress can write that file, so the shared
-    # allowlist (config.SETTINGS_PAGE_KEYS, as on the Mac) applies only the
-    # settings page's own keys with valid values. It reports key names,
-    # never values.
-    if ! result=$(printf '%s' "$updates" | op_py --data-dir "$DATA_DIR" apply-settings-updates 2>>"$LOG_FILE"); then
-        log "WARNING: Could not apply config updates from settings page"
-        return 1
-    fi
-    changed=$(printf '%s\n' "$result" | sed -n 's/^changed //p' | tr '\n' ' ')
-    rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
-    [ -z "$changed" ] || log "Settings page changed: ${changed% }"
-    [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
-    # A tunnel token is never set from the page (#463): its owner would
-    # see this host's IP. Removing it is applied above.
-    if printf '%s\n' "$result" | grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'; then
-        log "WARNING: Settings page asked to set CLOUDFLARE_TUNNEL_TOKEN; not set. On this computer run: onionpress config set CLOUDFLARE_TUNNEL_TOKEN -"
-    fi
-
-    # Clear the updates file
-    wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
-
-    # A token set or removed on the page counts from the next start_containers
-    # (the page's Restart runs it in this process).
-    read_cloudflare_token
-
-    # Handle START_ON_BOOT (re-applied whenever the page sends it)
-    if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
-        local boot_val
-        boot_val=$(config_value START_ON_BOOT)
-        if [ "$boot_val" = "yes" ]; then
-            systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
-        else
-            systemctl --user disable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
-        fi
-    fi
-
-    # Write updated status
-    write_status
-
-    log "Config updates applied"
+    # One status writer for both platforms (onionpress.status_writer,
+    # issue #523): the daemon's two documents from one pass over the
+    # stack. Its lines reach the log and the terminal as log's did;
+    # a failure is in the log, never a stopped caller.
+    op_py --data-dir "$DATA_DIR" write-status 2>&1 | tee -a "$LOG_FILE"
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -2746,17 +2279,18 @@ update_finish() {
         log "Updated plugins deployed to WordPress container"
     fi
 
-    # Pull latest docker images. Unlike the start path this has no
-    # --policy guard, so it would clobber a local build outright.
+    # Pull the release's images: every pin is a digest, so `--policy
+    # missing` fetches exactly what the new release moved (as the start
+    # does) and never clobbers a local build.
     cd "$INSTALL_DIR/docker"
     setup_db_passwords
     if using_local_images; then
         log "Skipping image pull: running locally built images"
         echo "  Skipping image pull (running locally built images)"
     else
-        log "Pulling latest Docker images..."
-        echo "  Pulling latest Docker images..."
-        docker compose "${CF_COMPOSE[@]}" pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+        log "Pulling the release's Docker images..."
+        echo "  Pulling the release's Docker images..."
+        docker compose "${CF_COMPOSE[@]}" pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
     fi
 
     # Restart, the heartbeat client too (its script was replaced):
@@ -3170,8 +2704,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         apply-config)
-            setup_db_passwords
-            apply_config_updates
+            # The Settings page's config-updates.json, through the allowlist
+            # (config.SETTINGS_PAGE_KEYS) and config.apply_side_effects
+            # (START_ON_BOOT's units): onionpress.handle_action.apply_config,
+            # as on the Mac. handle-action applies it on every run too.
+            op_py --data-dir "$DATA_DIR" apply-config
             ;;
 
         onionheaven)
@@ -3533,9 +3070,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         *)
-            echo "onionpress: unknown command: $1" >&2
-            usage >&2
-            exit 1
+            # Every other verb is onionpress.cli's: a subcommand with no
+            # case of its own reaches it here (check-for-update,
+            # ensure-archive-s3-keys, ...), and one the CLI does not have
+            # either gets the CLI's usage and exit status.
+            op_py --data-dir "$DATA_DIR" "$@"
             ;;
     esac
 }

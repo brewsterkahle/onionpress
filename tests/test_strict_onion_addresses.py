@@ -383,7 +383,7 @@ class TestLinuxHeartbeat(unittest.TestCase):
     def test_every_config_read_goes_through_it(self):
         src = _read("linux/onionpress-heartbeat.py")
         self.assertNotIn('config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)', src)
-        self.assertEqual(src.count("= _hub_address(config)"), 3)
+        self.assertEqual(src.count("= _hub_address(config)"), 2)
 
     def test_sign_and_post_refuses_a_malformed_hub(self):
         priv, pub = os.urandom(64), os.urandom(32)
@@ -396,30 +396,6 @@ class TestLinuxHeartbeat(unittest.TestCase):
                         self.hb.sign_and_post("online", hub, SITE, HC, priv, pub),
                         (False, None))
                 self.assertEqual(rec.calls, [])
-
-    def test_offline_once_takes_no_malformed_cached_address(self):
-        hb = self.hb
-        p = mock.patch.object(hb.key_manager, "extract_keys",
-                              return_value=(os.urandom(64), os.urandom(32)))
-        p.start()
-        self.addCleanup(p.stop)
-        state = os.path.join(_HB_HOME, "state.json")
-        hc_cache = os.path.join(hb.DATA_DIR, "healthcheck-address")
-        self.addCleanup(lambda: os.path.exists(hc_cache) and os.remove(hc_cache))
-        for content, hc in ((LOOSE[0], HC), (SITE, LOOSE[0])):
-            with self.subTest(content=content, hc=hc):
-                with open(state, "w") as f:
-                    json.dump({"content_address": content}, f)
-                with open(hc_cache, "w") as f:
-                    f.write(hc + "\n")
-                rec = _Recorder("")   # the hostname files are empty too
-                with mock.patch.object(hb, "STATE_PATH", state), \
-                        mock.patch.object(hb, "read_config",
-                                          return_value={"REGISTER_WITH_ONIONHEAVEN": "yes"}), \
-                        mock.patch.object(hb, "sign_and_post",
-                                          side_effect=AssertionError("posted")), \
-                        mock.patch.object(hb.subprocess, "run", rec):
-                    self.assertEqual(hb.offline_once(), 1)
 
 
 # ─── Hosts that route a request ─────────────────────────────────────────
@@ -889,14 +865,11 @@ class TestLaunchers(unittest.TestCase):
         cache = os.path.join(tmp, "healthcheck-address")
         return r, (open(cache).read() if os.path.exists(cache) else None)
 
-    def test_get_onion_address(self):
+    def test_no_bash_reader_of_the_site_address_is_left(self):
+        # get_onion_address had no callers; the readers are Python's
+        # (onion_hostname.read_served_address, containers.get_onion_address).
         for rel in LAUNCHERS:
-            r, _ = self._with_fake_docker(rel, "get_onion_address", SITE + "\n")
-            self.assertEqual((r.returncode, r.stdout), (0, SITE + "\n"), rel)
-            for value in LOOSE:
-                with self.subTest(rel=rel, value=value):
-                    r, _ = self._with_fake_docker(rel, "get_onion_address", value)
-                    self.assertEqual((r.returncode, r.stdout), (1, "Generating...\n"))
+            self.assertNotIn("\nget_onion_address() {", _read(rel), rel)
 
     def test_get_healthcheck_address(self):
         for rel in LAUNCHERS:
@@ -908,8 +881,13 @@ class TestLaunchers(unittest.TestCase):
                     self.assertEqual((r.returncode, r.stdout, cache), (1, "", None))
 
     def test_linux_status_carries_only_a_whole_address(self):
-        self.assertIn('is_onion_address "$onion_addr" || onion_addr=""',
-                      _bash_function(_read("linux/onionpress"), "write_status"))
+        # The status is the writer's (onionpress.status_writer, #523): the
+        # served address read by onion_hostname's rule, and status.json's
+        # address a whole v3 address or nothing.
+        writer = _read("src/onionpress/status_writer.py")
+        self.assertIn("addr = onion_hostname.read_served_address(self._docker)", writer)
+        self.assertIn('addr = app.onion_address if key_manager.is_valid_onion_address(app.onion_address) else ""',
+                      writer)
 
 
 # ─── WordPress side ─────────────────────────────────────────────────────
@@ -959,10 +937,9 @@ class TestWordPressConsumers(unittest.TestCase):
 
 # (file, function): sites that may still test a suffix, and why.
 ALLOWED_SUFFIX_TESTS = {
-    # Display only: shortens an address for a menu title.
-    ("src/menubar.py", "_short_onion"),
+    # Display only: shortens an address for a menu title (both UIs).
+    ("src/onionpress/ui_client.py", "short_onion"),
     ("src/menubar.py", "do_update"),
-    ("linux/onionpress-tray", "_update_status_line"),
     # Equality with a fixed address follows.
     ("src/onionpress/onionheaven.py", "is_onionheaven_instance"),
     ("src/onionpress/onionheaven.py", "should_auto_prevent_sleep"),
