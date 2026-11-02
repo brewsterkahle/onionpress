@@ -32,7 +32,6 @@ MENUBAR = os.path.join(PROJECT_ROOT, "src", "menubar.py")
 # action (a backup, a restore, an update, a key, an upload).
 ALLOWED = {
     "key_manager": {"is_valid_onion_address"},
-    "wp_files": {"WP_USER", "put_file_args", "wp_cli_args"},
 }
 NEVER_IMPORTED = ("backup", "hub_backup", "updater")
 

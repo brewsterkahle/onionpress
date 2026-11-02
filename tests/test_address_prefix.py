@@ -41,6 +41,7 @@ from onionpress.config import (  # noqa: E402
 )
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import no_docker  # noqa: E402
 from test_config_one_reader import config_value_function  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -138,7 +139,7 @@ class TestEmptyPrefix(unittest.TestCase):
         from onionpress.launcher_ops import generate_vanity_in_container
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError) as ctx:
-                generate_vanity_in_container("", tmp)
+                generate_vanity_in_container("", tmp, docker=no_docker(self))
         self.assertIn("empty", str(ctx.exception))
 
     def test_cli_substitutes_the_default_for_a_present_but_empty_key(self):

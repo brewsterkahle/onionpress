@@ -38,7 +38,7 @@ from onionpress.backup import (  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 from onionpress.config import PortConfig, Secrets  # noqa: E402
 from onionpress.containers import ContainerStatus  # noqa: E402
-from onionpress.docker import DockerResult  # noqa: E402
+from onionpress.docker import Docker, DockerResult  # noqa: E402
 from onionpress.launcher_ops import BACKUP_PASSWORD_ENV  # noqa: E402
 from onionpress.platform import OS, resolve_paths  # noqa: E402
 
@@ -297,7 +297,10 @@ class TestLogFuncs(Sandbox):
 
 class TestHubContext(Sandbox):
 
-    def test_the_docker_environment_and_the_hub_address(self):
+    def test_the_docker_runner_and_the_hub_address(self):
+        """The context's Docker is this install's (issue #477: its socket
+        from the paths), and nothing is exported into the process's
+        environment for a bare `docker` any more."""
         bin_dir = os.path.join(self.dir, "bin")
         os.mkdir(bin_dir)
         self.write("config", f"ONIONHEAVEN_ADDRESS={HUB}\n")
@@ -306,17 +309,14 @@ class TestHubContext(Sandbox):
         saved = onionheaven.ONIONHEAVEN_ADDRESS
         self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS", saved)
         with mock.patch("onionpress.onionheaven.resolve_paths", return_value=paths), \
-                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
             ctx = cli._hub_context(self.dir, self.log)
-            self.assertEqual(os.environ["DOCKER_HOST"], f"unix://{paths.docker_socket}")
-            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], bin_dir)
-            # A second call adds the bin dir once and keeps a DOCKER_HOST
-            # the launcher exported.
-            os.environ["DOCKER_HOST"] = "unix:///launcher"
-            cli._hub_context(self.dir, self.log)
-            self.assertEqual(os.environ["DOCKER_HOST"], "unix:///launcher")
-            self.assertEqual(os.environ["PATH"].split(os.pathsep).count(bin_dir), 1)
+            self.assertNotIn("DOCKER_HOST", os.environ)
+            self.assertEqual(os.environ["PATH"], "/usr/bin")
         self.assertIsInstance(ctx, onionheaven.HubContext)
+        self.assertIsInstance(ctx.docker, Docker)
+        self.assertEqual(ctx.docker.env["DOCKER_HOST"], f"unix://{paths.docker_socket}")
+        self.assertEqual(ctx.docker.env["PATH"].split(os.pathsep)[0], bin_dir)
         self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, HUB)
 
 
@@ -847,7 +847,7 @@ class TestCmdRestore(Sandbox):
         self.read_meta = p(mock.patch("onionpress.backup.read_backup_metadata",
                                       side_effect=lambda *a: dict(self.meta)))
 
-        def prepare(zip_path, password, log, *, data_dir=None, after_extract=None):
+        def prepare(zip_path, password, log, *, docker=None, data_dir=None, after_extract=None):
             if after_extract:
                 after_extract(self.staging, dict(self.meta))
             return self.staging, dict(self.meta)
@@ -1025,7 +1025,8 @@ class TestImportBackupArtifacts(Sandbox):
         self.assertEqual(self.cli.cmd_import_backup_artifacts(self.staging), 0)
         args, kw = self.restore.call_args
         self.assertEqual(args[:2], (self.staging, {"onion_address": ADDR}))
-        self.assertEqual(kw, {"name_registry": True, "hub_data": None, "data_dir": self.dir})
+        self.assertEqual(kw, {"docker": self.cli.docker, "name_registry": True, "hub_data": None,
+                              "data_dir": self.dir})
         self.cli.docker.wp.assert_called_once_with("core", "update-db", timeout=120)
         self.assertIn("Install-from-backup: artifacts imported", self.cli.logged)
 
@@ -1065,7 +1066,7 @@ class TestStagingHelpers(Sandbox):
         self.assertEqual(self.cli.logged, [])
         with open(self.cli.paths.log_file) as f:
             self.assertIn("from the sweep", f.read())
-        self.assertEqual(regen.call_args.kwargs["docker_bin"], "/stub/docker")
+        self.assertIs(regen.call_args.kwargs["docker"], self.cli.docker)
         with mock.patch("onionpress.derivatives.regenerate_if_pending",
                         return_value=True) as regen, \
                 mock.patch.object(sys, "stderr", mock.Mock(isatty=lambda: True)):
@@ -1076,10 +1077,14 @@ class TestStagingHelpers(Sandbox):
         with mock.patch("onionpress.wp_files.put_tree", side_effect=[
                 mock.Mock(returncode=0), mock.Mock(returncode=1, stderr="tar: denied\n"),
                 OSError("no docker")]) as put:
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x", True), 0)
-            self.assertEqual(put.call_args.kwargs, {"merge": True})
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x"), 1)
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x"), 1)
+            docker = object()
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x", True,
+                                                           docker=docker), 0)
+            self.assertEqual(put.call_args.kwargs, {"docker": docker, "merge": True})
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x",
+                                                           docker=docker), 1)
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x",
+                                                           docker=docker), 1)
         err = self.err.getvalue()
         self.assertIn("Could not copy theme into WordPress: tar: denied", err)
         self.assertIn("Could not copy theme into WordPress: no docker", err)
@@ -1087,7 +1092,7 @@ class TestStagingHelpers(Sandbox):
     def test_passthroughs(self):
         with mock.patch("onionpress.wayback_smoke.smoke_test_wayback", return_value=5) as smoke:
             self.assertEqual(self.cli.cmd_smoke_test_wayback(), 5)
-        smoke.assert_called_once_with(self.cli.log)
+        smoke.assert_called_once_with(self.cli.docker, self.cli.log)
         with mock.patch("onionpress.cli.check_for_update_report", return_value=0) as report:
             self.assertEqual(self.cli.cmd_check_for_update(json_output=True), 0)
             report.assert_called_once_with(cli.__version__, self.cli.log, True)
@@ -1167,25 +1172,25 @@ class TestHubRecoveryKeyCommands(Sandbox):
                 mock.patch("onionpress.hub_backup.unpack", return_value="hub"), \
                 mock.patch("onionpress.hub_backup.check", return_value="checked-hub"), \
                 mock.patch("onionpress.backup.write_hub_data") as write:
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 0)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 0)
             self.assertEqual(unseal.call_args.args, (b"blob", hub_backup.parse_private_key(text)))
             self.assertEqual(write.call_args.args[0], "checked-hub")
             self.assertIn("registrants' keys restored.", self.out.getvalue())
             # The key is checked before anything is written.
             other, _ = hub_backup.create_recovery_key(os.path.join(self.dir, "b"))
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", other), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", other, docker=mock.Mock()), 1)
             self.assertEqual(write.call_count, 1)
             # A failed write.
             write.side_effect = RuntimeError("docker cp")
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
             self.assertIn("could not restore the OnionHeaven data: docker cp", self.err.getvalue())
         with mock.patch("onionpress.backup.read_sealed_hub_member",
                         side_effect=ValueError("This backup holds no sealed hub data.")):
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
         self.assertIn("ERROR: This backup holds no sealed hub data.", self.err.getvalue())
         with mock.patch("onionpress.backup.read_sealed_hub_member",
                         return_value=({**meta, "onionheaven_sealed_format": 9}, b"blob")):
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
         self.assertIn(hub_backup.NEWER_SEAL_MSG.split("\n")[0][:40], self.err.getvalue())
 
 
@@ -1435,6 +1440,7 @@ class TestSettingsPageBackup(Sandbox):
         args, kw = self.create.call_args
         self.assertEqual(args[:4], (ADDR, "owner", "pw", "/out.zip"))
         self.assertEqual(args[4], cli.__version__)
+        self.assertIsInstance(kw.pop("docker"), Docker)
         self.assertEqual(kw, {"include_hub_data": False, "include_host_secrets": False,
                               "include_onion_key": False})
 
@@ -1474,7 +1480,7 @@ class TestSettingsPageRestore(Sandbox):
     def test_the_hubs_are_asked_before_the_key_changes_and_a_refusal_is_logged(self):
         seen = {}
 
-        def restore(zip_path, password, log, *, through_wordpress, before_key_change,
+        def restore(zip_path, password, log, *, docker, through_wordpress, before_key_change,
                     confirm_address_change):
             seen["through"] = through_wordpress
             seen["confirmed"] = confirm_address_change(ADDR, OTHER)
@@ -1517,7 +1523,9 @@ class TestPrepareRestore(Sandbox):
         with mock.patch("onionpress.backup.prepare_install_from_backup",
                         return_value=("/stg", meta)) as prepare:
             rc = cli.cmd_prepare_restore("/b.zip", "pw", self.dir, True)
-        self.assertEqual(prepare.call_args.kwargs, {"data_dir": self.dir})
+        kwargs = dict(prepare.call_args.kwargs)
+        self.assertIsInstance(kwargs.pop("docker"), Docker)
+        self.assertEqual(kwargs, {"data_dir": self.dir})
         return rc
 
     def test_a_plain_backup(self):

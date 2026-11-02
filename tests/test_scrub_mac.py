@@ -5,6 +5,7 @@ reset in place → restore → verify, what the Mac launcher's 150-line
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "src"))
 
 from onionpress import onionheaven, scrub  # noqa: E402
+
+sys.path.insert(0, HERE)
+from fake_docker import FakeDocker  # noqa: E402
 
 SITE = "op2" + "a" * 53 + ".onion"
 OTHER = "op2" + "b" * 53 + ".onion"
@@ -46,17 +50,28 @@ class _Case(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="")
         return run
 
+    def fake_docker(self, answers):
+        """A docker.Docker stand-in answering like fake_run (the argv it
+        sees starts with the binary, so the prefixes read "docker …")."""
+        run = self.fake_run(answers)
+
+        def answer(argv, **kw):
+            r = run(argv, **kw)
+            return subprocess.CompletedProcess(argv, r.returncode, r.stdout, "")
+        return FakeDocker(answer)
+
 
 class TestPhaseBackupMac(_Case):
 
     def test_the_backup_lands_in_the_data_dir_with_the_identity_and_a_log_mark(self):
         with open(os.path.join(self.data, "onionpress.log"), "w") as f:
             f.write("one\ntwo\n")
-        run = self.fake_run({f"{LAUNCHER} backup --output": (0, ""),
-                             "docker exec onionpress-tor cat": (0, SITE + "\n")})
+        run = self.fake_run({f"{LAUNCHER} backup --output": (0, "")})
+        docker = self.fake_docker({"docker exec onionpress-tor cat": (0, SITE + "\n")})
         with mock.patch.object(scrub, "_run", run), \
                 mock.patch.dict(os.environ, {}, clear=False):
-            state = scrub.phase_backup_mac("pw", self.log, launcher=LAUNCHER, data_dir=self.data)
+            state = scrub.phase_backup_mac("pw", self.log, launcher=LAUNCHER, data_dir=self.data,
+                                           docker=docker)
         self.assertTrue(state.backup_path.startswith(os.path.join(self.data, "onionpress-scrub-")))
         self.assertTrue(state.backup_path.endswith(".zip"))
         self.assertEqual((state.onion_address, state.repo_dir), (SITE, "2"))
@@ -69,7 +84,8 @@ class TestPhaseBackupMac(_Case):
         run = self.fake_run({f"{LAUNCHER} backup --output": (1, "")})
         with mock.patch.object(scrub, "_run", run):
             with self.assertRaisesRegex(RuntimeError, "Backup file missing or empty"):
-                scrub.phase_backup_mac("pw", self.log, launcher=LAUNCHER, data_dir=self.data)
+                scrub.phase_backup_mac("pw", self.log, launcher=LAUNCHER, data_dir=self.data,
+                                       docker=mock.Mock())
 
 
 class TestPhaseResetInPlace(_Case):
@@ -147,12 +163,11 @@ class TestPhaseVerifyMac(_Case):
         with open(os.path.join(self.data, "onionpress.log"), "w") as f:
             f.write("old line\n" + log_text)
         names = "\n".join(scrub.EXPECTED_CONTAINERS) if running else "onionpress-db"
-        run = self.fake_run({"docker ps --format": (0, names + "\n"),
-                             "docker exec onionpress-tor cat": (0, after + "\n"),
-                             "docker exec onionpress-wordpress curl": (0, http)})
+        docker = self.fake_docker({"docker ps --format": (0, names + "\n"),
+                                   "docker exec onionpress-tor cat": (0, after + "\n"),
+                                   "docker exec onionpress-wordpress curl": (0, http)})
         state = scrub.PreScrubState(onion_address=before, repo_dir="1")
-        with mock.patch.object(scrub, "_run", run):
-            return scrub.phase_verify_mac(state, self.log, data_dir=self.data)
+        return scrub.phase_verify_mac(state, self.log, data_dir=self.data, docker=docker)
 
     def test_everything_good(self):
         checks = self.verify()
@@ -279,7 +294,8 @@ class TestConfirmYes(unittest.TestCase):
 class TestLinuxDefaults(unittest.TestCase):
     def test_run_scrub_on_linux_keeps_its_cycle(self):
         with mock.patch.object(scrub, "_confirm", return_value=False) as conf:
-            self.assertEqual(scrub.run_scrub(os_name="linux", log_func=lambda m: None), 0)
+            self.assertEqual(scrub.run_scrub(os_name="linux", log_func=lambda m: None,
+                                             docker=mock.Mock()), 0)
         conf.assert_called_once()
 
 

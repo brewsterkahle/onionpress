@@ -32,6 +32,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import setup_logic  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker  # noqa: E402
 
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 ONION = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
@@ -108,8 +110,10 @@ class TestTheLiterals(unittest.TestCase):
         start = text.index("\n        provision)\n")
         end = text.index("\n            ;;\n", start)
         case = text[start:end]
-        self.assertIn("provision_interactive(adopt_existing='--adopt-existing' in sys.argv[1:])", case)
-        self.assertIn('"$ONIONPRESS_PYTHONPATH" "${@:2}"', case)
+        # Through the one docker runner (issue #477), built for this install.
+        self.assertIn("provision_interactive(docker=Docker(resolve_paths(data_dir=sys.argv.pop(1))),", case)
+        self.assertIn("adopt_existing='--adopt-existing' in sys.argv[1:])", case)
+        self.assertIn('"$ONIONPRESS_PYTHONPATH" "$DATA_DIR" "${@:2}"', case)
         self.assertIn("--adopt-existing", setup_logic.FOREIGN_INSTALL_MSG)
 
 
@@ -126,18 +130,17 @@ class TestPythonSide(unittest.TestCase):
             f.write(stamp + "\n")
 
     def _install(self, rec):
-        with mock.patch.object(setup_logic.subprocess, "run", rec), \
-             mock.patch.object(setup_logic, "start_bundled_plugin_setup", return_value=True):
+        with mock.patch.object(setup_logic, "start_bundled_plugin_setup", return_value=True):
             return setup_logic.install_fresh_wordpress(
                 site_title="My Blog", onionname="alice", password="hunter22",
-                onion_addr=ONION, launcher_bin=None, data_dir=self.tmp,
-                log_func=self.logs.append)
+                onion_addr=ONION, docker=FakeDocker(rec), launcher_bin=None,
+                data_dir=self.tmp, log_func=self.logs.append)
 
     def _provision(self, rec, **extra):
-        with mock.patch.object(setup_logic.subprocess, "run", rec):
-            return setup_logic.provision_existing_wordpress(
-                site_title="t", onionname="alice", password="hunter22",
-                data_dir=self.tmp, log_func=self.logs.append, **extra)
+        return setup_logic.provision_existing_wordpress(
+            site_title="t", onionname="alice", password="hunter22",
+            docker=FakeDocker(rec), data_dir=self.tmp, log_func=self.logs.append,
+            **extra)
 
     def test_a_fresh_install_writes_the_marker_after_the_password(self):
         rec = _Recorder()
@@ -164,16 +167,15 @@ class TestPythonSide(unittest.TestCase):
         # ...and a junk one is unknown too: the stamp must be WordPress's
         # datetime, nothing a planted answer chooses.
         rec = _Recorder(registered="x\ny")
-        with mock.patch.object(setup_logic.subprocess, "run", rec):
-            self.assertTrue(
-                setup_logic.mark_wordpress_installed_by_onionpress(self.tmp, "docker"))
+        self.assertTrue(
+            setup_logic.mark_wordpress_installed_by_onionpress(self.tmp, FakeDocker(rec)))
         with open(self.marker) as f:
             self.assertEqual(f.read().strip(), "unknown")
 
     def test_whose_install_it_is(self):
         def ours(registered=REGISTERED):
-            with mock.patch.object(setup_logic.subprocess, "run", _Recorder(registered)):
-                return setup_logic.wordpress_installed_by_onionpress(self.tmp, "docker")
+            return setup_logic.wordpress_installed_by_onionpress(
+                self.tmp, FakeDocker(_Recorder(registered)))
         self.assertFalse(ours(), "no marker")
         self._write_marker(REGISTERED)
         self.assertTrue(ours(), "the stamp matches the live install")
@@ -221,11 +223,10 @@ class TestPythonSide(unittest.TestCase):
 
     def test_an_invalid_onionname_is_refused_before_the_marker_is_looked_at(self):
         rec = _Recorder()
-        with mock.patch.object(setup_logic.subprocess, "run", rec), \
-             mock.patch.object(setup_logic, "_onc", None):
+        with mock.patch.object(setup_logic, "_onc", None):
             self.assertFalse(setup_logic.provision_existing_wordpress(
                 site_title="t", onionname="not valid!", password="hunter22",
-                data_dir=self.tmp, log_func=self.logs.append))
+                docker=FakeDocker(rec), data_dir=self.tmp, log_func=self.logs.append))
         self.assertEqual(rec.calls, [])
 
     def test_provision_interactive_passes_the_choice_through(self):
@@ -237,7 +238,7 @@ class TestPythonSide(unittest.TestCase):
                  mock.patch.object(setup_logic, "provision_existing_wordpress",
                                    return_value=True) as m:
                 self.assertTrue(setup_logic.provision_interactive(
-                    data_dir=self.tmp, adopt_existing=adopt))
+                    data_dir=self.tmp, docker=FakeDocker(), adopt_existing=adopt))
             self.assertEqual(m.call_args.kwargs["adopt_existing"], adopt)
 
 

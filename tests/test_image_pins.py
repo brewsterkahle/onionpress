@@ -380,7 +380,7 @@ class TestDeliberatelyUnpinned(unittest.TestCase):
         self.assertIn("image = image or launcher_ops.DEFAULT_TOR_IMAGE", writer)
         self.assertIn("launcher_ops.tor_image_has_mkp224o(image, docker=docker)", writer)
         cli = _read("src/onionpress/cli.py")
-        self.assertIn("if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE):", cli)
+        self.assertIn("if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE, docker=self.docker):", cli)
         launcher = _read("linux/onionpress")
         self.assertNotIn("mkp224o_available", launcher)
         self.assertNotIn('docker image inspect "${ONIONPRESS_TOR_IMAGE:-', launcher)

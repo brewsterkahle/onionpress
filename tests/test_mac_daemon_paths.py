@@ -60,7 +60,7 @@ from onionpress import onion_proxy  # noqa: E402
 from onionpress import ports as op_ports  # noqa: E402
 from onionpress import thumbnails  # noqa: E402
 from onionpress.health import WedgeSignals  # noqa: E402
-from tests.test_mac_daemon import ADDR, _DaemonCase  # noqa: E402
+from tests.test_mac_daemon import ADDR, FakeDocker, _DaemonCase  # noqa: E402
 
 Daemon = op_daemon.Daemon
 
@@ -524,8 +524,10 @@ class TestResolvePorts(_PathsCase):
         with mock.patch.object(op_daemon.launcher_ops, "get_running_wp_port", return_value=None):
             Daemon._resync_ports(self.d)
         self.assertEqual(self.d.wp_port, 8080)
-        with mock.patch.object(op_daemon.launcher_ops, "get_running_wp_port", return_value=18080):
+        with mock.patch.object(op_daemon.launcher_ops, "get_running_wp_port",
+                               return_value=18080) as lookup:
             Daemon._resync_ports(self.d)
+        lookup.assert_called_once_with(self.d._docker)
         self.assertEqual(self.d.port_offset, 10000)
         self.assertEqual(os.environ["ONIONPRESS_WP_PORT"], "18080")
         self.assertTrue(self.saw("Port resync: was 8080, running stack is on 18080"))
@@ -586,7 +588,7 @@ class TestOnionProxy(_PathsCase):
         self.assertEqual(srv.onion_address, ADDR)
         self.assertEqual(srv.data_dir, self.dir)
         self.assertEqual(srv.launcher_script, "/x/onionpress")
-        self.assertEqual(srv.docker_bin, self.docker.docker_bin)
+        self.assertIs(srv.docker, self.docker)
         self.assertTrue(srv.state_while_serving["proxy_running"])
         self.install.assert_not_called()   # no onion-forward.php shipped
 
@@ -594,8 +596,7 @@ class TestOnionProxy(_PathsCase):
         php = os.path.join(self.d.resources_dir, "onion-forward.php")
         open(php, "w").close()
         self.start()
-        self.install.assert_called_once_with(self.docker.docker_bin, self.docker.env, php,
-                                             log_func=self.d.log)
+        self.install.assert_called_once_with(self.docker, php, log_func=self.d.log)
 
     def test_not_started_twice_or_while_quitting(self):
         self.d.proxy_server = object()
@@ -657,7 +658,7 @@ class TestOnionnameRetry(_PathsCase):
     def test_success_is_saved_through_config_set(self):
         from onionpress.onionnames_registrar import RegistrarResult
         R, reg = self.retry(RegistrarResult(status="ok"))
-        R.assert_called_once_with(docker_bin=self.docker.docker_bin, log=self.d.log)
+        R.assert_called_once_with(self.docker, log=self.d.log)
         reg.register.assert_called_once_with("mysite", ADDR)
         self.assertEqual(self.config_sets(), [["ONIONNAME", "mysite"],
                                               ["ONIONNAME_ADDRESS", ADDR],
@@ -801,12 +802,12 @@ class TestContainerCapture(_PathsCase):
     def test_supervisor_captures_what_docker_ps_shows(self):
         d = self.d
         launched = []
-        d._docker_ps_names = lambda b, e: {"onionpress-tor", "onionpress-db",
-                                           "onionheaven-takeover-3", "someone-else"}
+        d._docker_ps_names = lambda: {"onionpress-tor", "onionpress-db",
+                                      "onionheaven-takeover-3", "someone-else"}
         alive = mock.Mock()
         alive.is_alive.return_value = True
         d._container_log_processes["onionpress-db"] = {"thread": alive}
-        d._launch_capture_worker = lambda name, log, b, e: launched.append((name, log))
+        d._launch_capture_worker = lambda name, log: launched.append((name, log))
         d._capture_shutdown.wait = lambda t: d._capture_shutdown.set()
         d._capture_supervisor_loop()
         names = dict(launched)
@@ -824,7 +825,7 @@ class TestContainerCapture(_PathsCase):
 
     def test_launch_worker_registers_the_thread(self):
         with mock.patch.object(op_daemon.threading, "Thread") as T:
-            self.d._launch_capture_worker("onionpress-tor", self.d._tor_log, "/x/docker", {})
+            self.d._launch_capture_worker("onionpress-tor", self.d._tor_log)
         entry = self.d._container_log_processes["onionpress-tor"]
         self.assertIs(entry["thread"], T.return_value)
         T.return_value.start.assert_called_once()
@@ -841,10 +842,10 @@ class TestContainerCapture(_PathsCase):
             argvs.append(cmd)
             return next(procs)
         ps = iter([{"onionpress-tor"}, set()])
-        d._docker_ps_names = lambda b, e: next(ps)
+        d._docker_ps_names = lambda: next(ps)
         with mock.patch.object(op_daemon.subprocess, "Popen", popen), \
                 mock.patch.object(op_daemon.time, "sleep"):
-            d._capture_worker("onionpress-tor", log, "/x/docker", {"E": "1"})
+            d._capture_worker("onionpress-tor", log)
         self.assertEqual(log.lines, ["a\n", "b\n", "c\n"])
         self.assertEqual(argvs[0], ["/x/docker", "logs", "-f", "--tail", "100", "onionpress-tor"])
         self.assertEqual(argvs[1][:4], ["/x/docker", "logs", "-f", "--since"])
@@ -860,24 +861,23 @@ class TestContainerCapture(_PathsCase):
             d._capture_shutdown.set()
         with mock.patch.object(op_daemon.subprocess, "Popen", side_effect=OSError("no docker")), \
                 mock.patch.object(op_daemon.time, "sleep", sleep):
-            d._capture_worker("onionpress-tor", _Lines(), "/x/docker", {})
+            d._capture_worker("onionpress-tor", _Lines())
         self.assertEqual(sleeps, [10])
 
     def test_worker_ends_when_its_entry_is_gone(self):
         with mock.patch.object(op_daemon.subprocess, "Popen") as P:
-            self.d._capture_worker("gone", _Lines(), "/x/docker", {})
+            self.d._capture_worker("gone", _Lines())
         P.assert_not_called()
 
     def test_docker_ps_names(self):
-        def run(stdout="", rc=0, raises=None):
-            m = mock.Mock(return_value=subprocess.CompletedProcess([], rc, stdout=stdout),
-                          side_effect=raises)
-            with mock.patch.object(op_daemon.subprocess, "run", m):
-                return self.d._docker_ps_names("/x/docker", {})
-        self.assertEqual(run("onionpress-tor\n onionpress-db \n\n"),
+        def names(answer):
+            self.d._docker = FakeDocker({"ps --format {{.Names}}": answer})
+            return self.d._docker_ps_names()
+        self.assertEqual(names("onionpress-tor\n onionpress-db \n\n"),
                          {"onionpress-tor", "onionpress-db"})
-        self.assertEqual(run("onionpress-tor\n", rc=1), set())
-        self.assertEqual(run(raises=subprocess.TimeoutExpired("docker", 10)), set())
+        self.assertEqual(names((1, "onionpress-tor\n")), set())
+        self.d._docker = types.SimpleNamespace(run=mock.Mock(side_effect=RuntimeError("x")))
+        self.assertEqual(self.d._docker_ps_names(), set())
 
     def test_stop_ends_every_capture(self):
         d = self.d

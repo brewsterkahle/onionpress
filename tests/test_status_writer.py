@@ -117,6 +117,7 @@ class StatusApp(PortAttributes):
         self.docker_socket = paths.docker_socket
         self.log_file = paths.log_file
         self._docker = docker
+        self.docker = docker          # what onionheaven's helpers run through
         self._health = health
         self.version = version
         self._log = log

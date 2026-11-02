@@ -32,6 +32,7 @@ sys.path.insert(0, SRC)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, backup_crypto, cli, key_manager  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 LAUNCHERS = ["app/MacOS/onionpress", "linux/onionpress"]
 PW = "backup-pw"
@@ -328,10 +329,6 @@ class TestPythonRestorePaths(unittest.TestCase):
         with open(os.path.join(self.data_dir, "onion_address"), "w") as f:
             f.write(OLD_ADDR + "\n")
         self.logs = []
-        for target in ("onionpress.backup.subprocess.run",):
-            p = mock.patch(target, _NoDocker(self))
-            p.start()
-            self.addCleanup(p.stop)
         p = mock.patch.object(key_manager, "write_private_key",
                               side_effect=AssertionError("key written"))
         p.start()
@@ -394,6 +391,7 @@ class TestPythonRestorePaths(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaises(ValueError):
                     backup.restore_from_backup(path, PW, self.logs.append,
+                                               docker=FakeDocker(_NoDocker(self)),
                                                data_dir=self.data_dir)
                 self.assert_untouched()
 
@@ -402,6 +400,7 @@ class TestPythonRestorePaths(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaises(ValueError):
                     backup.prepare_install_from_backup(path, PW, self.logs.append,
+                                                       docker=FakeDocker(_NoDocker(self)),
                                                        data_dir=self.data_dir)
                 self.assert_untouched()
 
@@ -418,7 +417,8 @@ class TestPythonRestorePaths(unittest.TestCase):
     def test_a_valid_backup_still_seeds_the_key_derived_address(self):
         path = _make_backup(self.tmp, _metadata())
         _, meta = backup.prepare_install_from_backup(
-            path, PW, self.logs.append, data_dir=self.data_dir)
+            path, PW, self.logs.append, docker=FakeDocker(_NoDocker(self)),
+            data_dir=self.data_dir)
         self.assertEqual(meta["onion_address"], ADDR)
         self.assertEqual(os.listdir(os.path.join(self.data_dir, "shared", "vanity-keys")),
                          [ADDR])
@@ -539,7 +539,8 @@ class TestLauncherRestorePaths(unittest.TestCase):
                 f.write(msg + "\n")
         data = os.path.join(self.tmp, "home", ".onionpress")
         try:
-            backup.prepare_install_from_backup(path, PW, log, data_dir=data)
+            backup.prepare_install_from_backup(path, PW, log, docker=FakeDocker(_NoDocker(self)),
+                                               data_dir=data)
         except Exception as e:
             log(f"Restore failed during extract/seed: {e}")
             return 1, str(e)

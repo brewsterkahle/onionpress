@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -250,6 +251,68 @@ class TestDockerEnv(FakeDockerTestCase):
         d = Docker(self.paths, extra_env={"MY_CUSTOM_VAR": "hello123"})
         result = d.run(["info"])
         self.assertIn("hello123", result.output)
+
+
+class TestDockerPopenAndBytes(FakeDockerTestCase):
+    """The runner's two other shapes (issue #477): a process the caller
+    drives (popen: `logs -f`, a tar into `exec -i`) and bytes in or out
+    (a key file, a file handed to a container)."""
+
+    def setUp(self):
+        super().setUp()
+        self.paths = self._make_paths()
+
+    def test_popen_runs_the_binary_in_the_runners_environment(self):
+        self._write_fake_docker('#!/bin/bash\necho "$MY_CUSTOM_VAR $*"; cat\n')
+        d = Docker(self.paths, extra_env={"MY_CUSTOM_VAR": "hello123"})
+        proc = d.popen(["logs", "-f", "x"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                       text=True)
+        out, _ = proc.communicate("fed\n")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(out, "hello123 logs -f x\nfed\n")
+
+    def test_popen_extra_env_and_a_missing_binary(self):
+        self._write_fake_docker('#!/bin/bash\necho "$EXTRA"\n')
+        d = Docker(self.paths)
+        proc = d.popen(["ps"], extra_env={"EXTRA": "yes"}, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(proc.communicate()[0], "yes\n")
+        d._docker_bin = os.path.join(self.tmpdir, "no-such-docker")
+        with self.assertRaises(OSError):
+            d.popen(["ps"])
+
+    def test_bytes_in_text_out(self):
+        self._write_fake_docker('#!/bin/bash\nwc -c | tr -d " "\n')
+        d = Docker(self.paths)
+        r = d.run(["exec", "-i", "c", "sh"], input=b"\x00\xff\x01")
+        self.assertTrue(r.ok)
+        self.assertEqual(r.output, "3")
+        self.assertIsInstance(r.stdout, str)
+
+    def test_binary_reads_bytes(self):
+        self._write_fake_docker('#!/bin/bash\nprintf "\\x00\\xff\\x01"; printf "err" >&2\n')
+        d = Docker(self.paths)
+        r = d.run(["exec", "c", "cat", "/k"], binary=True)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.stdout, b"\x00\xff\x01")
+        self.assertEqual(r.stderr, b"err")
+        self.assertEqual(r.output, b"\x00\xff\x01")
+
+    def test_binary_failures_are_bytes_too(self):
+        self._write_fake_docker('#!/bin/bash\nsleep 10\n')
+        d = Docker(self.paths)
+        r = d.run(["exec", "c", "cat", "/k"], binary=True, timeout=1)
+        self.assertTrue(r.timed_out)
+        self.assertEqual(r.stdout, b"")
+        self.assertIn(b"timed out", r.stderr)
+        d._docker_bin = os.path.join(self.tmpdir, "no-such-docker")
+        r = d.run(["ps"], binary=True)
+        self.assertEqual(r.returncode, 127)
+        self.assertIn(b"not found", r.stderr)
+
+    def test_no_timeout_when_asked(self):
+        self._write_fake_docker('#!/bin/bash\necho done\n')
+        d = Docker(self.paths)
+        self.assertEqual(d.run(["run", "x"], timeout=None).output, "done")
 
 
 class TestDockerBinaryNotFound(unittest.TestCase):

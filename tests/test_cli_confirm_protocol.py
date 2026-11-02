@@ -478,6 +478,7 @@ class TestBackupCheck(unittest.TestCase):
         obj = object.__new__(OnionPressCLI)
         obj.paths = resolve_paths(data_dir=tempfile.gettempdir(), app_bundle="")
         obj.log = lambda m: None
+        obj.docker = mock.Mock()
         obj.containers = mock.Mock()
         obj.containers.get_onion_address.return_value = ADDR
         out = io.StringIO()

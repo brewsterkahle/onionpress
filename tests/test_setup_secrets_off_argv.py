@@ -40,6 +40,8 @@ for fake in ("AppKit", "Foundation", "objc"):
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import multisite, onion_proxy, onionnames_registrar, setup_logic  # noqa: E402
+sys.path.insert(0, TESTS_DIR)
+from fake_docker import FakeDocker  # noqa: E402
 
 MAC = "app/MacOS/onionpress"
 LINUX = "linux/onionpress"
@@ -174,10 +176,12 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _install(self, rec, password):
+        # The launcher hop runs through subprocess.run (patched to *rec*);
+        # every wp-cli call through the Docker, which answers through it.
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             return setup_logic.install_fresh_wordpress(
                 site_title="My Blog", onionname="alice", password=password,
-                onion_addr="abc.onion", docker_bin="/x/docker",
+                onion_addr="abc.onion", docker=FakeDocker(rec, docker_bin="/x/docker"),
                 launcher_bin="/x/onionpress", log_func=self.logs.append,
                 data_dir=self.tmpdir)
 
@@ -214,11 +218,10 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
     def test_install_timeout_is_logged_without_argv(self):
         def boom(argv, **kwargs):
             raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 60)
-        with mock.patch.object(setup_logic.subprocess, "run", boom):
-            ok = setup_logic.install_fresh_wordpress(
-                site_title="t", onionname="alice", password="hunter22",
-                launcher_bin=None, log_func=self.logs.append,
-                data_dir=self.tmpdir)
+        ok = setup_logic.install_fresh_wordpress(
+            site_title="t", onionname="alice", password="hunter22",
+            docker=FakeDocker(boom), launcher_bin=None, log_func=self.logs.append,
+            data_dir=self.tmpdir)
         self.assertFalse(ok)
         self.assertTrue(any("timed out" in m for m in self.logs), self.logs)
         for msg in self.logs:
@@ -227,11 +230,10 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
     def test_provision_existing_sets_the_password_on_stdin(self):
         rec = _Recorder()
         pw = TRICKY_PASSWORDS[1]
-        with mock.patch.object(setup_logic.subprocess, "run", rec):
-            self.assertTrue(setup_logic.provision_existing_wordpress(
-                site_title="t", onionname="alice", password=pw,
-                log_func=self.logs.append, data_dir=self.tmpdir,
-                adopt_existing=True))
+        self.assertTrue(setup_logic.provision_existing_wordpress(
+            site_title="t", onionname="alice", password=pw, docker=FakeDocker(rec),
+            log_func=self.logs.append, data_dir=self.tmpdir,
+            adopt_existing=True))
         rec.assert_not_in_argv(self, pw)
         self.assertEqual([i for _, i in rec.eval_calls()], [f"alice\n{pw}"])
         self.assertIn("Password updated", self.logs)
@@ -242,11 +244,10 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
                 return 1, ""
             return 0, ""
         rec = _Recorder(reply)
-        with mock.patch.object(setup_logic.subprocess, "run", rec):
-            setup_logic.provision_existing_wordpress(
-                site_title="t", onionname="alice", password="hunter22",
-                log_func=self.logs.append, data_dir=self.tmpdir,
-                adopt_existing=True)
+        setup_logic.provision_existing_wordpress(
+            site_title="t", onionname="alice", password="hunter22", docker=FakeDocker(rec),
+            log_func=self.logs.append, data_dir=self.tmpdir,
+            adopt_existing=True)
         self.assertEqual([i for _, i in rec.eval_calls()],
                          ["alice\nhunter22", "admin\nhunter22"])
         self.assertIn("Password updated (via admin fallback)", self.logs)
@@ -281,9 +282,12 @@ LOGIN_WITH_COOKIES = json.dumps(
 S3_PAGE = json.dumps({"key": {"s3accesskey": "AK", "s3secretkey": "S3-SECRET"}})
 
 
-def _handler(logs, docker_bin="/x/docker", data_dir=None):
+def _handler(logs, run, data_dir=None):
+    """A setup handler whose server's Docker answers through *run* (a
+    subprocess.run stand-in), as the proxy's environment reaches it."""
     h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-    h.server = types.SimpleNamespace(docker_bin=docker_bin, docker_env={"A": "1"},
+    h.server = types.SimpleNamespace(docker=FakeDocker(run, docker_bin="/x/docker",
+                                                       env={"A": "1"}),
                                      log_func=logs.append, onion_address=None,
                                      launcher_script="/x/onionpress",
                                      data_dir=data_dir)
@@ -294,9 +298,9 @@ class TestArchiveLogin(unittest.TestCase):
     """multisite.fetch_archive_s3_keys, the one archive.org login (setup's
     background fetch and the per-launch reconcile)."""
 
-    def _fetch(self, email, password, logs):
+    def _fetch(self, email, password, logs, run):
         return multisite.fetch_archive_s3_keys(
-            email, password, docker_bin="/x/docker", env={"A": "1"},
+            email, password, docker=FakeDocker(run, docker_bin="/x/docker", env={"A": "1"}),
             log_func=logs.append)
 
     def test_login_and_cookie_go_on_stdin(self):
@@ -304,8 +308,7 @@ class TestArchiveLogin(unittest.TestCase):
             return 0, (S3_PAGE if "@-" in argv and "-H" in argv else LOGIN_WITH_COOKIES)
         rec = _Recorder(reply)
         logs = []
-        with mock.patch.object(multisite.subprocess, "run", rec):
-            keys = self._fetch("me@example.org", "IA-P@ss&word", logs)
+        keys = self._fetch("me@example.org", "IA-P@ss&word", logs, rec)
         self.assertEqual(keys, {"access": "AK", "secret": "S3-SECRET"})
         self.assertEqual(len(rec.calls), 2, rec.calls)
         (login, login_in, kw1), (page, page_in, kw2) = rec.calls
@@ -324,8 +327,7 @@ class TestArchiveLogin(unittest.TestCase):
         def boom(argv, **kwargs):
             raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 45)
         logs = []
-        with mock.patch.object(multisite.subprocess, "run", boom):
-            self.assertIsNone(self._fetch("e", "p", logs))
+        self.assertIsNone(self._fetch("e", "p", logs, boom))
         self.assertEqual(logs, ["WARNING: archive.org login timed out"])
 
     def test_setup_logs_in_through_the_onion_like_the_reconcile(self):
@@ -333,8 +335,7 @@ class TestArchiveLogin(unittest.TestCase):
         per-launch reconcile went to its onion. Both are one function now,
         and the proxy's /setup has no login of its own (issue #481)."""
         rec = _Recorder(lambda argv, stdin: (0, LOGIN_WITH_KEYS))
-        with mock.patch.object(multisite.subprocess, "run", rec):
-            keys = self._fetch("me@example.org", "pw", [])
+        keys = self._fetch("me@example.org", "pw", [], rec)
         self.assertEqual(keys, {"access": "AK", "secret": "S3-SECRET"})
         [(login, _, _)] = rec.calls
         self.assertEqual(login[-1], multisite._ARCHIVE_ONION + "/services/xauthn/?op=login")
@@ -363,7 +364,8 @@ class TestOnionProxySetupPost(unittest.TestCase):
         body = urlencode({"blog_title": "My Blog", "user_name": "alice",
                           "admin_password": password}).encode()
         logs, sent = [], []
-        h = _handler(logs, data_dir=self.tmpdir)
+        rec = _Recorder(reply)
+        h = _handler(logs, run or rec, data_dir=self.tmpdir)
         # Not installed yet: the form is refused on an installed site.
         installed = iter([False, True])
         h._wp_installed = lambda: next(installed)
@@ -374,7 +376,7 @@ class TestOnionProxySetupPost(unittest.TestCase):
         h.send_header = lambda *a: None
         h.end_headers = lambda: None
         h.send_error = lambda *a: sent.append(a)
-        rec = _Recorder(reply)
+        # The launcher hop (provision-post-install) runs through subprocess.run.
         with mock.patch.object(onion_proxy.subprocess, "run", run or rec):
             h._handle_setup_post()
         return rec, logs, sent, h.wfile.getvalue().decode()
@@ -408,14 +410,17 @@ class TestOnionProxySetupPost(unittest.TestCase):
                             for m in logs), logs)
         self.assertFalse(os.path.exists(os.path.join(self.tmpdir, ".setup_complete")))
 
-    def test_install_timeout_is_reported_without_argv(self):
+    def test_a_timed_out_step_is_reported_without_argv(self):
+        """The runner answers a timeout as a failed step (issue #477), so
+        the install goes on and the warning names no argv."""
         def run(argv, **kwargs):
             if "site" in argv and "create" in argv:
                 raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 30)
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         _, logs, sent, page = self._post("hunter22", run=run)
-        self.assertEqual(sent, [500])
-        self.assertIn("Setup error: TimeoutExpired", logs)
+        self.assertEqual(sent, [200])
+        self.assertTrue([m for m in logs if "wp site create failed" in m and "timed out" in m],
+                        logs)
         self.assertNotIn("SENTINEL-ARGV", page + "".join(logs))
 
 
@@ -427,11 +432,10 @@ class TestRegistrarDefaultRunner(unittest.TestCase):
     def test_post_body_goes_on_stdin(self):
         rec = _Recorder(lambda argv, stdin: (0, '{"ok": true}\n__HTTP_STATUS__:200'))
         reg = onionnames_registrar.Registrar(
-            docker_bin="/x/docker",
+            FakeDocker(rec, docker_bin="/x/docker"),
             key_source=lambda: (b"\x01" * 64, b"\x02" * 32))
-        with mock.patch.object(onionnames_registrar.subprocess, "run", rec), \
-                mock.patch.object(onionnames_registrar.onion_auth,
-                                  "sign_name_payload", return_value="SIG-SECRET"):
+        with mock.patch.object(onionnames_registrar.onion_auth,
+                               "sign_name_payload", return_value="SIG-SECRET"):
             self.assertTrue(reg.register("alice", "x.onion").ok)
             self.assertTrue(reg.check("alice").ok)
         (post, post_in, _), (get, get_in, _) = rec.calls

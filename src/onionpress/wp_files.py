@@ -38,6 +38,11 @@ host user's files. Without --allow-root, wp-cli refuses to run as root,
 so a call that slips back to root fails instead of running WordPress.
 The bash launchers' wp_cli/wp_cli_in and the image's onionpress-wp carry
 the same command; tests/test_wp_cli_as_www_data.py keeps them equal.
+
+This module holds the argument lists (`docker` arguments, no binary) and
+the scripts; everything runs through an onionpress.docker.Docker, the one
+runner (issue #477): docker.wp for wp-cli, put_file / put_tree / own here
+for the files, each taking the Docker its caller holds.
 """
 
 from __future__ import annotations
@@ -48,7 +53,6 @@ import subprocess
 import tarfile
 import tempfile
 import threading
-from typing import Optional
 
 WP_CONTAINER = "onionpress-wordpress"
 WP_USER = "www-data"
@@ -132,15 +136,14 @@ def put_file_args(path: str, mode: str = "600",
             "sh", "-c", PUT_FILE_SCRIPT, "sh", path, mode]
 
 
-def put_file(path: str, data, mode: str = "600", *, docker_bin: str = "docker",
-             env: Optional[dict] = None, timeout: int = 30,
-             container: str = WP_CONTAINER) -> subprocess.CompletedProcess:
-    """Write *data* (str or bytes) to *path* in the container as www-data."""
+def put_file(path: str, data, mode: str = "600", *, docker, timeout: int = 30,
+             container: str = WP_CONTAINER):
+    """Write *data* (str or bytes) to *path* in the container as www-data,
+    through *docker* (an onionpress.docker.Docker); its DockerResult."""
     if isinstance(data, str):
         data = data.encode("utf-8")
-    return subprocess.run(
-        [docker_bin] + put_file_args(path, mode, container),
-        input=data, capture_output=True, timeout=timeout, env=env)
+    return docker.run(put_file_args(path, mode, container), input=data,
+                      timeout=timeout, quiet=True)
 
 
 def exec_args(*command: str, container: str = WP_CONTAINER) -> list[str]:
@@ -179,22 +182,6 @@ def wp_cli_args(*args: str, stdin: bool = False, nice: bool = False,
             + ["wp", *args])
 
 
-def wp_cli(*args: str, docker_bin: str = "docker", env: Optional[dict] = None,
-           input: Optional[str] = None, timeout: int = 60,
-           nice: bool = False, offline: bool = False,
-           container: str = WP_CONTAINER) -> subprocess.CompletedProcess:
-    """Run wp-cli *args* as www-data (wp_cli_args) with *docker_bin* and
-    *env*: docker.Docker.wp for a caller that holds those rather than a
-    Docker. *input* goes to wp-cli's stdin (`docker exec -i`), the way
-    values and secrets reach it, never argv. Output is decoded as UTF-8,
-    errors replaced; a timeout raises subprocess.TimeoutExpired."""
-    return subprocess.run(
-        [docker_bin] + wp_cli_args(*args, stdin=input is not None, nice=nice,
-                                   offline=offline, container=container),
-        input=input, env=env, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout)
-
-
 def own_args(path: str, recursive: bool = False,
              container: str = WP_CONTAINER) -> list[str]:
     """`docker` arguments (no binary) that give *path* (and, *recursive*,
@@ -207,13 +194,11 @@ def own_args(path: str, recursive: bool = False,
             parent, name, "-R" if recursive else "-h"]
 
 
-def own(path: str, recursive: bool = False, *, docker_bin: str = "docker",
-        env: Optional[dict] = None, timeout: int = 600,
-        container: str = WP_CONTAINER) -> subprocess.CompletedProcess:
-    """Run own_args. Fails harmlessly when *path* does not exist yet."""
-    return subprocess.run(
-        [docker_bin] + own_args(path, recursive, container),
-        capture_output=True, timeout=timeout, env=env)
+def own(path: str, recursive: bool = False, *, docker, timeout: int = 600,
+        container: str = WP_CONTAINER):
+    """Run own_args through *docker*; its DockerResult. Fails harmlessly
+    when *path* does not exist yet."""
+    return docker.run(own_args(path, recursive, container), timeout=timeout, quiet=True)
 
 
 def write_tar(src_dir: str, out, *, skip: tuple = ()) -> None:
@@ -258,30 +243,30 @@ def write_tar(src_dir: str, out, *, skip: tuple = ()) -> None:
 PUT_TREE_FLOOR_S = 300
 
 
-def put_tree(src_dir: str, dest: str, *, merge: bool = False,
-             docker_bin: str = "docker", env: Optional[dict] = None,
-             timeout: Optional[int] = None,
-             container: str = WP_CONTAINER, skip: tuple = ()) -> subprocess.CompletedProcess:
-    """Hand *src_dir*'s contents to the container at *dest*, as www-data.
+def put_tree(src_dir: str, dest: str, *, docker, merge: bool = False,
+             timeout: int | None = None,
+             container: str = WP_CONTAINER, skip: tuple = ()):
+    """Hand *src_dir*'s contents to the container at *dest*, as www-data,
+    through *docker* (its popen: the tar is streamed in).
 
     *merge* unpacks over what is at *dest* (a restore into wp-content);
     otherwise *dest* is replaced whole (the theme, a plugin). What an older
     version left root's at *dest* is given to www-data first (own), so
-    www-data can replace it. Returns the unpacking exec's result; raises
-    ValueError for a link or special file in *src_dir*. *timeout* (each of
-    the two steps) defaults to one sized to *src_dir* (sized_timeout).
-    *skip*: top-level names of *src_dir* left out (write_tar).
+    www-data can replace it. Returns the unpacking exec's result (a
+    DockerResult: returncode and stderr); raises ValueError for a link or
+    special file in *src_dir*, OSError when docker cannot be started.
+    *timeout* (each of the two steps) defaults to one sized to *src_dir*
+    (sized_timeout). *skip*: top-level names of *src_dir* left out
+    (write_tar).
     """
     if timeout is None:
         timeout = sized_timeout(tree_bytes(src_dir), PUT_TREE_FLOOR_S)
-    own(dest, recursive=True, docker_bin=docker_bin, env=env,
-        timeout=timeout, container=container)
+    own(dest, recursive=True, docker=docker, timeout=timeout, container=container)
     script = MERGE_TREE_SCRIPT if merge else REPLACE_TREE_SCRIPT
-    argv = [docker_bin, "exec", "-i", "-u", WP_USER, container,
-            "sh", "-c", script, "sh", dest]
+    args = ["exec", "-i", "-u", WP_USER, container, "sh", "-c", script, "sh", dest]
     with tempfile.TemporaryFile() as err:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL, stderr=err, env=env)
+        proc = docker.popen(args, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=err)
         killer = threading.Timer(timeout, proc.kill)
         killer.daemon = True
         killer.start()
@@ -306,10 +291,11 @@ def put_tree(src_dir: str, dest: str, *, merge: bool = False,
             killer.cancel()
         err.seek(0)
         stderr = err.read().decode("utf-8", errors="replace")
-    return subprocess.CompletedProcess(argv, rc, "", stderr)
+    from .docker import DockerResult
+    return DockerResult(rc, "", stderr)
 
 
-def shared_onion_address(hostname: str) -> Optional[str]:
+def shared_onion_address(hostname: str) -> str | None:
     """The onion_address file's content for the tor container's *hostname*
     output, or None unless it is one well-formed v3 address."""
     from .key_manager import is_valid_onion_address

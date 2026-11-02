@@ -315,12 +315,12 @@ ROWS = [
         "CLI.cmd_hub_recovery_key_check", mock.call(D(""), "hubkey"),
         env={cli.RECOVERY_KEY_ENV: "hubkey"}),
     Row("hub-recovery-key restore", ["hub-recovery-key", "restore", "/b.zip"],
-        "CLI.cmd_hub_recovery_key_restore", mock.call("/b.zip", "pw", "hubkey"),
+        "CLI.cmd_hub_recovery_key_restore", mock.call("/b.zip", "pw", "hubkey", docker=ANY),
         env={cli.RECOVERY_KEY_ENV: "hubkey", cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- the launchers' backup and restore helpers ----
     Row("put-wp-tree", ["put-wp-tree", "--src", "/s", "--dest", "/var/www/html/x", "--merge"],
-        "CLI.cmd_put_wp_tree", mock.call("/s", "/var/www/html/x", True)),
+        "CLI.cmd_put_wp_tree", mock.call("/s", "/var/www/html/x", True, docker=ANY)),
 
     # ---- the launchers' read-only helpers ----
     Row("safe-config", ["safe-config"], "config.redact_config",
@@ -494,26 +494,26 @@ ROWS = [
         mock.call("x", ANY, D("")), rc=1,
         returns={"valid": False, "status": "invalid_format", "message": "no"}),
     Row("open-login", ["open-login", "http://localhost:8080/wp-admin/"], "launcher_ops.open_login",
-        mock.call("http://localhost:8080/wp-admin/"), rc=0, returns=None),
+        mock.call("http://localhost:8080/wp-admin/", docker=ANY), rc=0, returns=None),
     Row("verify-admin-password", ["verify-admin-password"], "backup.verify_wp_admin_password_any",
-        mock.call("pw"), rc=0, returns=(True, ""), stdin="pw\n", setup_cli=True),
+        mock.call("pw", docker=ANY), rc=0, returns=(True, ""), stdin="pw\n", setup_cli=True),
     Row("verify-admin-password", ["verify-admin-password"], "backup.verify_wp_admin_password_any",
-        mock.call("pw"), rc=1, returns=(False, "no"), stdin="pw\n", setup_cli=True),
+        mock.call("pw", docker=ANY), rc=1, returns=(False, "no"), stdin="pw\n", setup_cli=True),
 
     # ---- WordPress provisioning (multisite) and the lifecycle test ----
     Row("provision-post-install", ["provision-post-install", "--themes-dir", "/t", "--plugins-dir", "/p"],
         "multisite.provision_post_install",
-        mock.call(themes_dir="/t", plugins_dir="/p", log_func=print), setup_cli=True),
+        mock.call(themes_dir="/t", plugins_dir="/p", docker=ANY, log_func=print), setup_cli=True),
     Row("configure-ia-plugin", ["configure-ia-plugin"], "multisite.configure_ia_plugin",
-        mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=0, returns=True, setup_cli=True),
     Row("configure-cache-enabler", ["configure-cache-enabler"], "multisite.configure_cache_enabler",
-        mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=1, returns=False, setup_cli=True),
     Row("apply-cache-policy", ["apply-cache-policy"], "multisite.apply_cache_policy",
-        mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=0, returns=True, setup_cli=True),
     Row("deactivate-wp-statistics", ["deactivate-wp-statistics"], "multisite.deactivate_wp_statistics",
-        mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=0, returns=True, setup_cli=True),
     Row("ensure-archive-s3-keys", ["ensure-archive-s3-keys"], "multisite.ensure_archive_s3_keys",
-        mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=1, returns=False, setup_cli=True),
     # The platform picks the cycle (#529: the Mac's reset in place), the
     # phases run this install's launcher.
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",

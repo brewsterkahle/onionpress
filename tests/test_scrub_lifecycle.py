@@ -40,6 +40,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import scrub  # noqa: E402
 from onionpress.launcher_ops import BACKUP_PASSWORD_ENV  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker  # noqa: E402
 
 GOOD = "correct horse"
 
@@ -47,7 +49,7 @@ GOOD = "correct horse"
 def _verifier(good=GOOD):
     calls = []
 
-    def verify(pw):
+    def verify(pw, *, docker=None):
         calls.append(pw)
         return (pw == good), {}
     return verify, calls
@@ -68,7 +70,8 @@ class TestPasswordCheck(unittest.TestCase):
             return a
         with mock.patch("onionpress.backup.verify_wp_admin_password_any", verify), \
                 mock.patch.object(scrub.getpass, "getpass", side_effect=getpass) as gp:
-            result = scrub._prompt_and_validate_wp_password(initial, log=lines.append, **kw)
+            result = scrub._prompt_and_validate_wp_password(initial, docker=FakeDocker(),
+                                                             log=lines.append, **kw)
         self.prompted = gp.call_count
         self.verified = calls
         self.lines = lines
@@ -148,7 +151,7 @@ class TestPasswordOffArgv(unittest.TestCase):
                 mock.patch.dict(os.environ, {"HOME": home}), \
                 mock.patch("os.path.isfile", return_value=True), \
                 mock.patch("os.path.getsize", return_value=10):
-            scrub.phase_backup(GOOD, lambda m: None)
+            scrub.phase_backup(GOOD, lambda m: None, docker=FakeDocker())
         args, kw = seen[0]
         self.assertEqual(args[:2], [scrub.LAUNCHER_BIN, "backup"])
         self.assertNotIn(GOOD, " ".join(args))
@@ -329,16 +332,16 @@ class TestPolls(unittest.TestCase):
         answers = iter([subprocess.CompletedProcess([], 1, stdout=""),
                         subprocess.CompletedProcess([], 0, stdout="  \n"),
                         subprocess.CompletedProcess([], 0, stdout="AKIA\n")])
-        with mock.patch.object(scrub.wp_files, "wp_cli",
-                               side_effect=lambda *a, **k: next(answers)) as wp:
-            self.assertTrue(scrub._wayback_creds_present())
-        self.assertEqual(wp.call_args.args, ("option", "get", "onionpress_archive_s3_access"))
+        docker = FakeDocker(lambda argv, **kw: next(answers))
+        self.assertTrue(scrub._wayback_creds_present(docker))
+        # wp-cli as www-data, offline, asked for the one option.
+        self.assertEqual(docker.calls[-1][-3:], ["option", "get", "onionpress_archive_s3_access"])
+        self.assertIn("ONIONPRESS_WP_OFFLINE=1", docker.calls[-1])
         self.assertEqual(self.clock.t, 20)
 
     def test_wayback_creds_never_come(self):
-        with mock.patch.object(scrub.wp_files, "wp_cli",
-                               return_value=subprocess.CompletedProcess([], 1, stdout="")):
-            self.assertFalse(scrub._wayback_creds_present(timeout_s=25))
+        docker = FakeDocker(lambda argv, **kw: subprocess.CompletedProcess([], 1, stdout=""))
+        self.assertFalse(scrub._wayback_creds_present(docker, timeout_s=25))
 
 
 class TestRunWrapper(unittest.TestCase):
@@ -369,31 +372,32 @@ class TestRunWrapper(unittest.TestCase):
 
 
 class TestVerifyProbes(unittest.TestCase):
+    """The probes ask the CLI's Docker (the one runner, issue #477)."""
 
-    def run_with(self, rc, out):
-        return mock.patch.object(scrub, "_run", return_value=subprocess.CompletedProcess(
-            [], rc, stdout=out))
+    def docker(self, rc, out):
+        return FakeDocker(lambda argv, **kw: (rc, out, ""))
 
     def test_container_running(self):
-        with self.run_with(0, "onionpress-tor\nonionpress-db\n"):
-            self.assertTrue(scrub._container_running("onionpress-db"))
-            self.assertFalse(scrub._container_running("onionpress"))
-        with self.run_with(1, "onionpress-db\n"):
-            self.assertFalse(scrub._container_running("onionpress-db"))
+        docker = self.docker(0, "onionpress-tor\nonionpress-db\n")
+        self.assertTrue(scrub._container_running(docker, "onionpress-db"))
+        self.assertFalse(scrub._container_running(docker, "onionpress"))
+        self.assertEqual(docker.calls[0], ["docker", "ps", "--format", "{{.Names}}"])
+        self.assertFalse(scrub._container_running(self.docker(1, "onionpress-db\n"),
+                                                  "onionpress-db"))
 
     def test_wp_responds(self):
         for rc, out, want in ((0, "200", (True, "200")), (0, "302", (True, "302")),
                               (0, "500", (False, "500")), (0, "", (False, "000")),
                               (7, "200", (False, "000"))):
-            with self.subTest(rc=rc, out=out), self.run_with(rc, out):
-                self.assertEqual(scrub._wp_responds(), want)
+            with self.subTest(rc=rc, out=out):
+                docker = self.docker(rc, out)
+                self.assertEqual(scrub._wp_responds(docker), want)
+                self.assertEqual(docker.calls[0][:4], ["docker", "exec", "onionpress-wordpress", "curl"])
 
     def test_onion_address(self):
         addr = "a" * 56 + ".onion"
-        with self.run_with(0, addr + "\n"):
-            self.assertEqual(scrub._get_onion_address(), addr)
-        with self.run_with(1, addr):
-            self.assertEqual(scrub._get_onion_address(), "")
+        self.assertEqual(scrub._get_onion_address(self.docker(0, addr + "\n")), addr)
+        self.assertEqual(scrub._get_onion_address(self.docker(1, addr)), "")
 
     def test_user_service_enabled(self):
         run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
@@ -425,7 +429,7 @@ class TestRunScrubCleanup(unittest.TestCase):
                 mock.patch.object(scrub, "phase_restore") as restore, \
                 mock.patch.object(scrub, "phase_verify",
                                   return_value=[scrub.Check("x", checks_ok)]):
-            rc = scrub.run_scrub(GOOD, clean=clean, log_func=lines.append)
+            rc = scrub.run_scrub(GOOD, docker=FakeDocker(), clean=clean, log_func=lines.append)
         restore.assert_called_once_with(GOOD, backup_path, mock.ANY)
         keep.stop.assert_called()
         self.assertFalse(any(GOOD in l for l in lines))
@@ -472,7 +476,7 @@ class TestRunScrubCleanup(unittest.TestCase):
                 mock.patch.object(scrub, "phase_uninstall",
                                   side_effect=RuntimeError("uninstall exited 3")), \
                 mock.patch.object(scrub, "phase_install") as install:
-            rc = scrub.run_scrub(GOOD, clean=True, log_func=lines.append)
+            rc = scrub.run_scrub(GOOD, docker=FakeDocker(), clean=True, log_func=lines.append)
         self.assertEqual(rc, 1)
         install.assert_not_called()
         keep.stop.assert_called()

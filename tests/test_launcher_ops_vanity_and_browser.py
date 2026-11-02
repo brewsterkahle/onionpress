@@ -31,7 +31,9 @@ from unittest import mock
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from fake_docker import FakeDocker  # noqa: E402
 from onionpress import key_manager  # noqa: E402
 from onionpress import launcher_ops  # noqa: E402
 
@@ -69,16 +71,18 @@ class TestGenerateVanity(unittest.TestCase):
         return run
 
     def generate(self, run, prefix=None, **kw):
-        with mock.patch.object(launcher_ops.subprocess, "run", run):
-            return launcher_ops.generate_vanity_in_container(
-                self.prefix if prefix is None else prefix, self.vanity,
-                image="img@sha256:abc", log_func=self.lines.append, **kw)
+        self.docker = FakeDocker(run)
+        return launcher_ops.generate_vanity_in_container(
+            self.prefix if prefix is None else prefix, self.vanity,
+            docker=self.docker, image="img@sha256:abc", log_func=self.lines.append, **kw)
 
     def test_the_new_key_s_address_is_returned(self):
         run = self.fake_run(make=[(self.address, True)], stdout="1 key found\n")
         self.assertEqual(self.generate(run, jobs=3), self.address)
         argv = self.calls[0]
         self.assertEqual(argv[:4], ["docker", "run", "--rm", "--network"])
+        # The search's length depends on the prefix: no time limit.
+        self.assertEqual(self.docker.timeouts, [None])
         self.assertEqual(argv[argv.index("--network") + 1], "none")
         self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
         self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "--cap-add"],
@@ -139,10 +143,9 @@ class TestGenerateVanity(unittest.TestCase):
         self.assertIsNone(self.generate(self.fake_run()))
 
     def test_no_log_func_is_fine(self):
-        with mock.patch.object(launcher_ops.subprocess, "run",
-                               self.fake_run(rc=1, stdout="x\n")):
-            self.assertIsNone(launcher_ops.generate_vanity_in_container(
-                self.prefix, self.vanity, image="img", jobs=1))
+        self.assertIsNone(launcher_ops.generate_vanity_in_container(
+            self.prefix, self.vanity, docker=FakeDocker(self.fake_run(rc=1, stdout="x\n")),
+            image="img", jobs=1))
 
 
 class TestTorBrowserRunning(unittest.TestCase):

@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, backup_crypto, derivatives  # noqa: E402
+from fake_docker import on_path  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 
@@ -455,7 +456,7 @@ esac
     def test_planted_links_never_reach_the_backup(self):
         out = os.path.join(self.tmp, "backup.zip")
         backup.create_backup(mv.ADDR, "admin", PW, out, "2.5.2",
-                             self.logs.append, data_dir=self.data_dir)
+                             self.logs.append, docker=on_path(), data_dir=self.data_dir)
         members = _inner_names_and_bytes(out, PW)
         self.assertFalse([n for n, data in members.items() if SECRET in data])
         names = {n.rstrip("/") for n in members}
@@ -473,7 +474,7 @@ esac
 
     def test_the_container_tar_stores_hard_links_as_files(self):
         backup.create_backup(mv.ADDR, "admin", PW, os.path.join(self.tmp, "b.zip"),
-                             "2.5.2", self.logs.append, data_dir=self.data_dir)
+                             "2.5.2", self.logs.append, docker=on_path(), data_dir=self.data_dir)
         with open(self.calls) as f:
             tar_calls = [line for line in f
                          if "tar -cf -" in line and "onionpress-wordpress" in line]
@@ -495,7 +496,7 @@ esac
         """Root's tar -C followed a wp-content link www-data can plant to
         any folder in the container, into a backup the site gets back."""
         backup.create_backup(mv.ADDR, "admin", PW, os.path.join(self.tmp, "b.zip"),
-                             "2.5.2", self.logs.append, data_dir=self.data_dir)
+                             "2.5.2", self.logs.append, docker=on_path(), data_dir=self.data_dir)
         with open(self.calls) as f:
             tar_calls = [line for line in f
                          if "tar -cf -" in line and "onionpress-wordpress" in line]

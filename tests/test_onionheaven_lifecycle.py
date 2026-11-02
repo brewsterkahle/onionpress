@@ -51,7 +51,9 @@ for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import cli, key_manager, onion_auth, onionheaven  # noqa: E402
+from fake_docker import FakeDocker, answering  # noqa: E402
 from onionpress.platform import resolve_paths  # noqa: E402
 
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
@@ -126,8 +128,7 @@ class _App:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def read_config_value(self, key, default=""):
@@ -188,7 +189,7 @@ class TestRelease(_MacCase):
 
     def release(self, app, reply, **kwargs):
         rec = _Recorder(reply if callable(reply) else (lambda argv: reply))
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             remaining = onionheaven.release_registration(app, "reset", **kwargs)
         return remaining, rec
 
@@ -277,7 +278,7 @@ class TestRelease(_MacCase):
         app = _App(self.tmpdir, "yes")
         self.release(app, '{"unregistered": true}')
         rec = _Recorder(lambda argv: '{"online": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertFalse(onionheaven._send_heartbeat(app))
             self.assertFalse(onionheaven._send_onionheaven_notification(
                 app, "online", "online"))
@@ -286,7 +287,7 @@ class TestRelease(_MacCase):
         status = self.saved()
         status["released"]["until"] = 1
         self.record(**status)
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertTrue(onionheaven._send_heartbeat(app))
         self.assertTrue(self.saved()["registered"])
 
@@ -294,7 +295,7 @@ class TestRelease(_MacCase):
         app = _App(self.tmpdir, "yes")
         onionheaven.end_hub_traffic(app)
         rec = _Recorder(lambda argv: '{"online": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertFalse(onionheaven._send_heartbeat(app))
         self.assertEqual(rec.calls, [])
 
@@ -327,7 +328,7 @@ class TestTheHubLockSpansProcesses(_MacCase):
         holder = self._hold_lock()
         rec = _Recorder(lambda argv: '{"online": true}')
         with mock.patch.object(onionheaven, "HEARTBEAT_LOCK_TIMEOUT", 0.3), \
-                mock.patch.object(onionheaven.subprocess, "run", rec):
+                answering(app, rec):
             self.assertFalse(onionheaven._send_heartbeat(app))
         self.assertEqual(rec.calls, [])
         self.assertTrue(any("another OnionPress process" in line for line in app.logs))
@@ -340,7 +341,7 @@ class TestTheHubLockSpansProcesses(_MacCase):
         holder = self._hold_lock()
         rec = _Recorder(lambda argv: '{"unregistered": true}')
         result = {}
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             worker = threading.Thread(target=lambda: result.setdefault(
                 "remaining", onionheaven.release_registration(app, "reset")))
             worker.start()
@@ -366,7 +367,7 @@ class TestRecord(_MacCase):
             with self.subTest(previous=previous):
                 self.registered(hub=previous, address=reason_address)
                 onionheaven.client_of(app).registration_succeeded = True
-                with mock.patch.object(onionheaven.subprocess, "run", rec):
+                with answering(app, rec):
                     self.assertTrue(onionheaven._send_heartbeat(app))
                 status = self.saved()
                 self.assertEqual((status["content_address"], status["onionheaven_address"]),
@@ -389,7 +390,7 @@ class TestRecord(_MacCase):
              "since": "x", "reason": "hub changed"}])
         app = _App(self.tmpdir)
         rec = _Recorder(lambda argv: '{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertTrue(onionheaven.unregister_from_onionheaven(
                 app, content_address=SITE, hub=OTHER_HUB))
             # A pair the record does not name is never sent.
@@ -409,7 +410,7 @@ class TestMaintain(_MacCase):
 
     def maintain(self, app, reply='{"unregistered": true}', now=None):
         rec = _Recorder(reply if callable(reply) else (lambda argv: reply))
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             thread = onionheaven.maintain_registration(app, now=now)
             if thread is not None:
                 thread.join(10)
@@ -516,7 +517,7 @@ class TestMaintain(_MacCase):
         self.assertIn('release_onionheaven("restore", keep_address=restored_address', cli_src)
         backup = _read("src/onionpress/backup.py")
         self.assertLess(backup.index("before_key_change(derived_address)"),
-                        backup.index("key_manager.write_private_key(priv, pub)"))
+                        backup.index("key_manager.write_private_key(docker, priv, pub)"))
 
 
 # ─── onionpress.cli: the launchers' way in ─────────────────────────────
@@ -537,7 +538,9 @@ class _CliCase(_MacCase):
     def run_cli(self, *args, reply='{"unregistered": true}'):
         rec = _Recorder(reply if callable(reply) else (lambda argv: reply))
         out = io.StringIO()
-        with mock.patch.object(onionheaven.subprocess, "run", rec), \
+        # The CLI's HubContext builds its Docker from the paths: the fake
+        # answering through *rec* instead.
+        with mock.patch.object(onionheaven, "Docker", lambda *a, **k: FakeDocker(rec)), \
                 contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(io.StringIO()):
             rc = cli.main(["--data-dir", self.tmpdir, *args])
@@ -886,7 +889,7 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         step = restore[restore.index("def _restore_backup_key("):]
         self.assert_before(step, "key_pair_onion_address(priv, pub)", "before_key_change(derived_address)",
                            "_restore_backup_key")
-        self.assert_before(step, "before_key_change(derived_address)", "write_private_key(priv, pub)",
+        self.assert_before(step, "before_key_change(derived_address)", "write_private_key(docker, priv, pub)",
                            "_restore_backup_key")
 
     def test_restores_and_setup_from_backup(self):

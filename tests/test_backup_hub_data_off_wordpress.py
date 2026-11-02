@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, key_manager  # noqa: E402
+from fake_docker import FakeDocker, no_docker, on_path  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 import test_backup_staging_links as bsl  # noqa: E402
@@ -194,11 +195,12 @@ class TestCreateBackup(unittest.TestCase):
         os.makedirs(self.data_dir)
         self.logs = []
 
-    def _backup(self, include_hub_data, **container):
+    def _backup(self, include_hub_data, docker=None, **container):
         self.container = _Container(self, self.tmp, **container)
         out = os.path.join(self.tmp, "backup.zip")
         meta = backup.create_backup(mv.ADDR, "admin", PW, out, "2.5.3",
-                                    self.logs.append, data_dir=self.data_dir,
+                                    self.logs.append, docker=docker or on_path(),
+                                    data_dir=self.data_dir,
                                     include_hub_data=include_hub_data)
         return meta, bsl._inner_names_and_bytes(out, PW)
 
@@ -320,10 +322,13 @@ class TestCreateBackup(unittest.TestCase):
         def run(argv, *args, **kwargs):
             if list(argv[:5]) == ["docker", "exec", "onionpress-tor", "sh", "-c"]:
                 raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+            # Everything else reaches the PATH docker stub _backup sets up.
+            kwargs["env"] = os.environ
             return real_run(argv, *args, **kwargs)
 
-        with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            meta, members = self._backup(include_hub_data=True, hub=False, onionhome=True)
+        popen = lambda argv, env=None, **kw: subprocess.Popen(argv, env=os.environ, **kw)
+        meta, members = self._backup(include_hub_data=True, hub=False, onionhome=True,
+                                     docker=FakeDocker(run, popen_factory=popen))
         self.assertNotIn("onionhome/onionnames.db", members)
         self.assertIs(meta["onionhome_registry_unchecked"], True)
         self.assertIn(backup.ONIONHOME_REGISTRY_UNCHECKED_WARNING, self.logs)
@@ -344,6 +349,7 @@ class TestCreateBackup(unittest.TestCase):
         cli.paths = mock.Mock(data_dir=self.data_dir)
         cli.containers = mock.Mock(get_onion_address=mock.Mock(return_value=mv.ADDR))
         cli.log = self.logs.append
+        cli.docker = FakeDocker()
         import contextlib
         import io
         with mock.patch("onionpress.backup.verify_wp_admin", return_value=(True, None)), \
@@ -357,6 +363,7 @@ class TestCreateBackup(unittest.TestCase):
         cli.paths = mock.Mock(data_dir=self.data_dir)
         cli.containers = mock.Mock(get_onion_address=mock.Mock(return_value=mv.ADDR))
         cli.log = self.logs.append
+        cli.docker = FakeDocker()
         for meta, want in (
                 ({"onionheaven_data_unchecked": True, "onionhome_registry_unchecked": True},
                  [backup.HUB_DATA_UNCHECKED_NOTE, backup.ONIONHOME_REGISTRY_UNCHECKED_NOTE]),
@@ -623,7 +630,8 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
             f.write(text)
 
     def test_who_is_refused(self):
-        refuse = backup.settings_page_backup_refusal
+        def refuse(*args, **kw):
+            return backup.settings_page_backup_refusal(*args, docker=no_docker(self), **kw)
         hub, home = backup.HUB_BACKUP_REFUSED_MSG, backup.ONIONHOME_BACKUP_REFUSED_MSG
         unverified = backup.UNVERIFIED_BACKUP_REFUSED_MSG
         self.assertIsNone(refuse(mv.ADDR, "none", data_dir=self.tmp))
@@ -703,10 +711,9 @@ class TestOnionHomeRegistryCheck(unittest.TestCase):
         )
         for result, want in cases:
             with self.subTest(result=result):
-                with mock.patch.object(backup.subprocess, "run",
-                                       side_effect=[result]) as fake:
-                    self.assertIs(backup.onionhome_registry_present(), want)
-                argv = fake.call_args.args[0]
+                docker = FakeDocker(mock.Mock(side_effect=[result]))
+                self.assertIs(backup.onionhome_registry_present(docker), want)
+                argv = docker.calls[0]
                 self.assertEqual(argv[:6], ["docker", "exec", "onionpress-tor", "sh", "-c",
                                             'if [ -f "$1" ]; then echo yes; else echo no; fi'])
                 self.assertEqual(argv[6:], ["sh", "/var/lib/onionnames/onionnames.db"])
@@ -750,11 +757,11 @@ class TestHubDataStateScript(unittest.TestCase):
             calls.append(argv)
             self.assertEqual(argv[:5], ["docker", "exec", "onionheaven", "sh", "-c"])
             script = argv[5].replace(backup.ONIONHEAVEN_DATA_DIR, self.hub)
+            kwargs.pop("env", None)
             env = dict(os.environ, PATH=path or os.environ["PATH"])
             return real_run(["/bin/sh", "-c", script], env=env, **kwargs)
 
-        with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            state = backup.hub_data_state()
+        state = backup.hub_data_state(FakeDocker(run))
         self.assertEqual(len(calls), 1)
         return state
 
@@ -909,9 +916,6 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
         with open(os.path.join(self.data_dir, "onion_address"), "w") as f:
             f.write(mv.OLD_ADDR + "\n")
         self.logs = []
-        p = mock.patch("onionpress.backup.subprocess.run", mv._NoDocker(self))
-        p.start()
-        self.addCleanup(p.stop)
         p = mock.patch.object(key_manager, "write_private_key", side_effect=_KeyWritten)
         p.start()
         self.addCleanup(p.stop)
@@ -945,6 +949,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
                 path = self._backup(f"b-{len(self.logs)}-{sorted(kw)[0]}.zip", **kw)
                 with self.assertRaises(backup.SettingsPageRestoreRefused) as cm:
                     backup.restore_from_backup(path, PW, self.logs.append,
+                                               docker=FakeDocker(mv._NoDocker(self)),
                                                data_dir=self.data_dir,
                                                through_wordpress=True)
                 self.assertEqual(str(cm.exception), want)
@@ -959,12 +964,14 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
     def test_the_apps_restore_goes_ahead(self):
         path = self._backup("hub.zip", keys=True, registry=True, onionhome=True)
         with self.assertRaises(_KeyWritten):
-            backup.restore_from_backup(path, PW, self.logs.append, data_dir=self.data_dir)
+            backup.restore_from_backup(path, PW, self.logs.append,
+                                       docker=FakeDocker(mv._NoDocker(self)), data_dir=self.data_dir)
 
     def test_a_backup_without_hub_data_goes_ahead(self):
         path = self._backup("site.zip", registry=True, empty_keys=True)
         with self.assertRaises(_KeyWritten):
             backup.restore_from_backup(path, PW, self.logs.append,
+                                       docker=FakeDocker(mv._NoDocker(self)),
                                        data_dir=self.data_dir, through_wordpress=True)
 
     def test_the_settings_page_asks_for_it(self):
@@ -973,7 +980,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
         src = mv._read("src/onionpress/cli.py")
         body = src[src.index("def cmd_settings_page_restore("):src.index("def main(")]
         self.assertRegex(body, r"restore_from_backup\(backup_file, password, log, "
-                               r"through_wordpress=True,")
+                               r"docker=docker, through_wordpress=True,")
         # The only caller in what ships.
         callers = [rel for rel in ("src/menubar.py", "src/onionpress/cli.py",
                                    "src/onionpress/setup_window.py", "src/onionpress/handle_action.py")
@@ -1005,9 +1012,8 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
                 stderr="" if kwargs.get("text") else b"")
 
-        with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, metadata or {}, logs.append,
-                                               data_dir=self.tmp, **kw)
+        backup.restore_container_artifacts(staging, metadata or {}, logs.append,
+                                           docker=FakeDocker(run), data_dir=self.tmp, **kw)
         touched = [c for c in calls if any("onionheaven" in a or "onionnames" in a
                                            for a in c)]
         return touched, logs

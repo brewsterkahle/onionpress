@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, backup_archive, backup_crypto, cli  # noqa: E402
+from fake_docker import no_docker  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 
 PW = mv.PW
@@ -377,7 +378,7 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaisesRegex(ValueError, "symbolic link"):
                     backup.restore_from_backup(path, PW, self.logs.append,
-                                               data_dir=self.data_dir)
+                                               docker=no_docker(self), data_dir=self.data_dir)
                 self.assert_untouched()
 
     def test_install_from_backup_refuses_before_touching_anything(self):
@@ -386,7 +387,7 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaisesRegex(ValueError, "symbolic link"):
                     backup.prepare_install_from_backup(
-                        path, PW, self.logs.append, data_dir=self.data_dir)
+                        path, PW, self.logs.append, docker=no_docker(self), data_dir=self.data_dir)
                 self.assert_untouched()
 
     def test_a_wrong_password_on_format_2_still_says_so(self):
@@ -403,7 +404,8 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
         staging, _ = _staging_with_links(self.tmp, {"wp-content": "{home}"},
                                          name="restore-staging")
         with self.assertRaisesRegex(ValueError, "symbolic link"):
-            backup.restore_container_artifacts(staging, {}, self.logs.append)
+            backup.restore_container_artifacts(staging, {}, self.logs.append,
+                                               docker=no_docker(self))
 
 
 class TestEachExtractorOnLegitBackups(unittest.TestCase):

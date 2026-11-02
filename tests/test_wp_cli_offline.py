@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from onionpress import multisite, wp_files  # noqa: E402
 import test_no_clearnet_dns as dns_test  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 TOR_PROXY = os.path.join(PROJECT_ROOT, "app", "Resources", "plugins",
                          "onionpress-tor-proxy.php")
@@ -75,17 +76,16 @@ class TestWpCliArgs(unittest.TestCase):
 class TestMultisiteCallsAreOffline(unittest.TestCase):
 
     def _argvs(self, fn, *args, **kwargs):
-        with mock.patch.object(multisite.subprocess, "run",
-                               return_value=_completed()) as run:
-            fn(*args, **kwargs)
-        return [c.args[0] for c in run.call_args_list]
+        docker = FakeDocker()
+        fn(*args, docker=docker, **kwargs)
+        return docker.calls
 
     def test_wp_passes_offline_by_default(self):
-        argvs = self._argvs(multisite._wp, "theme", "list", docker_bin="docker")
+        argvs = self._argvs(multisite._wp, "theme", "list")
         self.assertEqual(argvs, [["docker"] + wp_files.wp_cli_args("theme", "list", offline=True)])
 
     def test_wp_can_be_asked_not_to(self):
-        argvs = self._argvs(multisite._wp, "x", docker_bin="docker", offline=False)
+        argvs = self._argvs(multisite._wp, "x", offline=False)
         self.assertEqual(argvs, [["docker"] + wp_files.wp_cli_args("x")])
 
     def test_every_wp_cli_call_of_the_provisioning_is_offline(self):
@@ -105,21 +105,18 @@ class TestMultisiteCallsAreOffline(unittest.TestCase):
             return _completed()
 
         # put_tree (the theme and plugin copies) streams a tar to `docker
-        # exec` through Popen, not run: it is not a wp-cli call, and left
-        # unmocked it starts the real docker (FileNotFoundError on a runner
-        # without one, the macOS job's).
-        with mock.patch.object(multisite.subprocess, "run", side_effect=fake_run) as run, \
-             mock.patch.object(wp_files.subprocess, "run", side_effect=fake_run) as run2, \
-             mock.patch.object(wp_files, "put_tree", return_value=_completed()):
-            multisite.deactivate_wp_statistics(docker_bin="docker")
+        # exec` through the runner's popen, not run: it is not a wp-cli
+        # call, and the fake has no process to hand out.
+        docker = FakeDocker(fake_run)
+        with mock.patch.object(wp_files, "put_tree", return_value=_completed()):
+            multisite.deactivate_wp_statistics(docker=docker)
             multisite.provision_post_install(themes_dir=os.path.dirname(themes),
-                                             plugins_dir=plugins, docker_bin="docker")
+                                             plugins_dir=plugins, docker=docker)
             # setup_bundled_plugins' Python steps.
-            multisite.configure_cache_enabler(docker_bin="docker")
-            multisite.apply_cache_policy(docker_bin="docker")
-            multisite.configure_ia_plugin(docker_bin="docker")
-        wp_calls = [c.args[0] for c in run.call_args_list + run2.call_args_list
-                    if "wp" in c.args[0]]
+            multisite.configure_cache_enabler(docker=docker)
+            multisite.apply_cache_policy(docker=docker)
+            multisite.configure_ia_plugin(docker=docker)
+        wp_calls = [argv for argv in docker.calls if "wp" in argv]
         self.assertTrue(wp_calls)
         for argv in wp_calls:
             with self.subTest(argv=argv):

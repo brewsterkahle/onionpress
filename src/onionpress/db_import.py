@@ -59,15 +59,14 @@ def _reject_unsafe_db_value(label, value, *, as_argv=False):
     return value
 
 
-def _assert_db_client_sandboxed():
+def _assert_db_client_sandboxed(docker):
     """Refuse the import outright on a MariaDB client too old for --sandbox,
-    rather than fall back to an unsandboxed one."""
-    check = subprocess.run(
-        ['docker', 'exec', 'onionpress-db', 'sh', '-c',
+    rather than fall back to an unsandboxed one. Asked through *docker*."""
+    check = docker.run(
+        ['exec', 'onionpress-db', 'sh', '-c',
          'mariadb --help 2>/dev/null | grep -q -- --sandbox'],
-        capture_output=True, timeout=15,
-    )
-    if check.returncode != 0:
+        timeout=15, quiet=True)
+    if not check.ok:
         raise Exception(
             "the onionpress-db MariaDB client is too old to import a backup "
             "safely (no --sandbox support); update the database image")
@@ -81,9 +80,10 @@ _DB_IMPORT_FLOOR_S = 120
 _DB_IMPORT_BYTES_PER_S = 256 << 10
 
 
-def db_import(sql_path, password, *, user='wordpress', name='wordpress'):
+def db_import(sql_path, password, *, docker, user='wordpress', name='wordpress'):
     """Import the dump at *sql_path* into database *name* of the running
-    onionpress-db as *user*, with *password*. Raises on any failure.
+    onionpress-db as *user*, with *password*, through *docker* (the
+    caller's onionpress.docker.Docker). Raises on any failure.
 
     The one implementation (Phase 4, #120): restore_container_artifacts
     runs it, on both platforms (the Linux launcher's own db_import went
@@ -108,33 +108,31 @@ def db_import(sql_path, password, *, user='wordpress', name='wordpress'):
         # SQL.
         raise Exception("Database import refused: the database password is "
                         "empty or holds a line break")
-    _assert_db_client_sandboxed()
+    _assert_db_client_sandboxed(docker)
     import_argv = _db_client_argv(
         'mariadb', *_DB_IMPORT_SAFE_FLAGS, '-u', user, name)
     sql_bytes = os.path.getsize(sql_path)
     with open(sql_path, 'rb') as f:
         dump_bytes = f.read()
-    result = subprocess.run(
+    result = docker.run(
         import_argv,
         # First stdin line is the password (read into MYSQL_PWD); the
         # dump bytes follow for the client to read as SQL.
         input=password.encode() + b'\n' + dump_bytes,
-        capture_output=True,
         timeout=wp_files.sized_timeout(sql_bytes, _DB_IMPORT_FLOOR_S,
                                        _DB_IMPORT_BYTES_PER_S),
-    )
-    if result.returncode != 0:
-        raise Exception("Database import failed: "
-                        f"{result.stderr.decode('utf-8', 'replace').strip()}")
+        quiet=True)
+    if not result.ok:
+        raise Exception(f"Database import failed: {result.stderr.strip()}")
 
 
-def _run_db_client_to_file(argv, password, out_path, timeout, what):
-    """Run the MariaDB client *argv* (_db_client_argv) with its stdout
-    written to *out_path*; raise if it fails or takes more than *timeout*
-    seconds, in which case it is killed. *what* names it in the error."""
+def _run_db_client_to_file(docker, argv, password, out_path, timeout, what):
+    """Run the MariaDB client *argv* (_db_client_argv) through *docker*
+    with its stdout written to *out_path*; raise if it fails or takes more
+    than *timeout* seconds, in which case it is killed. *what* names it in
+    the error."""
     with open(out_path, 'wb') as out, tempfile.TemporaryFile() as err:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out,
-                                stderr=err)
+        proc = docker.popen(argv, stdin=subprocess.PIPE, stdout=out, stderr=err)
         try:
             try:
                 proc.stdin.write((password + '\n').encode())
@@ -157,14 +155,16 @@ def _run_db_client_to_file(argv, password, out_path, timeout, what):
 
 
 def _db_client_argv(*client_argv):
-    """argv that runs a MariaDB client in onionpress-db. Feed the password
-    as the first line of stdin: ``input=password + '\\n'``."""
-    return ['docker', 'exec', '-i', 'onionpress-db',
+    """The docker arguments (after the binary, for Docker.run or
+    Docker.popen) that run a MariaDB client in onionpress-db. Feed the
+    password as the first line of stdin: ``input=password + '\\n'``."""
+    return ['exec', '-i', 'onionpress-db',
             'sh', '-c', _DB_PASSWORD_FROM_STDIN, 'sh', *client_argv]
 
 
-def _get_db_credentials():
-    """Read WordPress database credentials from wp-config.php via WP-CLI.
+def _get_db_credentials(docker):
+    """Read WordPress database credentials from wp-config.php via WP-CLI,
+    through *docker* (the caller's onionpress.docker.Docker).
 
     wp-config.php is WordPress's to write, so the values are validated before
     any caller uses them as a client argv or splices them into SQL: a
@@ -174,7 +174,7 @@ def _get_db_credentials():
     """
     creds = {}
     for field in ('DB_NAME', 'DB_USER', 'DB_PASSWORD'):
-        result = wp_files.wp_cli('config', 'get', field, timeout=15)
+        result = docker.wp('config', 'get', field, timeout=15, offline=True, quiet=True)
         if result.returncode != 0:
             raise Exception(f"Could not read {field} from WordPress config")
         creds[field] = result.stdout.strip()

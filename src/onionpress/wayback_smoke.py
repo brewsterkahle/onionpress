@@ -10,29 +10,24 @@ Exit 1 = state machine stalled, gave up, or timed out.
 """
 
 import json
-import subprocess
 import time
 from typing import Callable
-
-from . import wp_files
-
-
-_WORDPRESS_CONTAINER = "onionpress-wordpress"
 
 # Max time (seconds) to wait for the sweeper to reach archived_at.
 # Includes submit + SPN crawl + poll + Tor flake buffer.
 _TEST_TIMEOUT_SEC = 360
 
 
-def _wp(args: list, url: str = None, **kwargs) -> subprocess.CompletedProcess:
-    """wp-cli as www-data (wp_files.wp_cli_args), never as root."""
+def _wp(docker, args: list, url: str = None, **kwargs):
+    """wp-cli as www-data (docker.wp), never as root. Online: the sweep it
+    triggers submits to the Wayback Machine."""
     cmd = args + ["--path=/var/www/html"]
     if url:
         cmd.append("--url=" + url)
-    return wp_files.wp_cli(*cmd, container=_WORDPRESS_CONTAINER, **kwargs)
+    return docker.wp(*cmd, offline=False, quiet=True, **kwargs)
 
 
-def _get_post_wayback_state(post_id: str, site_url: str) -> dict:
+def _get_post_wayback_state(docker, post_id: str, site_url: str) -> dict:
     """Read _op_wayback_* meta for a post. Returns empty strings for unset."""
     keys = [
         "_op_wayback_archived_at",
@@ -44,14 +39,14 @@ def _get_post_wayback_state(post_id: str, site_url: str) -> dict:
     ]
     state = {}
     for key in keys:
-        r = _wp(["post", "meta", "get", post_id, key, "--format=json"],
+        r = _wp(docker, ["post", "meta", "get", post_id, key, "--format=json"],
                 url=site_url, timeout=15)
         state[key] = r.stdout.strip() if r.returncode == 0 else ""
     return state
 
 
-def _pick_test_site() -> dict:
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
+def _pick_test_site(docker) -> dict:
+    r = _wp(docker, ["site", "list", "--fields=blog_id,path,url", "--format=json"],
             timeout=15)
     if r.returncode != 0 or not r.stdout.strip():
         raise RuntimeError(f"wp site list failed: {r.stderr or r.stdout}")
@@ -60,9 +55,10 @@ def _pick_test_site() -> dict:
     return subsites[0] if subsites else sites[0]
 
 
-def smoke_test_wayback(log_func: Callable[[str], None]) -> int:
+def smoke_test_wayback(docker, log_func: Callable[[str], None]) -> int:
+    """The smoke test through *docker* (the CLI's onionpress.docker.Docker)."""
     try:
-        site = _pick_test_site()
+        site = _pick_test_site(docker)
     except Exception as e:
         log_func(f"FAIL: {e}")
         return 1
@@ -71,6 +67,7 @@ def smoke_test_wayback(log_func: Callable[[str], None]) -> int:
 
     marker = f"onionpress-smoke-{int(time.time())}"
     r = _wp(
+        docker,
         ["post", "create",
          "--post_title=Wayback smoke test " + marker,
          "--post_content=Wayback archiving smoke test. Safe to delete.",
@@ -91,9 +88,9 @@ def smoke_test_wayback(log_func: Callable[[str], None]) -> int:
         while time.monotonic() < deadline:
             tick += 1
             # Force a sweep tick instead of waiting for the 5-minute cron.
-            _wp(["cron", "event", "run", "onionpress_wayback_sweep"],
+            _wp(docker, ["cron", "event", "run", "onionpress_wayback_sweep"],
                 timeout=120)
-            state = _get_post_wayback_state(post_id, site_url)
+            state = _get_post_wayback_state(docker, post_id, site_url)
             summary = (f"tick={tick} "
                        f"archived_at={state['_op_wayback_archived_at'] or '-'} "
                        f"job_id={state['_op_wayback_job_id'] or '-'} "
@@ -115,7 +112,7 @@ def smoke_test_wayback(log_func: Callable[[str], None]) -> int:
         log_func(f"FAIL: timed out after {_TEST_TIMEOUT_SEC}s. Last state: {last_summary}")
         return 1
     finally:
-        cleanup = _wp(["post", "delete", post_id, "--force"],
+        cleanup = _wp(docker, ["post", "delete", post_id, "--force"],
                       url=site_url, timeout=30)
         if cleanup.returncode == 0:
             log_func(f"Deleted test post ID {post_id}")

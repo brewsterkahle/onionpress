@@ -816,14 +816,15 @@ class OnionPressCLI:
         from .backup import (create_backup, backup_filename, verify_wp_admin,
                              get_admin_username, unchecked_notes, served_onion_address)
         if not username:
-            username = get_admin_username(data_dir=self.paths.data_dir, log=self.log)
-        ok, err = verify_wp_admin(username, password)
+            username = get_admin_username(data_dir=self.paths.data_dir, log=self.log,
+                                          docker=self.docker)
+        ok, err = verify_wp_admin(username, password, docker=self.docker)
         if not ok:
             return _confirm.answer_error(err, json_output)
         # The address the live key derives to names the file: the tor
         # container's hostname can lag it for a while after a key import or
         # a restore.
-        addr = served_onion_address() or self.containers.get_onion_address()
+        addr = served_onion_address(self.docker) or self.containers.get_onion_address()
         filename = backup_filename(addr, username)
         if not output_path:
             backups_dir = os.path.expanduser("~/OnionPress/backups")
@@ -840,6 +841,7 @@ class OnionPressCLI:
                 username=username,
                 password=password,
                 output_path=output_path,
+                docker=self.docker,
                 version=__version__,
                 log_func=self.log,
                 # Written to the owner's disk, never handed to WordPress: an
@@ -993,8 +995,8 @@ class OnionPressCLI:
                     self.log(f"Restore: the OnionHeaven hub data will not be restored: {e}")
 
             staging, meta = prepare_install_from_backup(
-                backup_path, password, self.log, data_dir=self.paths.data_dir,
-                after_extract=open_hub_data)
+                backup_path, password, self.log, docker=self.docker,
+                data_dir=self.paths.data_dir, after_extract=open_hub_data)
             addr = meta.get("onion_address", "")
             # Derived from the backup's key by the seed step (or, for a
             # backup without a key, the address this install keeps);
@@ -1103,7 +1105,7 @@ class OnionPressCLI:
             self.containers.start_tor()
             self.containers.wait_for_tor()
             from .backup import restore_staged_name_registry
-            restore_staged_name_registry(staging, self.log)
+            restore_staged_name_registry(staging, self.log, docker=self.docker)
 
             # Clean up staging + marker only after a successful import.
             shutil.rmtree(staging, ignore_errors=True)
@@ -1164,7 +1166,7 @@ class OnionPressCLI:
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
                     metadata = validate_backup_metadata(json.load(f))
-            restore_container_artifacts(staging, metadata, self.log,
+            restore_container_artifacts(staging, metadata, self.log, docker=self.docker,
                                         name_registry=name_registry,
                                         hub_data=hub_data,
                                         data_dir=self.paths.data_dir)
@@ -1192,8 +1194,7 @@ class OnionPressCLI:
         log = self.log
         if sys.stderr is None or not sys.stderr.isatty():
             log = _file_log_func(self.paths.log_file)
-        ok = derivatives.regenerate_if_pending(
-            self.paths.data_dir, log, docker_bin=self.docker.docker_bin)
+        ok = derivatives.regenerate_if_pending(self.paths.data_dir, log, docker=self.docker)
         return 0 if ok else 1
 
     # ─── An OnionHeaven hub's backup recovery key ───────────────────────
@@ -1276,13 +1277,14 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
 
     @staticmethod
     def cmd_hub_recovery_key_restore(backup_path: str, password: str,
-                                     from_env: str = "") -> int:
+                                     from_env: str = "", *, docker) -> int:
         """Restore only a hub's sealed registry and registrants' keys from a
         backup (after a restore that did not have the recovery key, such as
         one from the welcome screen). OnionPress must be running. The
         backup password and then the key come from the environment, stdin
         or prompts. The key is checked before anything is written, and
-        every key is checked to be its address's (hub_backup.check)."""
+        every key is checked to be its address's (hub_backup.check). The
+        hub data goes in through *docker*."""
         from . import hub_backup
         from .backup import read_sealed_hub_member, write_hub_data
         log = _make_log_func()
@@ -1301,7 +1303,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         try:
-            write_hub_data(hub, log)
+            write_hub_data(hub, log, docker=docker)
         except Exception as e:
             log(f"Restore: could not restore the OnionHeaven data: {e}")
             return 1
@@ -1309,14 +1311,14 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         return 0
 
     @staticmethod
-    def cmd_put_wp_tree(src: str, dest: str, merge: bool = False) -> int:
+    def cmd_put_wp_tree(src: str, dest: str, merge: bool = False, *, docker) -> int:
         """Hand the host folder *src* to the WordPress container at *dest*,
-        written as www-data (wp_files.put_tree): the bash launchers' restore
-        and plugin installs. Messages go to stderr."""
+        written as www-data (wp_files.put_tree through *docker*): the bash
+        launchers' restore and plugin installs. Messages go to stderr."""
         from . import wp_files
         log = _make_log_func()
         try:
-            r = wp_files.put_tree(src, dest, merge=merge)
+            r = wp_files.put_tree(src, dest, docker=docker, merge=merge)
         except Exception as e:
             log(f"Could not copy {os.path.basename(src)} into WordPress: {e}")
             return 1
@@ -1335,7 +1337,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         post.
         """
         from .wayback_smoke import smoke_test_wayback
-        return smoke_test_wayback(self.log)
+        return smoke_test_wayback(self.docker, self.log)
 
     def cmd_check_for_update(self, json_output: bool = False,
                              current: str = None) -> int:
@@ -1380,7 +1382,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
                          f"{self.paths.config_file} to use the closest valid prefix.")
             return 2
 
-        if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE):
+        if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE, docker=self.docker):
             self.log("Tor image is missing or has no mkp224o; "
                      "skipping vanity generation")
             return 3
@@ -1393,6 +1395,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
             addr = generate_vanity_in_container(
                 prefix=prefix,
                 vanity_dir=vanity_dir,
+                docker=self.docker,
                 log_func=self.log,
             )
         finally:
@@ -1564,7 +1567,7 @@ def _settings_page_log(data_dir: str):
 
 
 def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
-                             json_output: bool = False) -> int:
+                             json_output: bool = False, docker=None) -> int:
     """`onionpress settings-page-backup <zip>` (both launchers' case, issue
     #406). Handed to WordPress by handle-action, and the password came
     from there: refused on an OnionHeaven hub or OnionHome, or a node that
@@ -1578,10 +1581,14 @@ def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
     from .backup import (create_backup, get_admin_username, served_onion_address,
                          SettingsPageBackupRefused, ONION_KEY_LEFT_OUT_NOTE)
     log = _settings_page_log(data_dir)
+    # The one docker runner for this install (issue #477), unless the
+    # caller holds one.
+    docker = docker or Docker(resolve_paths(data_dir=data_dir), log_func=log)
     try:
         metadata = create_backup(
-            served_onion_address() or "unknown", get_admin_username(data_dir=data_dir, log=log),
-            password, output_path, __version__, log,
+            served_onion_address(docker) or "unknown",
+            get_admin_username(data_dir=data_dir, log=log, docker=docker),
+            password, output_path, __version__, log, docker=docker,
             include_hub_data=False, include_host_secrets=False,
             include_onion_key=False)
     except SettingsPageBackupRefused as e:
@@ -1596,7 +1603,7 @@ def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
 
 
 def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
-                              json_output: bool, confirmed) -> int:
+                              json_output: bool, confirmed, docker=None) -> int:
     """`onionpress settings-page-restore <zip>` (both launchers' case, issue
     #406): the in-place backup.restore_from_backup with
     through_wordpress=True, never the install-from-backup `restore` (issue
@@ -1616,6 +1623,7 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
     from .backup import (restore_from_backup, SettingsPageRestoreRefused,
                          ADDRESS_CHANGE_REFUSED_MSG)
     log = _settings_page_log(data_dir)
+    docker = docker or Docker(resolve_paths(data_dir=data_dir), log_func=log)
     linux = detect_os() == OS.LINUX
 
     def confirm_address_change(current, new):
@@ -1637,7 +1645,7 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
             log(f"Restore: could not ask OnionHeaven to delete the old key (continuing): {e}")
 
     try:
-        restore_from_backup(backup_file, password, log, through_wordpress=True,
+        restore_from_backup(backup_file, password, log, docker=docker, through_wordpress=True,
                             before_key_change=before_key_change,
                             confirm_address_change=confirm_address_change)
     except _confirm.NeedsConfirmation as e:
@@ -1653,7 +1661,7 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
 
 
 def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
-                        json_output: bool = False) -> int:
+                        json_output: bool = False, docker=None) -> int:
     """`onionpress prepare-restore <zip>`: the welcome screen's Restore from
     backup, staged before the first start (backup.prepare_install_from_backup:
     extract, seed the onion key, apply the config overrides, write the
@@ -1664,13 +1672,14 @@ def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
     from . import confirm as _confirm
     from .backup import prepare_install_from_backup, sealed_skipped_message
     log = _settings_page_log(data_dir)
+    docker = docker or Docker(resolve_paths(data_dir=data_dir), log_func=log)
 
     def log_both(msg):
         log(msg)
         print(msg, file=sys.stderr)
     try:
         _staging, meta = prepare_install_from_backup(backup_file, password, log_both,
-                                                     data_dir=data_dir)
+                                                     docker=docker, data_dir=data_dir)
     except Exception as e:
         log(f"Restore from backup: prepare failed: {e}")
         return _confirm.answer_error(e, json_output)
@@ -2164,22 +2173,22 @@ def _add_provision_post_install(sub, name):
 
 
 def _run_provision_post_install(run):
-    _cli(run)
     from . import multisite
     return multisite.provision_post_install(
         themes_dir=run.args.themes_dir,
         plugins_dir=run.args.plugins_dir,
+        docker=_cli(run).docker,
         log_func=print,
     )
 
 
 def _run_verify_admin_password(run):
-    _cli(run)
+    cli = _cli(run)
     from .backup import verify_wp_admin_password_any
     pw = sys.stdin.read().rstrip("\n")
     if not pw:
         return 1
-    ok, _ = verify_wp_admin_password_any(pw)
+    ok, _ = verify_wp_admin_password_any(pw, docker=cli.docker)
     return 0 if ok else 1
 
 
@@ -2187,9 +2196,8 @@ def _multisite_step(step: str):
     """The handler of a provisioning step: multisite.<step>, exit 0 when
     it succeeds."""
     def handle(run):
-        _cli(run)
         from . import multisite
-        return 0 if getattr(multisite, step)(log_func=print) else 1
+        return 0 if getattr(multisite, step)(docker=_cli(run).docker, log_func=print) else 1
     return handle
 
 
@@ -2249,7 +2257,7 @@ def _run_regenerate_derivatives_pending(run):
     # setup; exit 0 = a rebuild is owed.
     from . import derivatives
     paths = resolve_paths(data_dir=run.args.data_dir)
-    pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths).docker_bin)
+    pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths))
     return 0 if pending else 1
 
 
@@ -2296,7 +2304,8 @@ def _run_hub_recovery_key(run):
             print("ERROR: a password is required.", file=sys.stderr)
             return 1
         return OnionPressCLI.cmd_hub_recovery_key_restore(
-            args.backup_file, password, run.hub_recovery_key)
+            args.backup_file, password, run.hub_recovery_key,
+            docker=Docker(resolve_paths(data_dir=args.data_dir)))
     return run.help("hub-recovery-key")
 
 
@@ -2324,7 +2333,7 @@ def _run_open_login(run):
     # Needs only docker and a browser: skip OnionPressCLI's setup.
     from .launcher_ops import open_login
     try:
-        open_login(run.args.url)
+        open_login(run.args.url, docker=Docker(resolve_paths(data_dir=run.args.data_dir)))
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -3322,8 +3331,9 @@ _COMMANDS = [
      _run_regenerate_derivatives_pending),
     ("hub-recovery-key", _add_hub_recovery_key, _run_hub_recovery_key),
     ("put-wp-tree", _add_put_wp_tree,
-     lambda run: OnionPressCLI.cmd_put_wp_tree(run.args.src, run.args.dest,
-                                               run.args.merge)),
+     lambda run: OnionPressCLI.cmd_put_wp_tree(
+         run.args.src, run.args.dest, run.args.merge,
+         docker=Docker(resolve_paths(data_dir=run.args.data_dir)))),
     ("open-login", _add_open_login, _run_open_login),
     ("safe-config",
      _plain("Print the allowlisted (non-secret) config keys as JSON — "

@@ -18,8 +18,10 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from onionpress import key_manager
+from onionpress import key_manager  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 
 def _fresh_keypair():
@@ -43,9 +45,10 @@ def _fresh_keypair():
 
 
 def _mock_run_factory(files):
-    """Return a callable that stands in for subprocess.run inside
-    key_manager._docker_cat. `files` maps container paths to (rc, stdout_bytes)
-    — paths not in the map return rc=1 with a cat-style error message.
+    """Return a callable that stands in for subprocess.run under the
+    FakeDocker key_manager._docker_cat reads through. `files` maps
+    container paths to (rc, stdout_bytes) — paths not in the map return
+    rc=1 with a cat-style error message.
     """
     class FakeResult:
         def __init__(self, rc, stdout):
@@ -73,9 +76,7 @@ class TestExtractKeysDeliveredPem(unittest.TestCase):
         pem = key_manager.build_openssh_key(expanded, public)
 
         files = {key_manager.DELIVERED_KEY_PATH: (0, pem)}
-        with mock.patch.object(key_manager.subprocess, "run",
-                               side_effect=_mock_run_factory(files)):
-            priv, pub = key_manager.extract_keys()
+        priv, pub = key_manager.extract_keys(FakeDocker(_mock_run_factory(files)))
 
         self.assertEqual(priv, expanded)
         self.assertEqual(pub, public)
@@ -96,9 +97,7 @@ class TestExtractKeysCTor(unittest.TestCase):
             key_manager.CTOR_SECRET_PATH: (0, sec_blob),
             key_manager.CTOR_PUBLIC_PATH: (0, pub_blob),
         }
-        with mock.patch.object(key_manager.subprocess, "run",
-                               side_effect=_mock_run_factory(files)):
-            priv, pub = key_manager.extract_keys()
+        priv, pub = key_manager.extract_keys(FakeDocker(_mock_run_factory(files)))
 
         self.assertEqual(priv, expanded)
         self.assertEqual(pub, public)
@@ -116,9 +115,7 @@ class TestExtractKeysCTor(unittest.TestCase):
             key_manager.CTOR_SECRET_PATH: (0, sec_blob),
             key_manager.CTOR_HOSTNAME_PATH: (0, addr.encode() + b"\n"),
         }
-        with mock.patch.object(key_manager.subprocess, "run",
-                               side_effect=_mock_run_factory(files)):
-            priv, pub = key_manager.extract_keys()
+        priv, pub = key_manager.extract_keys(FakeDocker(_mock_run_factory(files)))
 
         self.assertEqual(priv, expanded)
         self.assertEqual(
@@ -136,9 +133,7 @@ class TestExtractKeysCTor(unittest.TestCase):
             key_manager.CTOR_SECRET_PATH: (0, sec_blob),
             key_manager.CTOR_HOSTNAME_PATH: (0, (addr.upper() + "\n\r").encode()),
         }
-        with mock.patch.object(key_manager.subprocess, "run",
-                               side_effect=_mock_run_factory(files)):
-            _, pub = key_manager.extract_keys()
+        _, pub = key_manager.extract_keys(FakeDocker(_mock_run_factory(files)))
         self.assertEqual(pub, public)
 
 
@@ -149,10 +144,8 @@ class TestExtractKeysErrors(unittest.TestCase):
         should mention the missing key file path since that's the fastest
         thing to investigate.
         """
-        with mock.patch.object(key_manager.subprocess, "run",
-                               side_effect=_mock_run_factory({})):
-            with self.assertRaises(Exception) as cm:
-                key_manager.extract_keys()
+        with self.assertRaises(Exception) as cm:
+            key_manager.extract_keys(FakeDocker(_mock_run_factory({})))
         msg = str(cm.exception)
         self.assertIn("Failed to extract keys", msg)
         self.assertIn("Could not read key file", msg)
@@ -163,10 +156,8 @@ class TestExtractKeysErrors(unittest.TestCase):
         files = {
             key_manager.CTOR_SECRET_PATH: (0, b"not-a-key" * 10),
         }
-        with mock.patch.object(key_manager.subprocess, "run",
-                               side_effect=_mock_run_factory(files)):
-            with self.assertRaises(Exception) as cm:
-                key_manager.extract_keys()
+        with self.assertRaises(Exception) as cm:
+            key_manager.extract_keys(FakeDocker(_mock_run_factory(files)))
         self.assertIn("C Tor secret key", str(cm.exception))
 
 

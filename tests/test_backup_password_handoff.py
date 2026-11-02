@@ -311,7 +311,8 @@ class TestScrubHandoff(unittest.TestCase):
                  [], 0, "", "")) as run, \
              mock.patch("os.path.isfile", return_value=True), \
              mock.patch("os.path.getsize", return_value=1000):
-            state = scrub.phase_backup(SECRET, log=lambda _: None)
+            from fake_docker import FakeDocker
+            state = scrub.phase_backup(SECRET, log=lambda _: None, docker=FakeDocker())
         argv = run.call_args.args[0]
         self.assertEqual(argv, [scrub.LAUNCHER_BIN, "backup", "--output", state.backup_path])
         self.assertEqual(run.call_args.kwargs["env"][BACKUP_PASSWORD_ENV], SECRET)
@@ -344,7 +345,7 @@ class TestUnzipTimeoutLog(unittest.TestCase):
                 self.killed = True
 
         with mock.patch("shutil.which", return_value="/usr/bin/unzip"), \
-             mock.patch.object(backup.subprocess, "Popen", return_value=_Stuck()), \
+             mock.patch.object(backup_archive.subprocess, "Popen", return_value=_Stuck()), \
              mock.patch.object(backup_archive, "_UNZIP_TIMEOUT_S", 0), \
              mock.patch.object(backup_archive, "_free_bytes", return_value=0):
             self.assertFalse(backup._unzip_cli_extract(

@@ -26,6 +26,8 @@ import re
 import shutil
 import subprocess
 
+from .docker import DockerError
+
 ERROR_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
@@ -812,7 +814,7 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     # Image derivatives (#257): a restore's resized images, rebuilt in the
     # background (niced, resumable), after provision-post-install put the
     # image-fallback mu-plugin in place.
-    if installed and derivatives.regeneration_pending(paths.data_dir, docker.docker_bin):
+    if installed and derivatives.regeneration_pending(paths.data_dir, docker):
         log("Image derivatives: rebuild pending — starting in the background")
         run_detached_cli(["regenerate-derivatives"], data_dir=paths.data_dir,
                          log_file=paths.log_file)
@@ -898,9 +900,8 @@ def write_shared_onion_address(docker, log) -> bool:
     if not addr:
         return False
     try:
-        r = wp_files.put_file(SHARED_ADDRESS_FILE, addr + "\n", "644",
-                              docker_bin=docker.docker_bin, env=docker.env)
-    except (OSError, subprocess.SubprocessError) as e:
+        r = wp_files.put_file(SHARED_ADDRESS_FILE, addr + "\n", "644", docker=docker)
+    except (OSError, DockerError) as e:
         log(f"onion_address not written: {e}")
         return False
     return r.returncode == 0

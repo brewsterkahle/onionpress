@@ -11,7 +11,6 @@ their ports from it.
 
 import os
 import socket
-import subprocess
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -82,13 +81,11 @@ class PortAttributes:
         return self.ports.proxy_port
 
 
-def get_running_wp_port(container: str = "onionpress-wordpress",
-                        docker=None) -> Optional[int]:
-    """Read the host port our own WordPress container actually published.
-
-    With *docker* (a docker.Docker) the question goes to this install's
-    daemon through its environment (DOCKER_HOST, the bundled binary);
-    without one, to `docker` on PATH as the caller's environment has it.
+def get_running_wp_port(docker, container: str = "onionpress-wordpress") -> Optional[int]:
+    """Read the host port our own WordPress container actually published,
+    through *docker* (an onionpress.docker.Docker: the caller's runner, so
+    the question goes to this install's daemon through its environment,
+    DOCKER_HOST and the bundled binary; #477: no bare `docker` on PATH).
 
     `detect_port_offset()` binds candidate ports to find one that's free —
     correct for allocation at first launch, wrong as a runtime lookup: once
@@ -106,14 +103,8 @@ def get_running_wp_port(container: str = "onionpress-wordpress",
     each user's Colima VM exposes, so there is no cross-user leakage here).
     """
     try:
-        if docker is not None:
-            result = docker.run(["port", container, "80"], timeout=10, quiet=True)
-        else:
-            result = subprocess.run(
-                ["docker", "port", container, "80"],
-                capture_output=True, text=True, timeout=10,
-            )
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        result = docker.run(["port", container, "80"], timeout=10, quiet=True)
+    except OSError:
         return None
     if result.returncode != 0:
         return None
@@ -174,8 +165,9 @@ def detect_port_offset(log: Callable[[str], None] | None = None) -> PortConfig:
         offset += 10000
 
 
-def resolve_port_offset(docker=None, log: Callable[[str], None] | None = None) -> PortConfig:
-    """Return the port offset our own stack is actually using.
+def resolve_port_offset(docker, log: Callable[[str], None] | None = None) -> PortConfig:
+    """Return the port offset our own stack is actually using (the
+    running container's published port read through *docker*).
 
     detect_port_offset() allocates: it binds candidate ports and returns
     the first free one, which is correct before anything is running. Once
@@ -237,7 +229,7 @@ def wait_for_previous_port(data_dir: str, *, log: Callable[[str], None] | None =
         pass
 
 
-def resolve_at_start(data_dir: str, *, preset: str | None = None, docker=None,
+def resolve_at_start(data_dir: str, *, docker, preset: str | None = None,
                      log: Callable[[str], None] | None = None,
                      sleep: Callable[[float], None] | None = None) -> PortConfig:
     """The ports this process runs the stack on: the one rule for the

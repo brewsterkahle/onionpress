@@ -172,10 +172,11 @@ class TestAddressPrefix(unittest.TestCase):
             self.assertNotIn("\n", suggestion)
 
     def test_mkp224o_is_never_started_for_one(self):
-        with mock.patch.object(launcher_ops.subprocess, "run") as run:
-            with self.assertRaises(ValueError):
-                launcher_ops.generate_vanity_in_container("op2\n", "/nonexistent")
-        run.assert_not_called()
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from fake_docker import no_docker
+        with self.assertRaises(ValueError):
+            launcher_ops.generate_vanity_in_container("op2\n", "/nonexistent",
+                                                      docker=no_docker(self))
 
     def _mac_first_run_prefix(self, prefix):
         """The prefix the Mac's first-run seed generates with (start.KeySeed,
@@ -239,8 +240,7 @@ class TestOtherNameChecks(unittest.TestCase):
                               "admin_password": "hunter22",
                               "admin_email": email}).encode()
             h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-            h.server = types.SimpleNamespace(docker_bin="/x/docker", docker_env={},
-                                             log_func=lambda *_: None)
+            h.server = types.SimpleNamespace(docker=mock.Mock(), log_func=lambda *_: None)
             h.headers = {"Content-Length": str(len(body))}
             h.rfile, h.wfile = io.BytesIO(body), io.BytesIO()
             sent = []

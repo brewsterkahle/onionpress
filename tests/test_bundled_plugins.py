@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import bundled_plugins, multisite, setup_logic, wp_files  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker  # noqa: E402
 
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 ACTIVATE = os.path.join(PROJECT_ROOT, "app/Resources/scripts/activate_plugin.sh")
@@ -525,7 +526,7 @@ class TestSetupStartsThePluginSetup(unittest.TestCase):
              mock.patch("threading.Thread"):
             setup_logic.install_fresh_wordpress(
                 site_title="t", onionname="alice", password="pw-pw-pw-pw",
-                onion_addr=ONION, launcher_bin=launcher_bin, data_dir=data)
+                onion_addr=ONION, docker=FakeDocker(), launcher_bin=launcher_bin, data_dir=data)
         return order
 
     def test_after_the_users_site_exists(self):
@@ -635,7 +636,7 @@ class TestConfigureIaPlugin(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_www_data", side_effect=in_container), \
              mock.patch.object(multisite, "_wp", side_effect=wp):
-            ok = multisite.configure_ia_plugin(log_func=logs.append)
+            ok = multisite.configure_ia_plugin(docker=FakeDocker(), log_func=logs.append)
         return ok, logs
 
     def test_options(self):
@@ -738,7 +739,7 @@ class TestConfigureCacheEnabler(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_www_data", side_effect=in_container), \
              mock.patch.object(multisite, "_wp", side_effect=wp):
-            ok = multisite.configure_cache_enabler(log_func=lambda _m: None)
+            ok = multisite.configure_cache_enabler(docker=FakeDocker(), log_func=lambda _m: None)
         return ok, calls
 
     def test_sets_fs_method_once(self):
@@ -767,7 +768,7 @@ class TestApplyCachePolicy(unittest.TestCase):
         sh = mock.Mock(return_value=_done())
         with mock.patch.object(multisite, "_wp", wp), \
              mock.patch.object(multisite, "_exec_www_data", sh):
-            ok = multisite.apply_cache_policy(log_func=lambda _m: None)
+            ok = multisite.apply_cache_policy(docker=FakeDocker(), log_func=lambda _m: None)
         return ok, wp, sh
 
     def test_validates_then_clears_as_www_data(self):
@@ -788,9 +789,9 @@ class TestApplyCachePolicy(unittest.TestCase):
                       _read("app/Resources/plugins/onionpress-cache-policy.php"))
 
     def test_exec_www_data_is_www_data(self):
-        with mock.patch.object(multisite.subprocess, "run", return_value=_done()) as run:
-            multisite._exec_www_data("true")
-        argv = run.call_args.args[0]
+        docker = FakeDocker()
+        multisite._exec_www_data("true", docker=docker)
+        argv = docker.calls[0]
         self.assertEqual(argv[argv.index("-u") + 1], "www-data")
 
 

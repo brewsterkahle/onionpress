@@ -35,12 +35,14 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, TESTS_DIR)
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import backup, key_manager, onion_auth, onionheaven  # noqa: E402
+from fake_docker import FakeDocker, answering, on_path  # noqa: E402
 
 KEY_MANAGER = os.path.join(PROJECT_DIR, "src", "onionpress", "key_manager.py")
 HC = "vipwsi6bjeychxvdo3xjvojr2yvw7ggwagekemekmeccscryuhehp2id.onion"
@@ -100,8 +102,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -139,7 +140,7 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
 
     def _post(self, fn, reply):
         rec = _Recorder(lambda argv: reply)
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(self.app, rec):
             result = fn()
         self.assertTrue(result is None or result, self.app.logs)
         self.assertEqual(len(rec.calls), 1, rec.calls)
@@ -177,7 +178,7 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
 
     def test_helpers_pass_input_through(self):
         rec = _Recorder(lambda argv: "ok")
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(self.app, rec):
             self.assertEqual(onionheaven._run_docker(self.app, ["x"], input="a"),
                              (True, "ok"))
             self.assertEqual(onionheaven._run_docker_rc(self.app, ["x"], input="b"),
@@ -209,11 +210,11 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
         """Run what docker exec would run in the container, here."""
         argv = backup._db_client_argv(self._fake_client(), "-u", "wordpress",
                                       "wordpress")
-        self.assertEqual(argv[:5], ["docker", "exec", "-i", "onionpress-db", "sh"])
+        self.assertEqual(argv[:4], ["exec", "-i", "onionpress-db", "sh"])
         # The mariadb image's /bin/sh is dash; try it too where it exists.
         for shell in filter(None, ("sh", shutil.which("dash"))):
             with self.subTest(shell=shell):
-                out = subprocess.run([shell] + argv[5:], input=TRICKY_PASSWORD + "\n",
+                out = subprocess.run([shell] + argv[4:], input=TRICKY_PASSWORD + "\n",
                                      capture_output=True, text=True, timeout=10)
                 self.assertEqual(out.returncode, 0, out.stderr)
                 self.assertEqual(out.stdout.splitlines(), [
@@ -222,11 +223,10 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
 
     def test_workload_stats_query(self):
         rec = _Recorder(lambda argv: "1\t2\t3\t4\t5\t6\n")
-        with mock.patch.object(backup.subprocess, "run", rec):
-            stats = backup._query_workload_stats(self.CREDS)
+        stats = backup._query_workload_stats(FakeDocker(rec), self.CREDS)
         self.assertEqual(stats["db_bytes"], 1)
         argv, stdin = rec.calls[0]
-        self.assertEqual(argv, backup._db_client_argv(
+        self.assertEqual(argv[1:], backup._db_client_argv(
             "mariadb", "-B", "-N", "-u", "wordpress", "-D", "wordpress",
             "-e", argv[-1]))
         self.assertEqual(stdin, TRICKY_PASSWORD + "\n")
@@ -256,9 +256,8 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
             return ""
         rec = _Recorder(reply)
         logs = []
-        with mock.patch.object(backup.subprocess, "run", rec):
-            backup.restore_container_artifacts(staging, {}, logs.append,
-                                               data_dir=data_dir)
+        backup.restore_container_artifacts(staging, {}, logs.append,
+                                           docker=FakeDocker(rec), data_dir=data_dir)
         rec.assert_secret_not_in_argv(self, safe_password)
 
         # The dump goes in on stdin, through a sandboxed client, never
@@ -330,7 +329,7 @@ exit 0
         with mock.patch.dict(os.environ,
                              {"PATH": bindir + os.pathsep + os.environ["PATH"]}):
             backup.create_backup("x.onion", "admin", "zip-password", out_zip,
-                                 "test", logs.append, data_dir=data_dir)
+                                 "test", logs.append, docker=on_path(), data_dir=data_dir)
         self.assertTrue(os.path.exists(out_zip), logs)
         with open(argv_log) as f:
             argv_lines = f.read()

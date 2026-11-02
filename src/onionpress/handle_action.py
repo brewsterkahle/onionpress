@@ -679,12 +679,18 @@ def _create_backup(host):
         # allowed grows with the backup (#317).
         with open(path, "rb") as backup_file:
             size = os.fstat(backup_file.fileno()).st_size
-            handed = subprocess.run(
-                [host.docker.docker_bin, "exec", "-i", "-u", "www-data",
-                 "onionpress-wordpress", "sh", "-c", 'umask 077; cat > "$1"', "sh",
-                 f"{SHARED}/{filename}"],
-                stdin=backup_file, capture_output=True, env=host.docker.env,
-                timeout=wp_files.sized_timeout(size, 300))
+            # The zip streams from the file (a site's backup can be
+            # gigabytes), so the runner's Popen rather than its run.
+            handed = host.docker.popen(
+                ["exec", "-i", "-u", "www-data", "onionpress-wordpress", "sh", "-c",
+                 'umask 077; cat > "$1"', "sh", f"{SHARED}/{filename}"],
+                stdin=backup_file, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                handed.communicate(timeout=wp_files.sized_timeout(size, 300))
+            except subprocess.TimeoutExpired:
+                handed.kill()
+                handed.communicate()
+                raise RuntimeError(HANDOFF_FAILED_MSG)
         if handed.returncode != 0:
             raise RuntimeError(HANDOFF_FAILED_MSG)
         result = {"success": True, "filename": filename, "created_at": now_iso()}

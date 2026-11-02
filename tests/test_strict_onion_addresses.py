@@ -47,6 +47,7 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
@@ -56,6 +57,7 @@ from onionpress import (  # noqa: E402
     auto_login, key_manager, native_messaging_host, onion_auth, onion_hostname,
     onion_proxy, onionheaven, setup_logic,
 )
+from fake_docker import FakeDocker, answering  # noqa: E402
 
 PHP = shutil.which("php")
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
@@ -108,8 +110,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -245,7 +246,7 @@ class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
     def test_a_well_formed_hub_is_posted_to(self):
         rec = _Recorder('{"online": true}')
         with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", OTHER_HUB), \
-                mock.patch.object(onionheaven.subprocess, "run", rec):
+                answering(self.app, rec):
             self.assertTrue(onionheaven._send_heartbeat(self.app))
         self.assertEqual(rec.calls[0][-1], f"http://{OTHER_HUB}:8083/online")
 
@@ -254,7 +255,7 @@ class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
             with self.subTest(hub=hub):
                 rec = _Recorder('{"online": true}')
                 with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", hub), \
-                        mock.patch.object(onionheaven.subprocess, "run", rec):
+                        answering(self.app, rec):
                     self.assertFalse(fn())
                 self.assertEqual(rec.calls, [])
 
@@ -303,7 +304,7 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
                     app = _FakeApp(self.tmpdir, onion_address=site)
                     setattr(app, field, value)
                     rec = _Recorder('{"online": true}')
-                    with mock.patch.object(onionheaven.subprocess, "run", rec):
+                    with answering(app, rec):
                         self.assertFalse(onionheaven._send_heartbeat(app))
                         self.assertFalse(onionheaven._send_onionheaven_notification(
                             app, "offline", "offline"))
@@ -312,7 +313,7 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
     def test_unregister_takes_no_malformed_cached_address(self):
         app = _FakeApp(self.tmpdir, onion_address="Starting...")
         rec = _Recorder('{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             onionheaven.unregister_from_onionheaven(app)
         self.assertEqual(rec.calls, [])
         self.assertIn("OnionHeaven: no content address for unregister", app.logs)
@@ -509,21 +510,23 @@ class TestSetupSiteAddress(unittest.TestCase):
     def test_install_never_takes_a_malformed_address_for_the_site_url(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
+        from fake_docker import FakeDocker
         rec = _Recorder()
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             setup_logic.install_fresh_wordpress(
                 site_title="T", onionname="alice", password="hunter22",
-                onion_addr=LOOSE[0], launcher_bin="/x/onionpress", data_dir=tmp)
+                onion_addr=LOOSE[0], docker=FakeDocker(rec), launcher_bin="/x/onionpress",
+                data_dir=tmp)
         urls = [a for argv in rec.calls for a in argv if "http://" in a]
         self.assertTrue(urls)
         self.assertTrue(all("evil" not in u for u in urls), urls)
         self.assertIn("--url=http://localhost", rec.calls[0])
 
     def test_read_onion_address(self):
+        from fake_docker import FakeDocker
         for content, want in ((SITE + "\n", SITE), (LOOSE[0] + "\n", "")):
             rec = _Recorder(content)
-            with mock.patch.object(setup_logic.subprocess, "run", rec):
-                self.assertEqual(setup_logic._read_onion_address(), want)
+            self.assertEqual(setup_logic._read_onion_address(FakeDocker(rec)), want)
 
 
 # ─── The served hostname (issue #478) ───────────────────────────────────
@@ -564,20 +567,6 @@ class TestServedHostnameReader(unittest.TestCase):
                 self.assertEqual(onion_hostname.read_hostname_text(_HostnameDocker(value)),
                                  value.strip())
 
-    def test_through_a_docker_binary(self):
-        rec = _Recorder(SITE + "\n")
-        with mock.patch.object(onion_hostname.subprocess, "run", rec):
-            self.assertEqual(onion_hostname.read_served_address_with("/x/docker"), SITE)
-        self.assertEqual(rec.calls, [["/x/docker", "exec", "onionpress-tor", "cat",
-                                      "/var/lib/tor/hidden_service/wordpress/hostname"]])
-        for value in LOOSE:
-            with self.subTest(value=value), \
-                    mock.patch.object(onion_hostname.subprocess, "run", _Recorder(value)):
-                self.assertEqual(onion_hostname.read_served_address_with(), "")
-        failed = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, SITE, "")  # noqa: E731
-        with mock.patch.object(onion_hostname.subprocess, "run", failed):
-            self.assertEqual(onion_hostname.read_served_address_with(), "")
-
     def test_the_rule_is_key_managers(self):
         self.assertIs(onion_hostname.is_valid_onion_address, key_manager.is_valid_onion_address)
 
@@ -595,8 +584,8 @@ class TestNativeMessagingHostAddress(unittest.TestCase):
     def test_get_onion_address(self):
         for content, want in [(SITE + "\n", SITE)] + [(v, None) for v in LOOSE]:
             with self.subTest(content=content), \
-                    mock.patch.object(native_messaging_host.subprocess, "run",
-                                      _Recorder(content)):
+                    mock.patch.object(native_messaging_host, "_docker",
+                                      return_value=FakeDocker(_Recorder(content))):
                 self.assertEqual(native_messaging_host.get_onion_address(), want)
 
 

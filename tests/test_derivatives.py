@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import derivatives, wp_files  # noqa: E402
 
 
@@ -218,8 +219,9 @@ class TestRegenerateIfPending(unittest.TestCase):
         derivatives.schedule_regeneration(self.data_dir)
 
     def _run(self, fake):
-        with mock.patch("onionpress.derivatives.subprocess.run", fake):
-            return derivatives.regenerate_if_pending(self.data_dir, self.logs.append)
+        from fake_docker import FakeDocker
+        return derivatives.regenerate_if_pending(self.data_dir, self.logs.append,
+                                                 docker=FakeDocker(fake))
 
     def test_no_marker_means_no_regeneration(self):
         fake = _FakeDocker()
@@ -236,11 +238,13 @@ class TestRegenerateIfPending(unittest.TestCase):
         regen = fake.regenerate_calls()
         self.assertEqual(len(regen), 2)
         for call in regen:
-            # wp-cli as www-data, never as root (it loads WordPress's PHP).
-            self.assertEqual(call[:7], ["docker", "exec", "-u", "www-data", "-e",
+            # wp-cli as www-data, never as root (it loads WordPress's PHP),
+            # offline (the sweep needs no network).
+            self.assertEqual(call[:9], ["docker", "exec", "-u", "www-data", "-e",
                                         "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                                        "-e", "ONIONPRESS_WP_OFFLINE=1",
                                         "onionpress-wordpress"])
-            self.assertEqual(call[7:11], ["nice", "-n", "10", "wp"])
+            self.assertEqual(call[9:13], ["nice", "-n", "10", "wp"])
             self.assertIn("--only-missing", call)
             self.assertIn("--yes", call)
             self.assertNotIn("--allow-root", call)

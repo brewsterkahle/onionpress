@@ -47,7 +47,9 @@ for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import key_manager, onion_auth, onionheaven  # noqa: E402
+from fake_docker import FakeDocker, answering  # noqa: E402
 
 Client = onionheaven.OnionHeavenClient
 
@@ -109,8 +111,7 @@ class _App:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def set_choice(self, choice):
@@ -249,7 +250,7 @@ class TestMacNothingGoesToTheHubUnlessYes(_MacCase):
             with self.subTest(choice=choice):
                 app = _App(self.tmpdir, choice)
                 rec = _Recorder(lambda argv: '{"online": true, "offline": true}')
-                with mock.patch.object(onionheaven.subprocess, "run", rec):
+                with answering(app, rec):
                     self.assertFalse(onionheaven._send_heartbeat(app))
                     self.assertFalse(onionheaven.notify_onionheaven_online(app))
                     self.assertFalse(onionheaven.notify_onionheaven_offline(app))
@@ -261,7 +262,7 @@ class TestMacNothingGoesToTheHubUnlessYes(_MacCase):
     def test_yes_still_sends(self):
         app = _App(self.tmpdir, "yes")
         rec = _Recorder(lambda argv: '{"online": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertTrue(onionheaven._send_heartbeat(app))
         self.assertEqual(rec.urls(), [f"http://{HUB}:8083/online"])
         self.assertTrue(self.saved_record()["registered"])
@@ -271,7 +272,7 @@ class TestMacNothingGoesToTheHubUnlessYes(_MacCase):
         # _heartbeat_landed saw arrive must write it too.
         app = _App(self.tmpdir, "yes")
         rec = _Recorder(lambda argv: "")
-        with mock.patch.object(onionheaven.subprocess, "run", rec), \
+        with answering(app, rec), \
                 mock.patch.object(onionheaven, "_heartbeat_landed", return_value=True):
             self.assertTrue(onionheaven._send_heartbeat(app))
         status = self.saved_record()
@@ -286,7 +287,7 @@ class TestMacOptOutUnregisters(_MacCase):
 
     def _opt_out(self, app, reply, now=None):
         rec = _Recorder(lambda argv: reply)
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             thread = onionheaven.maybe_unregister_after_opt_out(app, now=now)
             if thread is not None:
                 thread.join(10)
@@ -382,7 +383,7 @@ class TestMacOptOutUnregisters(_MacCase):
         self.registered()
         app = _App(self.tmpdir, "yes")
         rec = _Recorder(lambda argv: '{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertIsNone(onionheaven.unregister_from_onionheaven(
                 app, while_choice="no"))
             client = onionheaven.client_of(app)
@@ -417,7 +418,7 @@ class TestMacOptOutUnregisters(_MacCase):
         holder.start()
         self.assertTrue(held.wait(10))
         rec = _Recorder(lambda argv: '{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             thread = onionheaven.maybe_unregister_after_opt_out(app)
             threading.Event().wait(0.3)
             self.assertEqual(rec.calls, [], "unregister went out under a heartbeat")
@@ -434,7 +435,7 @@ class TestMacOptOutUnregisters(_MacCase):
         self.assertFalse(self.saved_record()["registered"])
         app.set_choice("yes")
         rec = _Recorder(lambda argv: '{"online": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertTrue(onionheaven._send_heartbeat(app))
         # The record says the hub holds the key again, so a later "no"
         # unregisters again.
@@ -444,7 +445,7 @@ class TestMacOptOutUnregisters(_MacCase):
         self.registered(hub=HUB)
         app = _App(self.tmpdir, "yes")
         rec = _Recorder(lambda argv: '{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             self.assertTrue(onionheaven.unregister_from_onionheaven(app))
         payload = json.loads(rec.calls[0][1])
         self.assertNotIn("healthcheck_address", payload)

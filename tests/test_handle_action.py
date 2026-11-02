@@ -79,7 +79,8 @@ class FakeDocker:
         self.calls = []
         self.cp_target = None          # what `docker cp` leaves at the copy
         self.head_limits = []          # (file, bytes) of every bounded read
-        # The hand-off runs `docker exec -i` itself, on this binary.
+        # The hand-off runs `docker exec -i` through the runner's popen, on
+        # this binary.
         self.docker_bin = os.path.join(sandbox, "docker")
         with open(self.docker_bin, "w") as f:
             f.write('#!/bin/bash\n'
@@ -112,7 +113,14 @@ class FakeDocker:
         return self.run(["exec"] + (["-u", user] if user else []) + [container, *command],
                         timeout=timeout, check=check, quiet=quiet)
 
-    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False):
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """The backup hand-off: a real Popen on the stub binary above."""
+        self.calls.append([str(a) for a in args])
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
+
+    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
+            binary=False):
         args = [str(a) for a in args]
         self.calls.append(args)
         if args[:4] == ["exec", "-u", "www-data", "onionpress-wordpress"]:
@@ -146,6 +154,16 @@ class FakeDocker:
                 f.write(input or "")
             return DockerResult(0, "", "")
         if args[:3] == ["exec", "onionpress-tor", "cat"]:
+            tor_fs = getattr(self, "tor_fs", None)
+            if tor_fs is not None:      # the tor container's files (a key import's reads)
+                path = tor_fs + args[3]
+                if os.path.isfile(path):
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    return DockerResult(0, data if binary else data.decode("utf-8", "replace"),
+                                        b"" if binary else "")
+                return DockerResult(1, b"" if binary else "",
+                                    b"no such file" if binary else "no such file")
             return (DockerResult(0, self.address + "\n", "") if self.address
                     else DockerResult(1, "", "no such file"))
         if args[:3] == ["exec", "onionheaven", "curl"]:

@@ -28,6 +28,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import setup_logic  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker  # noqa: E402
 
 MAC_LAUNCHER = "app/MacOS/onionpress"
 ONION = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
@@ -78,12 +80,12 @@ class TestInstallFreshWordpressWritesIt(unittest.TestCase):
         self.marker = os.path.join(self.tmpdir, ".setup_complete")
 
     def _run(self, result):
-        with mock.patch("onionpress.setup_logic.subprocess.run", return_value=result), \
+        with mock.patch("onionpress.setup_logic.subprocess.run", return_value=result) as mrun, \
              mock.patch.object(setup_logic, "start_bundled_plugin_setup", return_value=True):
             return setup_logic.install_fresh_wordpress(
                 site_title="My Blog", onionname="alice", password="hunter22",
-                onion_addr=ONION, launcher_bin="/usr/local/bin/onionpress",
-                data_dir=self.tmpdir)
+                onion_addr=ONION, docker=FakeDocker(mrun),
+                launcher_bin="/usr/local/bin/onionpress", data_dir=self.tmpdir)
 
     def test_after_a_completed_install(self):
         self.assertTrue(self._run(_ok()))

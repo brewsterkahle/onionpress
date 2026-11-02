@@ -385,9 +385,10 @@ class ProxyCache:
             }
 
 
-def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
+def install_php_proxy(docker, php_script_path, log_func=None):
     """Copy the PHP proxy script into the WordPress container, with
-    PHP_PROXY_TOKEN written into it.
+    PHP_PROXY_TOKEN written into it, through *docker* (the daemon's
+    onionpress.docker.Docker).
 
     Written as www-data (wp_files): www-data owns the web root, and root's
     docker cp followed a link planted at __op_proxy.php to any file in the
@@ -405,7 +406,7 @@ def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
         result = wp_files.put_file(
             "/var/www/html/__op_proxy.php",
             script.replace(PHP_PROXY_TOKEN_PLACEHOLDER, PHP_PROXY_TOKEN), "644",
-            docker_bin=docker_bin, env=docker_env, timeout=10)
+            docker=docker, timeout=10)
         if result.returncode == 0:
             if log_func:
                 log_func("Installed PHP proxy in WordPress container")
@@ -857,10 +858,8 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         """Serve the WordPress setup form (first-run only)."""
         # Check if WordPress is already installed
         try:
-            from onionpress import wp_files
-            result = wp_files.wp_cli("core", "is-installed",
-                                     docker_bin=self.server.docker_bin,
-                                     env=self.server.docker_env, timeout=10)
+            result = self.server.docker.wp("core", "is-installed", timeout=10,
+                                           offline=True, quiet=True)
             if result.returncode == 0:
                 body = b'<html><head><meta http-equiv="refresh" content="0;url=/status"></head><body>WordPress is already configured.</body></html>'
                 self.send_response(302)
@@ -950,13 +949,11 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         return site is None or site == 'same-origin'
 
     def _wp_installed(self):
-        """True if WordPress is installed, None if that can't be told."""
-        from onionpress import wp_files
-        try:
-            result = wp_files.wp_cli("core", "is-installed",
-                                     docker_bin=self.server.docker_bin,
-                                     env=self.server.docker_env, timeout=10)
-        except (subprocess.SubprocessError, OSError):
+        """True if WordPress is installed, None if that can't be told
+        (docker did not answer in time, or could not be run)."""
+        result = self.server.docker.wp("core", "is-installed", timeout=10,
+                                       offline=True, quiet=True)
+        if result.timed_out or result.returncode == 127:
             return None
         return result.returncode == 0
 
@@ -1056,8 +1053,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 onionname=username,
                 password=password,
                 onion_addr=self.server.onion_address or "localhost",
-                docker_bin=self.server.docker_bin,
-                docker_env=self.server.docker_env,
+                docker=self.server.docker,
                 launcher_bin=launcher,
                 log_func=log,
                 data_dir=self.server.data_dir,
@@ -1133,8 +1129,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self.healthcheck_address = None
         self.tor_ready = False
         self.version = "unknown"
-        self.docker_bin = "docker"
-        self.docker_env = None
+        self.docker = None          # the daemon's onionpress.docker.Docker
         self.log_func = None
         self.data_dir = None
         self.launcher_script = None

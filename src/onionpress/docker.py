@@ -2,6 +2,18 @@
 
 Provides a high-level interface for running docker and docker compose commands
 with the correct environment (DOCKER_HOST, COLIMA_HOME, etc.).
+
+Docker is the one way the Python side runs docker (issue #477): the
+binary (the bundle's, else PATH's: platform.find_docker_bin), the
+environment (this install's socket and config: platform.docker_env), the
+logging and the time limits are decided here, once, and every module that
+runs a container takes a Docker from its caller, built from
+OnionPressPaths (`Docker(resolve_paths())` reaches the right daemon on
+both platforms). Nothing else builds a `["docker", ...]` argv or threads
+a docker binary and environment by hand: the census in
+tests/test_docker_runner_census.py fails on one. wp_files holds the
+argument lists of the WordPress hand-offs (wp-cli as www-data, the files
+written as www-data), run through a Docker too.
 """
 
 import json
@@ -17,10 +29,12 @@ from .platform import (OnionPressPaths, detect_timezone, docker_env,
 
 @dataclass
 class DockerResult:
-    """Result of a docker command."""
+    """Result of a docker command. stdout and stderr are text, decoded as
+    UTF-8 with errors replaced; bytes from `run(binary=True)` (a key file
+    read out of a container)."""
     returncode: int
-    stdout: str
-    stderr: str
+    stdout: str | bytes
+    stderr: str | bytes
     timed_out: bool = False
 
     @property
@@ -28,7 +42,7 @@ class DockerResult:
         return self.returncode == 0 and not self.timed_out
 
     @property
-    def output(self) -> str:
+    def output(self):
         """Stdout stripped of trailing whitespace."""
         return self.stdout.rstrip()
 
@@ -49,7 +63,10 @@ class DockerError(Exception):
 
 
 class Docker:
-    """Docker subprocess wrapper with OnionPress environment."""
+    """Docker subprocess wrapper with OnionPress environment: the one
+    runner (see the module docstring). run/exec/wp/compose capture and
+    time-limit; run_to streams to a log or stdout; popen hands the caller
+    a process it drives itself."""
 
     def __init__(
         self,
@@ -69,8 +86,9 @@ class Docker:
 
     @property
     def env(self) -> dict:
-        """The environment docker children run with (a copy), for a caller
-        that streams a file into `docker exec` itself."""
+        """The environment docker children run with (a copy): what a
+        helper script that runs docker itself (the bundled plugins' bash)
+        is started with."""
         return dict(self._env)
 
     @staticmethod
@@ -99,24 +117,30 @@ class Docker:
     def run(
         self,
         args: list,
-        timeout: int = 30,
+        timeout: int | None = 30,
         check: bool = False,
-        input: str | None = None,
+        input: str | bytes | None = None,
         extra_env: dict | None = None,
         quiet: bool = False,
+        binary: bool = False,
     ) -> DockerResult:
         """Run a docker command.
 
         Args:
             args: Command arguments after 'docker' (e.g. ['ps', '-a']).
-            timeout: Timeout in seconds.
+            timeout: Timeout in seconds (None: none, for a run whose
+                length the caller cannot bound, mkp224o's search).
             check: If True, raise DockerError on non-zero exit.
-            input: Optional stdin string.
+            input: Optional stdin, text or bytes (a file handed to a
+                container, a key).
             extra_env: Additional env vars merged on top of the base env.
             quiet: If True, suppress FAILED log on non-zero exit.
+            binary: stdout and stderr as bytes, undecoded (a key file read
+                out of a container).
         """
         cmd = [self._docker_bin] + [str(a) for a in args]
-        result = self._subprocess(cmd, timeout=timeout, input=input, extra_env=extra_env)
+        result = self._subprocess(cmd, timeout=timeout, input=input, extra_env=extra_env,
+                                  binary=binary)
         if not result.ok:
             if not quiet:
                 self._log(f"docker {' '.join(str(a) for a in args)} — FAILED (rc={result.returncode})")
@@ -162,10 +186,14 @@ class Docker:
         nice: bool = False,
     ) -> DockerResult:
         """Run wp-cli in the WordPress container as www-data
-        (wp_files.wp_cli_args), never as root. *input* goes to wp-cli's
-        stdin (`docker exec -i`); *offline* and *nice* as in wp_cli_args.
-        wp_files.wp_cli is the same command for a caller holding only a
-        docker binary and environment."""
+        (wp_files.wp_cli_args), never as root: the one wp-cli front end.
+        *input* goes to wp-cli's stdin (`docker exec -i`), the way values
+        and secrets reach it, never argv. *offline* (wp_cli_args) holds
+        every outbound request of the WordPress wp-cli loads: True for a
+        call that needs nothing from the network (the provisioning, a
+        read), False, the default, for one that does (`wp language core
+        install` downloads). Every caller says which. *nice* runs it at
+        `nice -n 10` (long background sweeps)."""
         return self.run(wp_files.wp_cli_args(*args, stdin=input is not None,
                                              offline=offline, nice=nice),
                         timeout=timeout, check=check, input=input, quiet=quiet)
@@ -222,6 +250,18 @@ class Docker:
                     pass
         return services
 
+    def popen(self, args: list, *, extra_env: dict | None = None,
+              **kwargs) -> subprocess.Popen:
+        """`docker ARGS` as a subprocess.Popen the caller drives itself: a
+        `logs -f` read line by line, a tar streamed into `exec -i`, a file
+        handed over on stdin. The binary and the environment are this
+        runner's; *kwargs* are subprocess.Popen's (stdin, stdout, stderr,
+        text, ...). Raises OSError when docker cannot be started, as Popen
+        does."""
+        env = {**self._env, **extra_env} if extra_env else self._env
+        return subprocess.Popen([self._docker_bin] + [str(a) for a in args],
+                                env=env, **kwargs)
+
     def run_to(self, args: list, *, log_file: str | None = None,
                extra_env: dict | None = None) -> int:
         """Run `docker ARGS` to the end without capturing it, for the long
@@ -248,40 +288,40 @@ class Docker:
     def _subprocess(
         self,
         cmd: list,
-        timeout: int,
-        input: str | None = None,
+        timeout: int | None,
+        input: str | bytes | None = None,
         extra_env: dict | None = None,
+        binary: bool = False,
     ) -> DockerResult:
-        """Run a subprocess and return DockerResult."""
+        """Run a subprocess and return DockerResult. The child runs in
+        text mode unless *binary* or *input* is bytes; what it printed is
+        decoded unless *binary*."""
         env = self._env
         if extra_env:
             env = {**self._env, **extra_env}
+        text = not binary and not isinstance(input, bytes)
+        empty = b"" if binary else ""
+
+        def failed(returncode, message):
+            return DockerResult(returncode=returncode, stdout=empty,
+                                stderr=message.encode() if binary else message,
+                                timed_out=returncode == -1)
+
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
                 timeout=timeout,
                 env=env,
                 input=input,
-            )
-            return DockerResult(
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
+                **(dict(text=True, encoding='utf-8', errors='replace') if text else {}),
             )
         except subprocess.TimeoutExpired:
-            return DockerResult(
-                returncode=-1,
-                stdout="",
-                stderr=f"Command timed out after {timeout}s",
-                timed_out=True,
-            )
+            return failed(-1, f"Command timed out after {timeout}s")
         except FileNotFoundError:
-            return DockerResult(
-                returncode=127,
-                stdout="",
-                stderr=f"Docker binary not found: {cmd[0]}",
-            )
+            return failed(127, f"Docker binary not found: {cmd[0]}")
+        stdout, stderr = proc.stdout, proc.stderr
+        if not text and not binary:
+            stdout = stdout.decode('utf-8', errors='replace')
+            stderr = stderr.decode('utf-8', errors='replace')
+        return DockerResult(returncode=proc.returncode, stdout=stdout, stderr=stderr)

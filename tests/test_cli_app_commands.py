@@ -51,6 +51,12 @@ class FakeDocker:
     def exec(self, container, command, timeout=30, quiet=False, **kw):
         return self.run(["exec", container, *command], timeout=timeout, quiet=quiet)
 
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """A real subprocess.Popen on this fake's binary and environment
+        (the `logs -f` tests patch subprocess.Popen and read its argv)."""
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
+
 
 def _read(rel):
     with open(os.path.join(PROJECT_ROOT, rel), encoding="utf-8") as f:
@@ -307,7 +313,7 @@ class TestOpen(Sandbox):
                 mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
             rc = app_commands.open_command("onion", self.paths, with_address(), out=self.out)
         self.assertEqual(rc, 0)
-        lt.assert_called_once_with(f"http://{ADDR}/")
+        lt.assert_called_once_with(f"http://{ADDR}/", docker=mock.ANY)
         ob.assert_called_once_with("file:///home/x/OnionPress/.auto-login/login-1.html",
                                    prefer_tor=True)
         self.assertEqual(self.out.getvalue(), f"Opening http://{ADDR}/\n")

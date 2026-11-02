@@ -33,12 +33,16 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, TESTS_DIR)
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import browser, native_messaging_host, onion_proxy  # noqa: E402
+from onionpress.docker import Docker  # noqa: E402
+from onionpress.platform import resolve_paths  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 ONION = "a" * 56 + ".onion"
 
@@ -119,14 +123,38 @@ class TestNativeHostProxyPort(unittest.TestCase):
         self.assertEqual(reply["proxy_port"], 19077)
 
     def test_docker_port_is_asked(self):
-        done = types.SimpleNamespace(returncode=0, stdout="127.0.0.1:18080\n")
+        docker = FakeDocker(lambda argv, **kw: (0, "127.0.0.1:18080\n", ""))
         env = {k: v for k, v in os.environ.items() if k != "ONIONPRESS_PROXY_PORT"}
         with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch.object(native_messaging_host.subprocess, "run",
-                               return_value=done) as run:
+             mock.patch.object(native_messaging_host, "_docker", return_value=docker):
             self.assertEqual(native_messaging_host.get_proxy_port(), 19077)
-        argv = run.call_args[0][0]
-        self.assertEqual(argv[1:], ["port", "onionpress-wordpress", "80"])
+        self.assertEqual(docker.argvs(), [["port", "onionpress-wordpress", "80"]])
+        self.assertEqual(docker.timeouts, [5])
+
+    def test_a_silent_docker_is_the_default_port(self):
+        env = {k: v for k, v in os.environ.items() if k != "ONIONPRESS_PROXY_PORT"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(native_messaging_host, "_docker",
+                               return_value=FakeDocker(lambda argv, **kw: 1)):
+            self.assertEqual(native_messaging_host.get_proxy_port(), 9077)
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(native_messaging_host, "_docker",
+                               side_effect=ImportError("no package")):
+            self.assertEqual(native_messaging_host.get_proxy_port(), 9077)
+
+    def test_the_host_s_docker_is_the_app_s_runner_over_its_data_dir(self):
+        """The browser starts the host by path: it builds the one runner
+        (onionpress.docker.Docker) over resolve_paths() for the user's
+        ~/.onionpress, so its docker socket and binary are the app's."""
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(native_messaging_host, "APP_SUPPORT", tmp):
+            docker = native_messaging_host._docker()
+            paths = resolve_paths(data_dir=tmp)
+        self.assertIsInstance(docker, Docker)
+        self.assertEqual(docker.paths.data_dir, tmp)
+        # The socket resolve_paths picks for that data dir: Colima's under
+        # it on a Mac, the rootless or system one on Linux.
+        self.assertEqual(docker.env["DOCKER_HOST"], f"unix://{paths.docker_socket}")
 
 
 class _ProxyServer:

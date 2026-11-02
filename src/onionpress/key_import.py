@@ -195,7 +195,7 @@ def replace_key(key_b32, *, data_dir, docker, containers, log, release,
     # 2. Keep a copy of the current key.
     root = os.path.join(data_dir, key_manager.REPLACED_KEYS_DIR)
     try:
-        kept = key_manager.keep_current_keys(root, [vdir] if vdir else [])
+        kept = key_manager.keep_current_keys(root, [vdir] if vdir else [], docker=docker)
     except Exception as e:
         log(f"keep-current: {e}")
         log("Key import refused: keeping the current key failed")

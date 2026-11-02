@@ -34,8 +34,10 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, TESTS_DIR)
 
-from onionpress import auto_login, browser, launcher_ops  # noqa: E402
+from onionpress import auto_login, browser, launcher_ops, wp_files  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 PLUGIN = "app/Resources/plugins/onionpress-auto-login.php"
 ONION = "a" * 52 + "qd2a.onion"
@@ -148,40 +150,37 @@ class TestMint(unittest.TestCase):
     def test_token_goes_on_stdin_only(self):
         for scope in auto_login.SCOPES:
             rec = _Recorder()
-            with mock.patch.object(auto_login.subprocess, "run", rec):
-                token = auto_login.mint(scope, docker_bin="/x/docker")
+            token = auto_login.mint(scope, docker=FakeDocker(rec, docker_bin="/x/docker"))
             self.assertRegex(token, r"\A[A-Za-z0-9_-]{43}\Z")
             [(argv, stdin)] = rec.calls
-            self.assertEqual(argv, ["/x/docker", "exec", "-i", "-u", "www-data",
-                                    "-e", "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
-                                    "onionpress-wordpress",
-                                    "wp", "eval", auto_login.MINT_PHP])
+            # As www-data, offline (a transient needs no network).
+            self.assertEqual(argv, ["/x/docker"] + wp_files.wp_cli_args(
+                "eval", auto_login.MINT_PHP, stdin=True, offline=True))
+            self.assertEqual(argv[1:5], ["exec", "-i", "-u", "www-data"])
             self.assertEqual(stdin, f"{token}\n{scope}\n")
             rec.assert_not_in_argv(self, token)
 
     def test_each_token_is_fresh(self):
         rec = _Recorder()
-        with mock.patch.object(auto_login.subprocess, "run", rec):
-            tokens = {auto_login.mint("local") for _ in range(20)}
+        tokens = {auto_login.mint("local", docker=FakeDocker(rec)) for _ in range(20)}
         self.assertEqual(len(tokens), 20)
 
     def test_failure_returns_none_and_logs_no_argv(self):
         logs = []
-        with mock.patch.object(auto_login.subprocess, "run",
-                               _Recorder(rc=1, stderr="Error: no administrator")):
-            self.assertIsNone(auto_login.mint("local", log_func=logs.append))
+        docker = FakeDocker(_Recorder(rc=1, stderr="Error: no administrator"))
+        self.assertIsNone(auto_login.mint("local", docker=docker, log_func=logs.append))
         self.assertEqual(logs, ["Auto-login token failed: Error: no administrator"])
 
         def timeout(argv, **kwargs):
-            raise subprocess.TimeoutExpired(argv, 15)
+            raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 15)
         logs = []
-        with mock.patch.object(auto_login.subprocess, "run", timeout):
-            self.assertIsNone(auto_login.mint("onion", log_func=logs.append))
-        self.assertEqual(logs, ["Auto-login token error: TimeoutExpired"])
+        self.assertIsNone(auto_login.mint("onion", docker=FakeDocker(timeout), log_func=logs.append))
+        # The runner's result names no argv.
+        self.assertEqual(logs, ["Auto-login token failed: Command timed out after 15s"])
 
     def test_unknown_scope_is_refused(self):
         with self.assertRaises(ValueError):
-            auto_login.mint("anywhere")
+            auto_login.mint("anywhere", docker=FakeDocker())
 
     def test_scope_follows_the_url_host(self):
         cases = {
@@ -199,10 +198,10 @@ class TestMint(unittest.TestCase):
 
     def test_login_url_mints_only_for_our_hosts(self):
         rec = _Recorder()
-        with mock.patch.object(auto_login.subprocess, "run", rec):
-            self.assertIsNone(auto_login.login_url("http://example.com/"))
-            self.assertEqual(rec.calls, [])
-            url = auto_login.login_url("http://localhost:8080/wp-admin/admin.php?page=x")
+        docker = FakeDocker(rec)
+        self.assertIsNone(auto_login.login_url("http://example.com/", docker=docker))
+        self.assertEqual(rec.calls, [])
+        url = auto_login.login_url("http://localhost:8080/wp-admin/admin.php?page=x", docker=docker)
         [(_, stdin)] = rec.calls
         token = stdin.split("\n")[0]
         self.assertEqual(url, f"http://localhost:8080/wp-admin/admin.php?page=x&op_login={token}")
@@ -284,14 +283,13 @@ class TestLinuxLoginTarget(unittest.TestCase):
 
     def test_browser_gets_a_file_uri_and_no_token(self):
         run, popen = _Recorder(), _Recorder()
-        with mock.patch.object(auto_login.subprocess, "run", run), \
-                mock.patch.object(auto_login.subprocess, "Popen", popen), \
+        with mock.patch.object(auto_login.subprocess, "Popen", popen), \
                 mock.patch.object(launcher_ops.subprocess, "Popen", popen), \
                 mock.patch.object(launcher_ops, "_launch_default_web_browser",
                                   return_value=False), \
                 mock.patch.object(launcher_ops.sys, "platform", "linux"):
             target = launcher_ops.login_target("http://localhost:8080/wp-admin/",
-                                               page_dir=self.tmp)
+                                               docker=FakeDocker(run), page_dir=self.tmp)
             launcher_ops.open_in_browser(target)
         [(_, stdin)] = run.calls
         token = stdin.split("\n")[0]
@@ -304,10 +302,10 @@ class TestLinuxLoginTarget(unittest.TestCase):
         popen.assert_not_in_argv(self, token)
 
     def test_no_token_means_the_plain_url(self):
-        with mock.patch.object(auto_login.subprocess, "run", _Recorder(rc=1)):
-            self.assertEqual(launcher_ops.login_target("http://localhost:8080/",
-                                                       page_dir=self.tmp),
-                             "http://localhost:8080/")
+        self.assertEqual(launcher_ops.login_target("http://localhost:8080/",
+                                                   docker=FakeDocker(_Recorder(rc=1)),
+                                                   page_dir=self.tmp),
+                         "http://localhost:8080/")
         self.assertEqual(os.listdir(self.tmp), [])
 
     def test_a_file_uri_goes_to_the_web_browser_not_the_html_handler(self):
@@ -354,7 +352,7 @@ class TestLinuxLoginTarget(unittest.TestCase):
         with mock.patch.object(launcher_ops, "open_login") as open_login, \
                 mock.patch.object(cli, "OnionPressCLI") as full_cli:
             self.assertEqual(cli.main(["open-login", "http://localhost:8080/wp-admin/"]), 0)
-        open_login.assert_called_once_with("http://localhost:8080/wp-admin/")
+        open_login.assert_called_once_with("http://localhost:8080/wp-admin/", docker=mock.ANY)
         full_cli.assert_not_called()
 
 
@@ -484,10 +482,9 @@ class TestMenubar(unittest.TestCase):
         exec(self._method("open_local_site"), ns)
         app = types.SimpleNamespace(
             read_config_value=lambda k, d="": "alice", local_url="http://localhost:8080",
-            bin_dir="/x/bin", log=logs.append)
+            docker=FakeDocker(rec, docker_bin="/x/bin/docker"), log=logs.append)
         app._generate_login_url = types.MethodType(ns["_generate_login_url"], app)
-        with mock.patch.object(auto_login.subprocess, "run", rec):
-            ns["open_local_site"](app, None)
+        ns["open_local_site"](app, None)
         [(argv, stdin)] = rec.calls
         token = stdin.split("\n")[0]
         self.assertEqual(argv[0], "/x/bin/docker")

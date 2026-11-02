@@ -1122,6 +1122,17 @@
   core zip at its fixed name). `tests/test_wp_cli_as_www_data.py`.
 - Provisioning calls run offline (`wp_cli_args(offline=True)`,
   `ONIONPRESS_WP_OFFLINE=1`). `tests/test_wp_cli_offline.py`.
+- **`docker.Docker` is the one way Python runs docker** (#477): a module
+  takes a `Docker` from its caller (the CLI's, the daemon's, the
+  menubar's, built from `OnionPressPaths`; a test's
+  `tests/fake_docker.FakeDocker`) and runs through `run` / `exec` /
+  `wp(offline=…)` / `compose` / `popen` / `run_to`; nothing else builds a
+  `"docker"` argv, finds the binary or threads `docker_bin` / `docker_env`
+  by hand, and `Docker.wp` is the one wp-cli front end, every caller
+  saying `offline=`. The native messaging host builds its own
+  `Docker(resolve_paths())`. A `"docker"` string outside `docker.py` is a
+  path or the binary's name, listed with its reason in the census's
+  `REVIEWED`. `tests/test_docker_runner_census.py`.
 - `onionpress-web-root-owner.sh` follows no link, prunes `creations`, and
   changes nothing if mounts look wrong.
 - Plugins install only from pins (`plugin_pin`, `build/pin-wp-plugin.sh`).

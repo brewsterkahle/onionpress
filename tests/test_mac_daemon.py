@@ -166,9 +166,16 @@ class FakeDocker:
                 return DockerResult(returncode=rc, stdout=text, stderr="")
         return DockerResult(returncode=1, stdout="", stderr="no such answer")
 
-    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False):
+    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
+            binary=False):
         self.calls.append((list(str(a) for a in args), input))
         return self._answer(args)
+
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """A real subprocess.Popen on this fake's binary and environment:
+        the log capture tests patch subprocess.Popen and read its argv."""
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
 
     def exec(self, container, command, timeout=30, check=False, input=None,
              quiet=False, user=None, extra_env=None):
@@ -1007,9 +1014,11 @@ class TestMenubarIsAView(unittest.TestCase):
     """src/menubar.py holds no loop that talks to docker, the hub or Tor:
     its one background loop reads the daemon's state file; every docker
     call left is an action's (the first-run setup's wp-cli, the login
-    token), never a thread or timer's."""
+    token), never a thread or timer's. Those run through the one runner,
+    onionpress.docker.Docker (issue #477), which holds no loop: the
+    menubar builds one (self.docker) and hands it to those actions."""
 
-    LOOP_MODULES = ("health", "docker", "onion_proxy", "thumbnails", "power",
+    LOOP_MODULES = ("health", "onion_proxy", "thumbnails", "power",
                     "analytics_sharing", "reachability_stats", "system_metrics",
                     "reachability", "mac_power")
     # Methods that may name docker: one-shot actions of the first-run setup
@@ -1032,7 +1041,7 @@ class TestMenubarIsAView(unittest.TestCase):
         for name in self.LOOP_MODULES:
             with self.subTest(module=name):
                 self.assertNotIn(name, imported)
-        for name in ("HealthChecker", "RepublishTrigger", "CaffeineManager", "Docker(",
+        for name in ("HealthChecker", "RepublishTrigger", "CaffeineManager",
                      "onion_proxy.", "thumbnails.", "analytics_sharing.", "_health_checker",
                      "_docker.", "check_tor_reachability", "write_status_to_volume",
                      "healthcheck-messages", "start_registration_thread",
@@ -1054,10 +1063,13 @@ class TestMenubarIsAView(unittest.TestCase):
             with self.subTest(module=name):
                 self.assertNotIn(f"onionpress.{name}", loaded)
 
-    def test_docker_is_not_imported_transitively(self):
+    def test_containers_is_not_imported_transitively(self):
         """Issue #475: the menubar asks image_overrides, not containers
-        (which imports docker), whether the images are local builds."""
-        self.assertNotIn("onionpress.docker", ui_import_closure())
+        (which runs the stack), whether the images are local builds. The
+        runner itself (onionpress.docker, issue #477) is in the closure:
+        a wrapper with no loop, the one way the menubar's few one-shot
+        actions run docker."""
+        self.assertIn("onionpress.docker", ui_import_closure())
         self.assertNotIn("onionpress.containers", ui_import_closure())
         tree = ast.parse(_read("src/onionpress/image_overrides.py"))
         self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
@@ -1092,13 +1104,13 @@ class TestMenubarIsAView(unittest.TestCase):
             if "while " not in body:
                 continue
             with self.subTest(method=name):
-                self.assertNotRegex(body, r'\["docker"|_docker\.|docker_bin|onionheaven\.(?!is_onionheaven_instance|describe_remaining)[a-z_]+\(|wp_cli_args|run_command\(')
+                self.assertNotRegex(body, r'\["docker"|_docker\.|self\.docker\.|docker_bin|onionheaven\.(?!is_onionheaven_instance|describe_remaining)[a-z_]+\(|wp_cli_args|run_command\(')
                 self.assertNotIn('"status"', body)
                 self.assertNotIn('"address"', body)
 
     def test_docker_only_in_one_shot_actions(self):
         for name, body in self.methods.items():
-            if re.search(r'\["docker"|wp_cli_args|docker_bin|_docker\.', body):
+            if re.search(r'\["docker"|wp_cli_args|docker_bin|_docker\.|self\.docker\.', body):
                 with self.subTest(method=name):
                     self.assertIn(name, self.DOCKER_ALLOWED)
                     self.assertNotIn("while ", body)

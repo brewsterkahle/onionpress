@@ -19,6 +19,7 @@ import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def _read(rel_path):
@@ -2329,7 +2330,7 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         so the gate and the sweep cannot disagree about a marker; no
         launcher keeps a bash copy."""
         text = _read("src/onionpress/start.py")
-        self.assertIn("derivatives.regeneration_pending(paths.data_dir, docker.docker_bin)", text)
+        self.assertIn("derivatives.regeneration_pending(paths.data_dir, docker)", text)
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
                 self.assertNotIn("\nregenerate_derivatives_pending() {", _read(f))
@@ -2346,18 +2347,20 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
                         "[ \"$1 $2 $3 $4\" = \"exec onionpress-wordpress test -f\" ] "
                         "&& [ -e \"$0.marker\" ]\n")
             os.chmod(stub, 0o755)
-            self.assertFalse(derivatives.regeneration_pending(tmp, stub))
+            from fake_docker import over_binary
+            docker = over_binary(stub)
+            self.assertFalse(derivatives.regeneration_pending(tmp, docker))
             open(stub + ".marker", "w").close()
-            self.assertTrue(derivatives.regeneration_pending(tmp, stub))
+            self.assertTrue(derivatives.regeneration_pending(tmp, docker))
             with open(stub + ".calls") as f:
                 self.assertEqual(set(f.read().splitlines()),
                                  {f"exec onionpress-wordpress test -f {self.CONTAINER_MARKER}"})
             os.remove(stub + ".calls")
             open(os.path.join(tmp, self.HOST_MARKER), "w").close()
-            self.assertTrue(derivatives.regeneration_pending(tmp, stub))
+            self.assertTrue(derivatives.regeneration_pending(tmp, docker))
             self.assertFalse(os.path.exists(stub + ".calls"), "the host marker needs no docker")
             self.assertFalse(derivatives.regeneration_pending(
-                os.path.join(tmp, "elsewhere"), os.path.join(tmp, "no-such-docker")))
+                os.path.join(tmp, "elsewhere"), over_binary(os.path.join(tmp, "no-such-docker"))))
 
     def test_python_marker_paths_are_the_documented_ones(self):
         from onionpress import derivatives

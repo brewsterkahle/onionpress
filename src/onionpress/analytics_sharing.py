@@ -444,7 +444,7 @@ def _do_upload_cycle(app, include_active=False):
     try:
         from onionpress import onion_auth
 
-        secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        secret_key_bytes, public_key_raw = key_manager.extract_keys(app.docker)
         timestamp = onion_auth.make_timestamp()
         signature = onion_auth.sign_payload(
             secret_key_bytes, public_key_raw,
@@ -565,66 +565,36 @@ def _os_version():
     return f"{platform.system()} {platform.release()}".strip() or "unknown"
 
 
-def _docker_command(app):
-    """Return ``(docker_bin, env)`` for reaching the onionpress-tor container.
-
-    A host that knows how to reach its own Docker exposes
-    ``docker_command()`` (a test's fake); the daemon has no such method,
-    so it gets its socket (Colima's, or Linux's rootless or system one)
-    from onionheaven's helpers.
-    """
-    hook = getattr(app, "docker_command", None)
-    if callable(hook):
-        return hook()
-    from onionpress import onionheaven
-    return onionheaven._docker_bin(app), onionheaven._docker_env(app)
-
-
 def _post_json(app, url, payload_dict):
-    """POST JSON to *url* via docker exec curl through Tor SOCKS.
+    """POST JSON to *url* via docker exec curl through Tor SOCKS, through
+    *app*.docker (the daemon's onionpress.docker.Docker, the one runner).
 
     Uses stdin piping to avoid ARG_MAX limits on large payloads.
     Returns parsed JSON response or None on failure.
     """
-    docker_bin, docker_env = _docker_command(app)
-
     payload_json = json.dumps(payload_dict)
-
-    cmd = [
-        docker_bin, "exec", "-i", "onionpress-tor",
-        "curl", "-s", "-X", "POST",
-        "--socks5-hostname", "127.0.0.1:9050",
-        "-H", "Content-Type: application/json",
-        "-d", "@-",  # read payload from stdin
-        "--max-time", "120",
-        url,
-    ]
-
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            env=docker_env,
-        )
-        stdout, stderr = proc.communicate(input=payload_json, timeout=150)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        app.log("Analytics sharing: curl timed out")
-        return None
+        result = app.docker.run(
+            ["exec", "-i", "onionpress-tor",
+             "curl", "-s", "-X", "POST",
+             "--socks5-hostname", "127.0.0.1:9050",
+             "-H", "Content-Type: application/json",
+             "-d", "@-",  # read payload from stdin
+             "--max-time", "120",
+             url],
+            input=payload_json, timeout=150, quiet=True)
     except Exception as e:
         app.log(f"Analytics sharing: curl error: {e}")
         return None
-
-    if proc.returncode != 0:
-        app.log(f"Analytics sharing: curl failed rc={proc.returncode}")
+    if result.timed_out:
+        app.log("Analytics sharing: curl timed out")
+        return None
+    if result.returncode != 0:
+        app.log(f"Analytics sharing: curl failed rc={result.returncode}")
         return None
 
     try:
-        return json.loads(stdout)
+        return json.loads(result.stdout)
     except (json.JSONDecodeError, ValueError):
         app.log(f"Analytics sharing: bad JSON response: {stdout[:200]}")
         return None

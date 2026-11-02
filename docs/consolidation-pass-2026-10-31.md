@@ -262,6 +262,18 @@ request depends on), `ports.get_running_wp_port`, `launcher_ops`,
 swap is mechanical, module by module, with a census that fails on a new
 `"docker"` argv literal outside `docker.py`.
 
+**Done (2026-11-01, the PR closing #477):** every module takes a `Docker`
+from its caller; `Docker` gained `popen` (the `logs -f` readers, the tar
+streams, the backup hand-off) and bytes in and out (key files); `Docker.wp`
+is the one wp-cli front end with every caller saying `offline=`; the
+native messaging host builds `Docker(resolve_paths())`; `onionheaven`'s
+`HubContext` holds a `Docker` and exports no `DOCKER_HOST`. The census is
+`tests/test_docker_runner_census.py` (a `"docker"` string outside
+`docker.py` is a path or the binary's name, in `REVIEWED` with its
+reason); tests hand in `tests/fake_docker.FakeDocker`. The daemon's
+`_setup_environment` stays for the children that read the environment
+(the launcher), not for any module's docker call.
+
 ### 11. The rest of the launchers' shared bash — ~600 lines
 
 Issue: #529.

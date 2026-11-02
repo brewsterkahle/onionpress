@@ -29,7 +29,6 @@ import threading
 import time
 from typing import Callable, Optional
 
-from . import wp_files
 
 LAUNCHER_BIN = "/opt/onionpress/onionpress"
 DATA_DIR = os.path.expanduser("~/.onionpress")
@@ -123,6 +122,7 @@ def _confirm(prompt: str = "Continue? [y/N] ") -> bool:
 def _prompt_and_validate_wp_password(
     initial: Optional[str],
     *,
+    docker,
     max_attempts: int = 3,
     log: Callable[[str], None] = _noop_log,
 ) -> Optional[str]:
@@ -146,7 +146,7 @@ def _prompt_and_validate_wp_password(
         if not pw:
             log("  (empty password — aborting)")
             return None
-        ok, _info = verify_wp_admin_password_any(pw)
+        ok, _info = verify_wp_admin_password_any(pw, docker=docker)
         if ok:
             return pw
         log("  Password does not match any WordPress admin account.")
@@ -217,20 +217,12 @@ class _SudoKeepAlive:
 # ── Phase 1: Backup ───────────────────────────────────────────────────
 
 
-def _get_onion_address() -> str:
-    """Read the current onion hostname from the running tor container.
-    Empty string if not available (containers down, address not minted).
-
-    Uses `docker exec onionpress-tor` (not `docker compose exec tor`)
-    because scrub runs from wherever the user invoked it — typically
-    not the compose project directory — and `docker compose` would
-    silently fail without a docker-compose.yml in cwd.
-    """
+def _get_onion_address(docker) -> str:
+    """Read the current onion hostname from the running tor container,
+    through *docker* (the CLI's onionpress.docker.Docker). Empty string if
+    not available (containers down, address not minted)."""
     from . import onion_hostname
-    r = _run(["docker"] + onion_hostname.exec_args(), capture=True, timeout=10)
-    if r.returncode != 0:
-        return ""
-    return onion_hostname.served_address(r.stdout)
+    return onion_hostname.read_served_address(docker)
 
 
 def _find_repo_dir() -> str:
@@ -248,7 +240,7 @@ def _find_repo_dir() -> str:
     return ""
 
 
-def phase_backup(password: str, log: Callable[[str], None]) -> PreScrubState:
+def phase_backup(password: str, log: Callable[[str], None], *, docker) -> PreScrubState:
     """Capture pre-scrub state + create the backup zip. Raises
     RuntimeError on any unrecoverable failure.
     """
@@ -257,7 +249,7 @@ def phase_backup(password: str, log: Callable[[str], None]) -> PreScrubState:
 
     # Capture pre-scrub state for verify.
     state = PreScrubState()
-    state.onion_address = _get_onion_address()
+    state.onion_address = _get_onion_address(docker)
     if state.onion_address:
         log(f"  Pre-scrub onion: {state.onion_address}")
     else:
@@ -361,20 +353,18 @@ def phase_restore(
 # ── Phase 5: Verify ───────────────────────────────────────────────────
 
 
-def _container_running(name: str) -> bool:
-    r = _run(["docker", "ps", "--format", "{{.Names}}"], capture=True)
+def _container_running(docker, name: str) -> bool:
+    r = docker.run(["ps", "--format", "{{.Names}}"], timeout=30, quiet=True)
     if r.returncode != 0:
         return False
     return name in (r.stdout or "").splitlines()
 
 
-def _wp_responds() -> tuple[bool, str]:
-    r = _run(
-        ["docker", "exec", "onionpress-wordpress",
-         "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-         "http://localhost:80/"],
-        capture=True, timeout=15,
-    )
+def _wp_responds(docker) -> tuple[bool, str]:
+    r = docker.exec("onionpress-wordpress",
+                    ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                     "http://localhost:80/"],
+                    timeout=15, quiet=True)
     if r.returncode != 0:
         return False, "000"
     code = (r.stdout or "").strip() or "000"
@@ -408,18 +398,18 @@ def _hub_registered(timeout_s: int = 90) -> bool:
     return False
 
 
-def _wayback_creds_present(timeout_s: int = 90) -> bool:
+def _wayback_creds_present(docker, timeout_s: int = 90) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        r = wp_files.wp_cli("option", "get", "onionpress_archive_s3_access",
-                            timeout=10)
+        r = docker.wp("option", "get", "onionpress_archive_s3_access",
+                      timeout=10, offline=True, quiet=True)
         if r.returncode == 0 and (r.stdout or "").strip():
             return True
         time.sleep(10)
     return False
 
 
-def phase_verify(state: PreScrubState, log: Callable[[str], None]) -> list[Check]:
+def phase_verify(state: PreScrubState, log: Callable[[str], None], *, docker) -> list[Check]:
     """Run all the verify checks, log results, and return them."""
     log("")
     log("── Step 5/5: Verify ──")
@@ -427,11 +417,11 @@ def phase_verify(state: PreScrubState, log: Callable[[str], None]) -> list[Check
 
     # 1. Each expected container is running.
     for name in EXPECTED_CONTAINERS:
-        ok = _container_running(name)
+        ok = _container_running(docker, name)
         checks.append(Check(f"{name} running", ok))
 
     # 2. Onion address present and matches pre-scrub (vanity key preserved).
-    post_addr = _get_onion_address()
+    post_addr = _get_onion_address(docker)
     if not post_addr:
         checks.append(Check("Onion address present", False,
                             "No onion address found"))
@@ -446,7 +436,7 @@ def phase_verify(state: PreScrubState, log: Callable[[str], None]) -> list[Check
             f"{post_addr}"))
 
     # 3. WordPress responds.
-    ok, code = _wp_responds()
+    ok, code = _wp_responds(docker)
     checks.append(Check(
         "WordPress responding", ok, f"HTTP {code}"))
 
@@ -480,7 +470,7 @@ def phase_verify(state: PreScrubState, log: Callable[[str], None]) -> list[Check
     # 7. Wayback S3 keys configured (warn).
     checks.append(Check(
         "Wayback S3 credentials configured",
-        _wayback_creds_present(),
+        _wayback_creds_present(docker),
         message=("sweep won't submit posts until they land — "
                  "check archive.org reachability"),
         severity="warn",
@@ -532,7 +522,7 @@ def _log_since(log_file: str, mark: int) -> str:
 
 
 def phase_backup_mac(password: str, log: Callable[[str], None], *,
-                     launcher: str, data_dir: str) -> PreScrubState:
+                     launcher: str, data_dir: str, docker) -> PreScrubState:
     """The Mac's step 1: the backup into the user's own data dir (not the
     shared /tmp), and the live identity plus a log mark captured before
     the teardown, so the verify can prove the restore kept the address
@@ -547,7 +537,7 @@ def phase_backup_mac(password: str, log: Callable[[str], None], *,
     if r.returncode != 0 or not os.path.isfile(state.backup_path) \
             or os.path.getsize(state.backup_path) == 0:
         raise RuntimeError("Backup file missing or empty — aborting.")
-    state.onion_address = _get_onion_address()
+    state.onion_address = _get_onion_address(docker)
     state.repo_dir = str(_log_mark(os.path.join(data_dir, "onionpress.log")))
     log(f"  Pre-scrub address: {state.onion_address or '<none>'}")
     return state
@@ -592,7 +582,7 @@ def phase_reset_in_place(log: Callable[[str], None], *, launcher: str, data_dir:
 
 
 def phase_verify_mac(state: PreScrubState, log: Callable[[str], None], *,
-                     data_dir: str) -> list[Check]:
+                     data_dir: str, docker) -> list[Check]:
     """The Mac's step 4: the containers running, an address served and
     equal to the pre-scrub one (the backup's key was reused, not a fresh
     vanity key), no vanity generation in the log since the backup, and
@@ -601,8 +591,8 @@ def phase_verify_mac(state: PreScrubState, log: Callable[[str], None], *,
     log("── Step 4/4: Verify ──")
     checks: list[Check] = []
     for name in EXPECTED_CONTAINERS:
-        checks.append(Check(f"{name} running", _container_running(name)))
-    post_addr = _get_onion_address()
+        checks.append(Check(f"{name} running", _container_running(docker, name)))
+    post_addr = _get_onion_address(docker)
     if not post_addr:
         checks.append(Check("Onion address present", False, "No onion address found"))
     elif state.onion_address and post_addr != state.onion_address:
@@ -615,7 +605,7 @@ def phase_verify_mac(state: PreScrubState, log: Callable[[str], None], *,
     regenerated = any(m.lower() in since.lower() for m in VANITY_REGENERATED)
     checks.append(Check("No vanity regeneration during restore", not regenerated,
                         "" if not regenerated else "a vanity address was generated (should reuse backup key)"))
-    ok, code = _wp_responds()
+    ok, code = _wp_responds(docker)
     checks.append(Check("WordPress responding", ok, f"HTTP {code}"))
     for c in checks:
         if c.ok:
@@ -639,7 +629,8 @@ def _run_scrub_mac(password, *, clean, log, launcher, data_dir, docker) -> int:
         log("ERROR: Could not validate WordPress admin password — aborting.")
         return 1
     try:
-        state = phase_backup_mac(password, log, launcher=launcher, data_dir=data_dir)
+        state = phase_backup_mac(password, log, launcher=launcher, data_dir=data_dir,
+                                 docker=docker)
     except RuntimeError as e:
         log(f"ERROR: {e}")
         return 1
@@ -654,7 +645,7 @@ def _run_scrub_mac(password, *, clean, log, launcher, data_dir, docker) -> int:
         log(f"ERROR: {e}")
         log(f"  Backup retained for recovery: {state.backup_path}")
         return 1
-    checks = phase_verify_mac(state, log, data_dir=data_dir)
+    checks = phase_verify_mac(state, log, data_dir=data_dir, docker=docker)
     ok = scrub_passed(checks)
     log("")
     if ok:
@@ -685,14 +676,16 @@ def _run_scrub_mac(password, *, clean, log, launcher, data_dir, docker) -> int:
 def run_scrub(
     password: Optional[str] = None,
     *,
+    docker,
     clean: bool = False,
     log_func: Optional[Callable[[str], None]] = None,
     os_name: Optional[str] = None,
     launcher: Optional[str] = None,
     data_dir: Optional[str] = None,
-    docker=None,
 ) -> int:
-    """Run the full scrub cycle. Returns 0 on PASS, 1 on FAIL.
+    """Run the full scrub cycle. Returns 0 on PASS, 1 on FAIL. *docker* is
+    the CLI's onionpress.docker.Docker, for every look at the containers;
+    the backup, uninstall, install and restore run the launcher.
 
     Mirrors the bash `scrub)` cases it replaces; printing format kept
     similar so the user sees recognisable output. *os_name* picks the
@@ -740,13 +733,13 @@ def run_scrub(
         # verify catches the bad password and exits — leaving the user
         # in a broken state. Three tries; clean abort on failure.
         password = _prompt_and_validate_wp_password(
-            password, log=log)
+            password, docker=docker, log=log)
         if not password:
             log("ERROR: Could not validate WordPress admin password — aborting.")
             return 1
 
         try:
-            state = phase_backup(password, log)
+            state = phase_backup(password, log, docker=docker)
         except RuntimeError as e:
             log(f"ERROR: {e}")
             return 1
@@ -770,7 +763,7 @@ def run_scrub(
             log(f"ERROR: {e}")
             return 1
 
-        checks = phase_verify(state, log)
+        checks = phase_verify(state, log, docker=docker)
         ok = scrub_passed(checks)
 
         log("")

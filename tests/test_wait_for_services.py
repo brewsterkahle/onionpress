@@ -128,7 +128,7 @@ class TestWaitForServices(_Case):
         ])
         self.assertEqual(self.sleeps, [])
         self.assertEqual(self.puts, [("/var/lib/onionpress/onion_address", SITE + "\n", "644",
-                                      {"docker_bin": "docker", "env": {"DOCKER_HOST": "unix:///x"}})])
+                                      {"docker": docker})])
         with open(os.path.join(self.data, "healthcheck-address")) as f:
             self.assertEqual(f.read(), HC + "\n")
 
