@@ -24,11 +24,6 @@ TOR_CONTAINER = "onionpress-tor"
 HOSTNAME_FILE = "/var/lib/tor/hidden_service/wordpress/hostname"
 
 
-def exec_args() -> list:
-    """`docker` arguments that print the hostname file."""
-    return ["exec", TOR_CONTAINER, "cat", HOSTNAME_FILE]
-
-
 def served_address(text) -> str:
     """The address in the hostname file's *text*, or "" unless it is one
     well-formed v3 address."""
