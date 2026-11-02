@@ -459,9 +459,16 @@ class OptInPlumbingTest(unittest.TestCase):
             self.assertEqual(mgr._build_env()[OPT_IN], "yes")
 
     def test_validators_flag_a_node_that_is_not_a_hub(self):
+        # The validator is onionheaven.validate_hub_address (#529), run by
+        # both launchers' validate-oh-address.
+        import inspect
+        from onionpress import onionheaven
+        src = inspect.getsource(onionheaven.validate_hub_address)
+        self.assertIn('status.get("accepting_registrations") is False', src)
+        self.assertIn('"status": "site"', src)
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
             with self.subTest(launcher=rel):
-                self.assertIn("'\"accepting_registrations\": *false'", _read(rel))
+                self.assertIn('validate-oh-address "${2:-}"', _read(rel))
 
 
 if __name__ == "__main__":

@@ -483,9 +483,10 @@ class TestImportKeyFileFlag(unittest.TestCase):
     def test_the_launchers_list_the_new_commands(self):
         mac = _read("app/MacOS/onionpress")
         linux = _read("linux/onionpress")
+        from onionpress import cli
         for name in ("version", "check-reachability", "check-docker", "open", "onionname"):
-            self.assertIn(f"  {name}", mac + "\n")
-            self.assertIn(name + "|", linux)
+            for os_name in ("macos", "linux"):
+                self.assertIn(f"\n  {name}", cli.launcher_help(os_name), f"{os_name}: {name}")
         self.assertIn('--data-dir "$DATA_DIR" address "${@:2}"', mac)
         self.assertIn('--data-dir "$DATA_DIR" address "${@:2}"', linux)
         self.assertIn('--data-dir "$DATA_DIR" logs "${@:2}"', mac)

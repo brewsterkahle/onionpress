@@ -710,3 +710,44 @@ daemon), a Linux install (the rootless `DOCKER_HOST`/`DOCKER_SOCK` from
 the Python; the `/tmp/opqa` recipe). `updater.detect_active_offsets` (the
 other instances' offsets, for the update dialog) is a different question
 and stays.
+
+
+## Slice 11 (2026-11-01): the rest of the launchers' shared bash (issue #529, #530 §4)
+
+Eight slices, each a commit in the phase 4 shape, on top of #405's branch
+(#539). (1) `wait_for_services` ×2 (drifted) → `start.wait_for_services`
+behind `onionpress wait-for-services [--errors-file]` (Linux's
+not-installed address write and write order on both; a timeout names
+`wait-for-services` in the Mac's START SUMMARY, new); with it
+`get_healthcheck_address`, `write_shared_onion_address` and `get_status`
+went (`status` is `onionpress status`; the "Onion address:" line reads
+`onionpress address`). (2) `_validate_oh_address` ×2 →
+`onionheaven.validate_hub_address` + `validate-oh-address` (compact JSON,
+exit 1 for invalid_format/self, as the bash). (3) the Mac `scrub` case →
+`scrub.run_scrub(os_name="macos", launcher=, data_dir=)`: backup → reset in
+place → restore → verify, no sudo; the backup kept unless --clean and a
+y/N opener, as Linux's cycle (deltas); `scrub._confirm` honours
+`ONIONPRESS_YES=true`; `run_scrub()` without an os_name stays Linux's
+cycle. (4) the Mac `start-tor` case → `onionpress start-tor` (migration
+then `ContainerManager.start_tor`, `--no-deps`; the daemon still runs the
+launcher verb). (5) `setup_db_passwords` ×2 → `onionpress ensure-secrets`
+(the Mac's truncated-file guard on both); bash keeps `source` + export.
+(6) Linux `reset` → `cmd_reset`'s Linux tail (the launcher's start,
+`onionheaven.reset_hub_state`); Linux `uninstall` → `uninstall.run`'s
+Linux branch behind the protocol, the backup offer in `cmd_uninstall`
+(`offer_backup_before_uninstall`), `-y` as `ONIONPRESS_CONFIRMED`; the
+tray's Uninstall on `run_confirmed` + the terminal with the flags.
+`reset_onionheaven_in_container` stays in bash for `reset-onionheaven`
+alone. (7) the two restore parses → the CLI's argparse (pass-through;
+the bash "Done!"/"Restore failed" lines go; `read_backup_password` stays
+for `setup --from-backup`). (8) help/usage → `cli.launcher_help(os_name)`
++ `launcher-help`. (9) the sleep verbs were already gone (#538).
+Harness: the CLI stub answers `ensure-secrets` by writing a stub secrets
+file (`STUB_RC_ENSURE_SECRETS`). The start traces did not change (the
+wait and the secrets are outside what the trace harness runs; the
+harness's own `setup_db_passwords` runs the stub). Left in bash:
+`wp_is_installed` (the two provision-post-install cases, #527's),
+`reset_onionheaven_in_container` (one verb), and the "stays bash" list.
+Not live-tested: a Mac with the app (the scrub cycle, start-tor from the
+daemon, the help), a Linux install (uninstall with sudo in the tray's
+terminal, the reset's restart, the backup offer; the `/tmp/opqa` recipe).

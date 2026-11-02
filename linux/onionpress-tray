@@ -1726,47 +1726,49 @@ class OnionPressTray:
         threading.Thread(target=_run, daemon=True).start()
 
     def _on_uninstall(self, *_):
-        """Confirm + launch the launcher's `uninstall` subcommand in a
-        terminal window so the user can see progress and respond to the
-        sudo password prompt naturally.
+        """The questions, then the launcher's `uninstall` in a terminal
+        window (issue #529, as the menubar's Uninstall): `uninstall --check
+        --json` says what to ask (onionpress.confirm: "hub-holds-key" when
+        an OnionHeaven hub may hold a copy of the key and OnionPress is not
+        running to ask it to let go, then "uninstall", the typed DELETE),
+        each answered here (ui_client.run_confirmed, _ask_question) and
+        given back as --confirmed to the run in the terminal, where the
+        uninstaller offers a backup first and sudo asks its password.
 
-        We can't use pkexec here because uninstall touches BOTH root-level
+        A terminal rather than pkexec: uninstall touches BOTH root-level
         state (/opt/onionpress, system service-file remnants) AND user-
-        level state (rootless docker compose down, systemctl --user stop
-        onionpress, ~/.config/systemd/user/...). Running everything as
-        root via pkexec breaks the user-level half; running everything
-        as the user means sudo prompts have nowhere to be answered. A
-        terminal window is the simplest path that handles both cleanly.
+        level state (rootless docker compose down, systemctl --user stop,
+        ~/.config/systemd/user/...); root for everything breaks the
+        user-level half, and the user for everything leaves sudo's prompt
+        nowhere to be answered.
 
-        When uninstall reaches `pkill -f onionpress-tray` (linux/onionpress
-        :3284) this process dies and the icon disappears — no need to
-        Gtk.main_quit here.
-
-        User data at ~/.onionpress and ~/OnionPress is preserved.
+        When uninstall reaches `pkill -f onionpress-tray` this process
+        dies and the icon disappears: no Gtk.main_quit here. ~/OnionPress
+        (backups, Creations) is kept.
         """
-        dlg = Gtk.MessageDialog(
-            parent=None, flags=0,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
-            text="Uninstall OnionPress?",
-        )
-        # The launcher's uninstall (linux/onionpress) deletes ~/.onionpress
-        # with the key; ~/OnionPress (backups, Creations) stays. It asks
-        # its questions at the terminal: the `uninstall --check --json`
-        # flow comes to Linux with #529.
-        dlg.format_secondary_text(ui_client.uninstall_warning(
-            "A terminal will open: the uninstaller offers a backup first, "
-            "then asks for your sudo password. ~/OnionPress (backups, "
-            "Creations) is kept."))
-        response = dlg.run()
-        dlg.destroy()
-        if response != Gtk.ResponseType.OK:
+        outcome = ui_client.run_confirmed(
+            Launcher, ["uninstall", "--check", "--json"],
+            lambda what, facts, action="Uninstall": _ask_question(None, what, facts, action),
+            action="Uninstall", timeout=300)
+        if outcome.declined:
+            log(f"uninstall cancelled at the '{(outcome.answer or {}).get('confirm')}' question")
             return
+        if not outcome.ok:
+            failure = outcome.failure("see the OnionPress log")
+            log(f"uninstall: check failed: {failure}")
+            try:
+                Notify.Notification.new("Uninstall could not start",
+                                        f"OnionPress could not check what to ask: {failure}"[:200],
+                                        "onionpress").show()
+            except Exception:
+                pass
+            return
+        flags = " ".join(outcome.flags)
 
         # Shell command: run uninstaller, then pause so the user can read
         # any final output before the terminal window closes.
         uninstall_cmd = (
-            "/opt/onionpress/onionpress uninstall;"
+            f"/opt/onionpress/onionpress uninstall {flags};"
             ' rc=$?; printf "\\n[uninstall exited with rc=%s] '
             'Press Enter to close..." "$rc"; read'
         )

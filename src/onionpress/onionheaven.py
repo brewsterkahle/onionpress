@@ -1916,6 +1916,111 @@ def peer_claim_fields(app, secret_key_bytes, public_key_raw, content_addr, hc_ad
     }
 
 
+# ---------------------------------------------------------------------------
+# A hub's state after a reset (the Linux launcher's reset_onionheaven_in_container)
+# ---------------------------------------------------------------------------
+
+RESET_HUB_SCRIPT = (
+    "import json, sys\n"
+    'sys.path.insert(0, "/")\n'
+    "from onionheaven_common import reset_onionheaven\n"
+    'print(json.dumps({"reset": True, **reset_onionheaven()}))\n'
+)
+
+
+def reset_hub_state(docker, log=None):
+    """Clean the onionheaven container's stress-test entries and refresh its
+    takeover workers (onionheaven_common.reset_onionheaven, run inside the
+    container: the registry is its volume's); real entries and their keys
+    stay. The container's JSON answer as a dict, or None when it could
+    not be run (logged)."""
+    try:
+        r = docker.exec("onionheaven", ["python3", "-c", RESET_HUB_SCRIPT], timeout=120, quiet=True)
+    except Exception as e:
+        if log:
+            log(f"WARNING: OnionHeaven reset failed: {e}")
+        return None
+    if not r.ok:
+        if log:
+            log(f"WARNING: OnionHeaven reset failed (rc={r.returncode}): {(r.stderr or '').strip()}")
+        return None
+    try:
+        answer = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        answer = None
+    if log:
+        log(f"OnionHeaven reset: {r.stdout.strip() or 'done'}")
+    return answer if isinstance(answer, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# The Settings dialog's hub check (the launchers' validate-oh-address)
+# ---------------------------------------------------------------------------
+
+HUB_CHECK_MAX_TIME = 30
+
+
+def validate_hub_address(address, docker, data_dir="") -> dict:
+    """Is *address* usable as this install's OnionHeaven hub? The
+    launchers' _validate_oh_address (issue #529), one answer for both
+    platforms: {"valid", "status", "message"}, *status* one of
+    invalid_format (not one whole v3 address), self (this install's own
+    address: the imported or generated key's folder, else the address the
+    tor container serves), hub (its :8083/status answers with a version
+    and does not refuse registrations), site (it answers but refuses
+    them, or only its port 80 answers), unreachable (nothing answered
+    over Tor; the dialog may still take it). The probes run as the
+    onionheaven container's curl through its Tor client, never on the
+    host."""
+    from . import onion_hostname
+    from .key_manager import is_valid_onion_address
+    from .start import vanity_key_dir
+    if not is_valid_onion_address(address):
+        return {"valid": False, "status": "invalid_format",
+                "message": "Address must be a valid 56-character .onion address."}
+    own = ""
+    if data_dir:
+        key_dir = vanity_key_dir(data_dir)
+        if key_dir:
+            own = os.path.basename(key_dir)
+    if not own:
+        try:
+            own = onion_hostname.read_served_address(docker)
+        except Exception:
+            own = ""
+    if own and address == own:
+        return {"valid": False, "status": "self",
+                "message": "You cannot use your own onion address as the OnionHeaven hub."}
+    curl = ["curl", "-s", "--max-time", str(HUB_CHECK_MAX_TIME),
+            "--socks5-hostname", "127.0.0.1:9050"]
+    try:
+        r = docker.exec("onionheaven", [*curl, f"http://{address}:8083/status"],
+                        timeout=HUB_CHECK_MAX_TIME + 15, quiet=True)
+        status = json.loads(r.stdout) if r.ok and r.stdout.strip() else None
+    except Exception:
+        status = None
+    if isinstance(status, dict) and "version" in status:
+        # Every node answers /status, but only a hub accepts registrations.
+        # Images from before that gate omit the field; they took them all.
+        if status.get("accepting_registrations") is False:
+            return {"valid": True, "status": "site",
+                    "message": "This address runs OnionPress but is not an OnionHeaven "
+                               "hub, so it will refuse registrations."}
+        return {"valid": True, "status": "hub", "message": "Valid OnionHeaven hub."}
+    try:
+        r = docker.exec("onionheaven", [*curl, "-o", "/dev/null", "-w", "%{http_code}",
+                                        f"http://{address}/"],
+                        timeout=HUB_CHECK_MAX_TIME + 15, quiet=True)
+        code = r.stdout.strip() if r.ok else ""
+    except Exception:
+        code = ""
+    if code in ("200", "301", "302"):
+        return {"valid": True, "status": "site",
+                "message": "This address is reachable but is not running OnionHeaven yet."}
+    return {"valid": True, "status": "unreachable",
+            "message": "Could not reach this address over Tor. It may be offline or invalid."}
+
+
 def is_onionheaven_instance(onion_address):
     """Check if this instance is the OnionHeaven hub.
 

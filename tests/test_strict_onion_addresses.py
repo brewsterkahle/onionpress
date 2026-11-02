@@ -791,14 +791,13 @@ class TestLaunchers(unittest.TestCase):
         for rel in LAUNCHERS:
             self.assertNotIn("\nget_onion_address() {", _read(rel), rel)
 
-    def test_get_healthcheck_address(self):
+    def test_no_bash_reader_of_the_healthcheck_address_is_left(self):
+        # The reader is start.healthcheck_address (one whole v3 address or
+        # "", cached for the daemon), run by `onionpress wait-for-services`
+        # (#529; tests/test_wait_for_services.py holds it to LOOSE's shape).
         for rel in LAUNCHERS:
-            r, cache = self._with_fake_docker(rel, "get_healthcheck_address", HC + "\n")
-            self.assertEqual((r.returncode, r.stdout, cache), (0, HC + "\n", HC + "\n"), rel)
-            for value in LOOSE:
-                with self.subTest(rel=rel, value=value):
-                    r, cache = self._with_fake_docker(rel, "get_healthcheck_address", value)
-                    self.assertEqual((r.returncode, r.stdout, cache), (1, "", None))
+            self.assertNotIn("\nget_healthcheck_address() {", _read(rel), rel)
+            self.assertNotIn("healthcheck/hostname", _read(rel), rel)
 
     def test_linux_status_carries_only_a_whole_address(self):
         # The status is the writer's (onionpress.status_writer, #523), fed

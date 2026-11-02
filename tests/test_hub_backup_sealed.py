@@ -893,17 +893,15 @@ class TestCli(unittest.TestCase):
                 self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" \\\n'
                                        r'\s+\S+ (-m onionpress\.cli )?--data-dir "\$DATA_DIR" '
                                        r'hub-recovery-key "\$\{@:2\}"')
-                self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
-                                       r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" \S+ '
-                                       r'(-m onionpress\.cli )?--data-dir "\$DATA_DIR" restore "\$restore_path"')
-                # restore --check, restore, hub-recovery-key, and run_setup
-                # (setup --from-backup is the restore, #509)
+                self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" \S+ '
+                                       r'(-m onionpress\.cli )?--data-dir "\$DATA_DIR" restore "\$\{@:2\}"')
+                # restore (one pass-through since #529), hub-recovery-key,
+                # and run_setup (setup --from-backup is the restore, #509)
                 uses = [ln.strip() for ln in text.splitlines()
                         if "$_HUB_RECOVERY_KEY" in ln and not ln.lstrip().startswith("#")]
-                self.assertEqual(len(uses), 4, uses)
+                self.assertEqual(len(uses), 3, uses)
                 for line in uses:
-                    self.assertTrue(line.startswith(('ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ',
-                                                     'if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ')),
+                    self.assertTrue(line.startswith('ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" '),
                                     line)
 
     def test_cmd_backup_warns_without_a_recovery_key(self):

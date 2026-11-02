@@ -93,8 +93,13 @@ class TestLauncherWiring(unittest.TestCase):
         start still leaves a running cloudflared on both networks."""
         body = _function(self.text, "stop_containers")
         self.assertIn('docker compose "${COMPOSE_WITH_CF[@]}" down', body)
-        self.assertIn('docker compose "${COMPOSE_WITH_CF[@]}" down -v', self.text)
         self.assertNotRegex(self.text, r"docker compose down\b")
+        # The uninstall's `down -v` is uninstall._remove_linux's (#529),
+        # with both compose files.
+        src = _read("src/onionpress/uninstall.py")
+        linux = src[src.index("def _remove_linux("):src.index("def run(")]
+        self.assertIn('"docker-compose.cloudflare.yml")]', linux)
+        self.assertIn('docker.compose(["down", "-v"], compose_files=files', linux)
 
 
 class TestOneTimingOnBothPlatforms(unittest.TestCase):

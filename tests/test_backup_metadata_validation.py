@@ -661,11 +661,12 @@ class TestLauncherRestorePaths(unittest.TestCase):
             with self.subTest(launcher):
                 self.assertIn('run_setup "$@" || setup_rc=$?', code)
                 self.assertIn("                *) exit 1 ;;\n            esac", code)
+                # The restore case is the CLI's pass-through (#529): its
+                # exit status, the case's last command, is the launcher's.
                 self.assertRegex(
-                    code, r'if ! (?:ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" )?'
-                          r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '
+                    code, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
                           r'(?:op_py|bundled_python -m onionpress\.cli) --data-dir "\$DATA_DIR" restore '
-                          r'"\$restore_path" "\$\{restore_flags\[@\]\}"; then\n(?:[^\n]*\n){1,3}?\s*exit 1')
+                          r'"\$\{@:2\}"\n            ;;')
 
 
 class TestRestoreResultJson(unittest.TestCase):
