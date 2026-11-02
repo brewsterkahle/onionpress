@@ -199,6 +199,22 @@ class TestBackupOffer(unittest.TestCase):
         self.assertEqual(self.offer(["y"], rc=1), (False, ""))
         self.assertIn("Backup failed. Aborting uninstall — install untouched.", self.out.getvalue())
 
+    def test_a_closed_terminal_declines_the_offer_and_the_skip(self):
+        self.assertEqual(self.offer([EOFError()]), (True, ""), "no answer: no backup, go on")
+        self.assertEqual(self.runs, [])
+        self.assertEqual(self.offer(["y", KeyboardInterrupt()], running=False), (False, ""))
+
+    def test_a_launcher_that_cannot_run_is_a_failed_backup(self):
+        logged = []
+        with mock.patch("builtins.input", return_value="y"), \
+                mock.patch("onionpress.scrub._prompt_and_validate_wp_password", return_value="pw"), \
+                mock.patch.object(cli.subprocess, "run", side_effect=OSError("no launcher")):
+            go_on, path = cli.offer_backup_before_uninstall(FakeDocker(), LAUNCHER, logged.append,
+                                                            out=self.out, backups_dir=self.backups)
+        self.assertEqual((go_on, path), (False, ""))
+        self.assertEqual(logged, ["Uninstall: the backup could not be run: no launcher"])
+        self.assertIn("Backup failed. Aborting uninstall — install untouched.", self.out.getvalue())
+
     def test_containers_down_may_go_on_without_a_backup(self):
         self.assertEqual(self.offer(["y", "y"], running=False), (True, ""))
         self.assertEqual(self.offer(["y", ""], running=False), (False, ""))

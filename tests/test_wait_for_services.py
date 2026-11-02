@@ -232,6 +232,47 @@ class TestHelpers(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(data, "healthcheck-address")))
 
 
+class TestSubcommandsNeverTraceback(unittest.TestCase):
+    """`onionpress wait-for-services` and `onionpress start-tor`: whatever
+    goes wrong is a logged line, the summary name (the wait) or exit 1
+    (tor), never a traceback."""
+
+    def setUp(self):
+        self.data = tempfile.mkdtemp(prefix="op-steps-")
+        self.addCleanup(shutil.rmtree, self.data, True)
+
+    def main(self, argv, manager_side_effects=None, wait=None):
+        import contextlib
+        import io
+        from onionpress import cli
+        out = io.StringIO()
+        with mock.patch.object(cli, "Docker"), \
+                mock.patch.object(cli, "detect_os", return_value=mock.Mock(value="macos")), \
+                mock.patch.object(cli, "ContainerManager") as manager, \
+                mock.patch.object(start, "wait_for_services", side_effect=wait), \
+                contextlib.redirect_stdout(out):
+            for name, effect in (manager_side_effects or {}).items():
+                getattr(manager.return_value, name).side_effect = effect
+            rc = cli.main(["--data-dir", self.data, *argv])
+        # The step's manager is mocked: its log_func is where the lines went.
+        logged = [c.args[0] for c in manager.return_value.log_func.call_args_list]
+        return rc, logged
+
+    def test_a_wait_that_raises_names_itself_in_the_summary(self):
+        errors = os.path.join(self.data, "errors")
+        open(errors, "w").close()
+        rc, out = self.main(["wait-for-services", "--errors-file", errors], wait=RuntimeError("boom"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("WARNING: the wait for the services failed: boom", out)
+        with open(errors) as f:
+            self.assertEqual(f.read(), "wait-for-services\n")
+
+    def test_a_tor_start_that_raises_is_the_error_and_1(self):
+        rc, out = self.main(["start-tor"], {"migrate_key_volume": RuntimeError("no docker")})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ERROR: Failed to start tor container: no docker", out)
+
+
 class TestLaunchers(unittest.TestCase):
     """Both launchers' wait_for_services is the delegation; the bash
     helpers it used are gone."""
