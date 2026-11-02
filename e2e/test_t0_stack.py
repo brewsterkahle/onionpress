@@ -119,6 +119,10 @@ def test_status_and_address_agree(node):
     r = node.launcher(["status"], timeout=60)
     assert r.ok, r.describe()
     rows = json.loads(r.out or "[]")
+    # The CLI's answer (both platforms since #529's slice 1): the compose
+    # rows under "services"; Linux's bash printed the bare list before.
+    if isinstance(rows, dict):
+        rows = rows.get("services") or []
     running = {row.get("Name") for row in rows if row.get("State") == "running"}
     for name in CORE_CONTAINERS:
         assert name in running, f"status does not list {name} running: {sorted(running)}"
