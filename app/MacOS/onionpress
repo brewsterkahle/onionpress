@@ -203,8 +203,8 @@ docs_mount_args() {
     fi
 }
 
-# Log file + log() must be defined before any caller (e.g. detect_port_offset),
-# otherwise bash falls through to macOS /usr/bin/log and prints help.
+# Log file + log() must be defined before any caller, otherwise bash falls
+# through to macOS /usr/bin/log and prints help.
 LOG_FILE="$DATA_DIR/onionpress.log"
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
@@ -308,51 +308,39 @@ export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
 export TZ="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo UTC)"
 
-# Detect per-user port offset for multi-user support
-# When multiple macOS users run OnionPress, each needs unique host ports.
-# Try binding the WordPress port; if in use, bump offset by 10000.
-# NOTE: Must use actual socket bind (not lsof) because lsof only shows
-# the current user's processes and cannot detect ports bound by other users.
-detect_port_offset() {
-    local offset=0
-    # Log to file only — stdout is captured by $(detect_port_offset),
-    # and stderr would spam every CLI invocation (status, address, ...).
-    local _stamp
-    while true; do
-        local test_port=$((8080 + offset))
-        if [ $test_port -gt 65535 ]; then
-            _stamp=$(date '+%Y-%m-%d %H:%M:%S')
-            echo "[$_stamp] ERROR: No available ports (tried offsets 0-$((offset - 10000)))" >> "$LOG_FILE"
-            offset=0  # fall back to default
-            break
-        fi
-        # Try to bind the port — fails with EADDRINUSE regardless of which user owns it
-        if bundled_python -P -c "
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-try:
-    s.bind(('127.0.0.1', int(sys.argv[1])))
-    s.close()
-except OSError:
-    sys.exit(1)
-" "$test_port" 2>/dev/null; then
-            break
-        fi
-        _stamp=$(date '+%Y-%m-%d %H:%M:%S')
-        echo "[$_stamp] Port $test_port in use, trying offset $((offset + 10000))" >> "$LOG_FILE"
-        offset=$((offset + 10000))
-    done
-    echo "$offset"
+# The environment every verb runs with (issue #405): the ports and the
+# paths, resolved once by the Python at the top of main() and exported
+# here and nowhere else. `onionpress launcher-env` answers KEY=VALUE per
+# line: ONIONPRESS_PORT_OFFSET and the three port variables compose and
+# every start step read (onionpress.ports.resolve_at_start: a preset
+# ONIONPRESS_PORT_OFFSET, the daemon's or the menubar's, as it is; else
+# the previous instance's port waited for, the running stack's published
+# port, else the bind probe), and DOCKER_DIR (platform.resolve_paths).
+# The Colima environment above (COLIMA_HOME, DOCKER_HOST, DOCKER_CONFIG)
+# is this launcher's own. Its log lines go to the log file only: stdout
+# is what the menubar reads. When the Python does not answer (a broken
+# bundle) the launcher keeps going on the preset offset or 0, so `stop`
+# still brings the containers down.
+launcher_environment() {
+    local answer key value
+    answer=$(bundled_python -m onionpress.cli --data-dir "$DATA_DIR" launcher-env 2>>"$LOG_FILE") || answer=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ONIONPRESS_PORT_OFFSET|ONIONPRESS_WP_PORT|ONIONPRESS_SOCKS_PORT|ONIONPRESS_PROXY_PORT)
+                [[ "$value" =~ ^[0123456789]{1,5}$ ]] && export "$key=$value" ;;
+            DOCKER_DIR)
+                [ -n "$value" ] && [ -d "$value" ] && DOCKER_DIR="$value" ;;
+        esac
+    done <<< "$answer"
+    if ! [[ "${ONIONPRESS_WP_PORT:-}" =~ ^[0123456789]{1,5}$ ]]; then
+        [[ "${ONIONPRESS_PORT_OFFSET:-}" =~ ^[0123456789]{1,5}$ ]] || ONIONPRESS_PORT_OFFSET=0
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: the ports could not be resolved (onionpress launcher-env gave no answer): using offset $ONIONPRESS_PORT_OFFSET" >> "$LOG_FILE"
+        export ONIONPRESS_PORT_OFFSET
+        export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
+        export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
+        export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
+    fi
 }
-
-# Use pre-set offset from menubar app if available, otherwise detect
-if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
-    ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
-fi
-export ONIONPRESS_PORT_OFFSET
-export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
-export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
-export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
 
 # Read version from Info.plist
 ONIONPRESS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist" 2>/dev/null || echo "unknown")
@@ -1470,6 +1458,7 @@ _validate_oh_address() {
 # ===========================================================================
 
 main() {
+    launcher_environment
     case "${1:-start}" in
         start)
             # PID lock — prevent double-starting

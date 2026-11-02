@@ -663,3 +663,50 @@ Not live-tested on Linux: suspend/resume under logind, the hub
 registration from the daemon, the Settings page's requests at the
 daemon's 30 s cadence (the watcher's was 10 s), the .deb upgrade from a
 pre-#407 install.
+
+
+## Slice 10 (2026-11-01): ports and paths resolved in Python only (issue #405, #530 §4)
+
+The port offset had six implementations in three languages (`ports.py`'s
+three functions, the Mac launcher's bash `detect_port_offset` probing 8080
+only, the Linux launcher's probing all three ports plus a bash copy of the
+daemon's `.previous-port-offset` wait that read `status.json`'s `wp_port`,
+`daemon._resolve_ports_at_start`, `OnionPressCLI`'s probe). Now one:
+`ports.resolve_at_start(data_dir, preset=, docker=, log=)`: a preset
+`ONIONPRESS_PORT_OFFSET` (digits) as it is, with no wait and no probe
+(#507); else `wait_for_previous_port` (the sentinel, now a constant,
+`PREVIOUS_OFFSET_SENTINEL`), then the running stack's published port
+(`get_running_wp_port`, through a `docker.Docker` when given, so the
+question reaches this install's daemon), else `detect_port_offset`, which
+logs each bump in the Mac launcher's words. The daemon runs it with no
+preset (it is the resolver the others take their preset from) and its
+own Docker; `OnionPressCLI` with the environment's. `onionpress
+launcher-env` is the launchers' fast path (no `OnionPressCLI`): the rule
+with the environment's preset, then `cli.launcher_environment` (the four
+port variables, `DOCKER_DIR` from `resolve_paths`; on Linux `DOCKER_HOST`
+by the daemon's #503 rule, a preset kept, and `DOCKER_SOCK` for the
+compose file's socket mounts), `KEY=VALUE` per line on stdout, log lines
+on stderr (the launcher appends them to its log), an ERROR and exit 1 on
+any failure. Each launcher's `main()` now opens with
+`launcher_environment`: one call, an allowlisted `case` on the keys,
+numbers held to digits, `DOCKER_DIR` only when it is a folder; no answer
+keeps the preset or 0 with an ERROR in the log file only (stdout is the
+menubar's and the tray's), so `stop` still works on a broken Python. The
+Mac's Colima environment (`COLIMA_HOME`, `DOCKER_HOST`, `DOCKER_CONFIG`)
+stays its own, as does the Colima bootstrap (#405's other half, left
+open). The move into `main()` (rather than the top level, where the
+block was) is what lets the harnesses intercept it: `launcher_harness`'s
+CLI stub answers `launcher-env` from `$STUB_LAUNCHER_ENV` (offset 0's
+ports by default, `FAIL` for no answer) and `calls()`/`py_calls()` leave
+the call out unless `env=True`; the trace harness runs
+`launcher_environment` before `start_containers` (as `main` would) with
+`launcher-env` in the runner's `REAL` set, and the 61 fixtures did not
+change (a preset offset probes and logs nothing). Retired:
+`test_the_port_probe_imports_the_real_socket` (no `python3 -c` probe is
+left in the Linux launcher) and the Mac census's "one `-P -c` exists";
+`TestPortOffsetSticky`'s Linux read test now points at the Python. Not
+live-tested: a Mac with the app (the menubar's preset through the
+daemon), a Linux install (the rootless `DOCKER_HOST`/`DOCKER_SOCK` from
+the Python; the `/tmp/opqa` recipe). `updater.detect_active_offsets` (the
+other instances' offsets, for the update dialog) is a different question
+and stays.

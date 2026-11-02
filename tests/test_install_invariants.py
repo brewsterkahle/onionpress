@@ -9,6 +9,7 @@ below has a comment pointing at the incident it's guarding against.
 """
 
 import ast
+import inspect
 import os
 import re
 import subprocess
@@ -823,11 +824,11 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # for the equivalent assertion at the Python level. What stays bash:
     # the delegations to the WordPress.org plugin steps
     # (onionpress.bundled_plugins, #442.3; tests/test_bundled_plugins.py
-    # holds their shape) and detect_port_offset (needs to run before the
-    # Python lib path is set up).
+    # holds their shape) and launcher_environment, main's first call
+    # (issue #405: the ports and paths come from `onionpress launcher-env`).
     REQUIRED_ON_BOTH = {
         "setup_bundled_plugins",
-        "detect_port_offset",
+        "launcher_environment",
     }
     # `fetch_archive_s3_keys` exists only on Linux: it's a helper used by
     # the SSH/CLI `onionpress setup` interactive path, which on Mac is
@@ -1121,16 +1122,20 @@ class TestPortOffsetSticky(unittest.TestCase):
             "so the next start can wait for the prior ports to free.",
         )
 
-    def test_linux_reads_previous_offset_on_start(self):
-        src = _read("linux/onionpress")
-        # Detection block must read the sentinel and wait for the
-        # desired port to come back.
-        self.assertRegex(
-            src, r'_prev_sentinel.*\.previous-port-offset',
-            "linux/onionpress port-offset detection must read "
-            "$DATA_DIR/.previous-port-offset at startup so a quick "
-            "restart reuses the same offset instead of bumping.",
-        )
+    def test_the_start_waits_for_the_previous_offset_in_python(self):
+        # Issue #405: the wait is ports.wait_for_previous_port, run by
+        # ports.resolve_at_start, which both launchers' main() reach
+        # through `onionpress launcher-env` (and the daemon directly); no
+        # bash reads the sentinel any more.
+        from onionpress import ports
+        self.assertEqual(ports.PREVIOUS_OFFSET_SENTINEL, ".previous-port-offset")
+        self.assertIn("wait_for_previous_port(data_dir, log=log, sleep=sleep)",
+                      inspect.getsource(ports.resolve_at_start))
+        for launcher in ("linux/onionpress", "app/MacOS/onionpress"):
+            src = _read(launcher)
+            self.assertNotIn("_prev_sentinel", src)
+            self.assertIn(" launcher-env 2>>\"$LOG_FILE\")", src)
+            self.assertRegex(src, r"(?m)^main\(\) \{\n    launcher_environment\n")
 
 
 class TestScrubBashDelegatesToPython(unittest.TestCase):

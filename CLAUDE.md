@@ -1129,13 +1129,24 @@
   their own data dir, VM and containers. Extra users offset host ports by
   +10000 each (18080/19050/19077…); container-internal ports never.
 - **Detect ports with a socket bind test, never `lsof`** (it sees only the
-  current user's processes). The daemon resolves the offset at start
-  (`_resolve_ports_at_start`), sets `onion_proxy`'s module globals
-  (`_apply_ports`) and publishes `ports`; the launcher's fallback respects a
-  preset `ONIONPRESS_PORT_OFFSET`, and so does `OnionPressCLI` (#507: its
-  bind probe beside this install's own running stack moved a restore to
-  the next offset). `TestPortOffsetFromTheLauncher` in
-  `tests/test_onionpress_cli.py`.
+  current user's processes). **`ports.resolve_at_start` is the one rule**
+  (#405): a preset `ONIONPRESS_PORT_OFFSET` as it is (#507: a bind probe
+  beside this install's own running stack moved a restore to the next
+  offset), else the previous instance's port waited for
+  (`.previous-port-offset`, `wait_for_previous_port`), the running
+  stack's published port, else the probe. The daemon runs it with no
+  preset (`_resolve_ports_at_start`: it is the resolver the others take
+  their preset from), sets `onion_proxy`'s module globals (`_apply_ports`)
+  and publishes `ports`; `OnionPressCLI` and `onionpress launcher-env`
+  run it with the environment's. **Each launcher's `main` opens with
+  `launcher_environment`**: one `launcher-env` call whose `KEY=VALUE`
+  answer (the four port variables, `DOCKER_DIR`; on Linux `DOCKER_HOST`
+  and `DOCKER_SOCK` by the daemon's #503 rule, from `resolve_paths`) is
+  the only place the launchers export them; no answer keeps the preset
+  or 0 with an ERROR in the log. The Mac's Colima environment stays
+  bash. `tests/test_launcher_env.py`, `TestPortOffsetFromTheLauncher` in
+  `tests/test_onionpress_cli.py`, `TestResolvePorts` in
+  `tests/test_mac_daemon_paths.py`.
 - **No `LSMultipleInstancesProhibited`** in any Info.plist (enforced across
   users). Launcher `pgrep` uses `-u "$(whoami)"` and matches this bundle's
   MenubarApp only. `tests/test_launcher_pgrep_anchor.py`.

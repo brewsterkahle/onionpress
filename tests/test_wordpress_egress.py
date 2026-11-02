@@ -1175,7 +1175,8 @@ class TestLaunchers(unittest.TestCase):
 
     def test_both_pass_this_users_port(self):
         """The published-port rule needs the port, offset included; both
-        launchers export ONIONPRESS_WP_PORT before anything runs."""
+        launchers export ONIONPRESS_WP_PORT (from `onionpress launcher-env`,
+        issue #405) first thing in main(), before any verb runs."""
         for path, fn in ((MAC_LAUNCHER, "start_containers"),
                          (LINUX_LAUNCHER, "block_wordpress_egress"),
                          (LINUX_LAUNCHER, "start_containers")):
@@ -1183,9 +1184,9 @@ class TestLaunchers(unittest.TestCase):
                 text = _read(path)
                 body = _function_body(text, fn)
                 self.assertIn('--wp-port "$ONIONPRESS_WP_PORT"', body)
-                self.assertRegex(text, r"(?m)^export ONIONPRESS_WP_PORT=\$\(\(8080 \+ ONIONPRESS_PORT_OFFSET\)\)$")
-                self.assertLess(text.index("export ONIONPRESS_WP_PORT="),
-                                text.index(f"\n{fn}() {{"))
+                env = _function_body(text, "launcher_environment")
+                self.assertIn("ONIONPRESS_WP_PORT", env)
+                self.assertRegex(text, r"(?m)^main\(\) \{\n    launcher_environment\n")
 
     def test_the_cli_reads_the_port(self):
         from onionpress import cli
