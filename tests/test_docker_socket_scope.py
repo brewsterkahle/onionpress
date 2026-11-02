@@ -570,8 +570,11 @@ class TestWiring(unittest.TestCase):
                          "onionpress-tor answers 503 to /reset-onionheaven now.")
         self.assertRegex(text, r"reset_onionheaven_in_container\(\) \{\n"
                                r"\s+docker exec onionheaven python3 -c")
-        self.assertEqual(text.count("reset_onionheaven_in_container"), 3,
-                         "defined once, used by `reset` and `reset-onionheaven`")
+        self.assertEqual(text.count("reset_onionheaven_in_container"), 2,
+                         "defined once, used by `reset-onionheaven`; `reset`'s is "
+                         "onionheaven.reset_hub_state (cli.cmd_reset's Linux tail, #529)")
+        from onionpress import onionheaven
+        self.assertIn("from onionheaven_common import reset_onionheaven", onionheaven.RESET_HUB_SCRIPT)
 
 
 if __name__ == "__main__":

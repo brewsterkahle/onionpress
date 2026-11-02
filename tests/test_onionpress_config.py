@@ -358,7 +358,7 @@ class TestResolvePortOffset(unittest.TestCase):
         with mock.patch("onionpress.ports.get_running_wp_port",
                          return_value=8080) as lookup:
             pc = resolve_port_offset(self.docker)
-        lookup.assert_called_once_with(self.docker)
+        lookup.assert_called_once_with(docker=self.docker)
         self.assertEqual(pc, PortConfig(offset=0, wp_port=8080, socks_port=9050, proxy_port=9077))
 
     def test_reads_running_stack_on_nonzero_offset(self):

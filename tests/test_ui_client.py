@@ -955,7 +955,7 @@ class TestModuleShape(unittest.TestCase):
         for call in ("ui_client.plan_backup(", "ui_client.run_backup(", "ui_client.plan_restore(",
                      "ui_client.run_restore(", "ui_client.restore_summary(", "ui_client.update_outcome(",
                      "ui_client.question_text(", "ui_client.about_comments(", "ui_client.site_url(",
-                     "ui_client.short_onion(", "ui_client.uninstall_warning("):
+                     "ui_client.short_onion(", "ui_client.run_confirmed("):
             with self.subTest(call=call):
                 self.assertIn(call, src)
         # The package is installed beside the tray: hard imports, no

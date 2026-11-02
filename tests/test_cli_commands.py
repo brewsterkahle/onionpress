@@ -56,7 +56,7 @@ def make_cli(data_dir):
     """An OnionPressCLI whose setup touched nothing but *data_dir*
     (config written there), with its docker, containers and log
     replaced by stubs."""
-    with mock.patch("onionpress.cli.detect_port_offset",
+    with mock.patch("onionpress.ports.resolve_at_start",
                     return_value=PortConfig(0, 8080, 9050, 9077)), \
             mock.patch("onionpress.cli.ensure_secrets",
                        return_value=Secrets("p1", "p2", "p3")), \
@@ -1322,6 +1322,31 @@ class TestResetAtATerminal(Sandbox):
                          if os.path.isdir(os.path.join(self.dir, "logs")) else ["shared"])
         self.assertFalse(os.path.exists(os.path.dirname(self.vanity)))
         self.assertIn("Removed volume: onionpress-db-data", self.cli.logged)
+
+    def test_on_linux_the_launcher_starts_the_stack_and_the_hub_state_is_reset(self):
+        # #529: the Linux launcher's reset tail (its start, then the
+        # onionheaven container's reset while it runs), in Python.
+        self.cli.docker.container_running.side_effect = lambda name: name == "onionheaven"
+        runs = []
+        with mock.patch.object(cli.subprocess, "run", side_effect=lambda argv, **kw: runs.append(argv)), \
+                mock.patch("onionpress.onionheaven.reset_hub_state", return_value={"reset": True}) as hub:
+            self.assertEqual(self.cli.cmd_reset(yes=True, os_name="linux", launcher="/x/onionpress"), 0)
+        self.assertEqual(runs, [["/x/onionpress", "start"]])
+        hub.assert_called_once_with(self.cli.docker, self.cli.log)
+        out = self.out.getvalue()
+        self.assertIn("Starting fresh containers...", out)
+        self.assertIn("Run 'onionpress setup' to initialize WordPress.", out)
+        self.assertNotIn("Run 'onionpress start'", out)
+        self.assertIn("Resetting OnionHeaven...", self.cli.logged)
+        self.assertIn("OnionPress reset and restarted", self.cli.logged)
+
+    def test_on_linux_a_start_that_cannot_run_is_a_warning_and_no_hub_reset_without_the_container(self):
+        self.cli.docker.container_running.return_value = False
+        with mock.patch.object(cli.subprocess, "run", side_effect=OSError("no launcher")), \
+                mock.patch("onionpress.onionheaven.reset_hub_state") as hub:
+            self.assertEqual(self.cli.cmd_reset(yes=True, os_name="linux", launcher="/x/onionpress"), 0)
+        hub.assert_not_called()
+        self.assertIn("WARNING: the start after the reset failed: no launcher", self.cli.logged)
 
     def test_ctrl_c_at_the_question_cancels(self):
         self.tty()

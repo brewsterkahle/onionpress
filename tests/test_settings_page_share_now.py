@@ -143,15 +143,16 @@ class TestLaunchersDelegate(unittest.TestCase):
         body = self._case(src, "upload-analytics")
         self.assertIn('op_py --data-dir "$DATA_DIR" upload-analytics', body)
         self.assertNotIn("touch", body)
-        usage = re.search(r'echo "Usage: \$0 \{(.*?)\}"', src).group(1)
-        self.assertIn("upload-analytics", usage.split("|"))
+        from onionpress import cli
+        self.assertIn("upload-analytics", cli.launcher_help("linux")[cli.launcher_help("linux").index("Advanced / internal"):])
 
     def test_mac_launcher_delegates(self):
         src = _read("app/MacOS/onionpress")
         body = self._case(src, "upload-analytics")
         self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" upload-analytics', body)
         self.assertNotIn("touch", body)
-        self.assertIn("upload-analytics", src[src.index("Advanced / internal"):])
+        from onionpress import cli
+        self.assertIn("upload-analytics", cli.launcher_help("macos")[cli.launcher_help("macos").index("Advanced / internal"):])
 
 
 class TestSettingsPageSaysOff(unittest.TestCase):
