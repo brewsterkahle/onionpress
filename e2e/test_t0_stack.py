@@ -114,14 +114,15 @@ def test_onion_reachable(node, e2e, record_property):
 
 
 def test_status_and_address_agree(node):
-    """`onionpress status` lists the running containers; `address` names the
-    address Tor serves."""
+    """`onionpress status` (the CLI's status document since #529) lists the
+    running containers and the address Tor serves; `address` names it too."""
     r = node.launcher(["status"], timeout=60)
     assert r.ok, r.describe()
-    rows = json.loads(r.out or "[]")
-    running = {row.get("Name") for row in rows if row.get("State") == "running"}
+    doc = json.loads(r.out or "{}")
+    running = {row.get("Name") for row in doc.get("services", []) if row.get("State") == "running"}
     for name in CORE_CONTAINERS:
         assert name in running, f"status does not list {name} running: {sorted(running)}"
+    assert doc.get("onion_address") == node.address, f"status names {doc.get('onion_address')!r}"
     assert node.onion_address() == node.address
 
 
