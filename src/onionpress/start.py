@@ -735,19 +735,22 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     # wordpress, and without it compose recreates WordPress under the
     # launcher's exported bind host, publishing the installer to the
     # network before setup on Linux (#464; found by the live checks).
+    # tor only: the core services' up started onionheaven, and naming it
+    # under --no-deps drops its depends_on from the config compose hashes,
+    # so an older Compose (2.26, Debian 13) recreated it just as the
+    # bundled plugins went to download over its SOCKS port.
     why = manager.key_volume_not_ready()
-    rc = 1 if why else manager.run_compose_to(["up", "-d", "--no-deps", "tor", "onionheaven"],
-                                              out="log")
+    rc = 1 if why else manager.run_compose_to(["up", "-d", "--no-deps", "tor"], out="log")
     if why:
         log(f"ERROR: not starting Tor: {why}")
         name_failure("tor")
     elif rc != 0:
         if mac:
-            log(f"ERROR: Failed to start tor/onionheaven containers (rc={rc}) — see "
+            log(f"ERROR: Failed to start the tor container (rc={rc}) — see "
                 f"{paths.log_file}")
             name_failure("tor")
         else:
-            log("ERROR: Failed to start tor/onionheaven containers")
+            log("ERROR: Failed to start the tor container")
     if not mac:
         warn_if_socks_port_exposed(manager, log)
 

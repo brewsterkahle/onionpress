@@ -312,5 +312,24 @@ class TestTorStartsLeaveWordPressAlone(unittest.TestCase):
         with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
             self.assertNotRegex(f.read(), r"(?m)^[^#]*compose[^\n#]*\bup -d tor\b")
 
+    def test_no_deps_starts_tor_alone(self):
+        """onionheaven depends on onionheaven-farm: named under --no-deps,
+        Compose 2.26 (Debian 13's) hashed its config without that
+        depends_on and recreated the container the core up had started,
+        just before the bundled plugins downloaded over its SOCKS port, so
+        Cache Enabler never installed there. The core up starts it."""
+        import re
+        src = os.path.join(PROJECT_ROOT, "src", "onionpress")
+        ups = []
+        for name in sorted(os.listdir(src)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(src, name), encoding="utf-8") as f:
+                text = f.read()
+            for m in re.finditer(r'\["up", "-d", "--no-deps"[^\]]*\]', text):
+                ups.append((name, m.group(0)))
+        self.assertTrue(any('"tor"' in u for _, u in ups), "no Tor start found: the pattern is stale")
+        self.assertEqual([u for u in ups if "onionheaven" in u[1]], [])
+
 if __name__ == "__main__":
     unittest.main()
