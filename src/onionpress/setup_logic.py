@@ -1143,6 +1143,7 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
                 f"{os.path.join(data_dir, 'onionpress.log')}).")
             return SETUP_FAILED
         # --no-deps: WordPress is up; recreating it would move its port (#464).
-        manager.run_compose_to(["up", "-d", "--no-deps", "tor"] + ([] if mac else ["onionheaven"]),
-                               out="log")
+        # tor only: the start's core up ran onionheaven, and naming it under
+        # --no-deps has an older Compose recreate it (its depends_on dropped).
+        manager.run_compose_to(["up", "-d", "--no-deps", "tor"], out="log")
     return SETUP_DONE
