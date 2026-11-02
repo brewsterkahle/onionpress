@@ -41,6 +41,7 @@ for fake in ("AppKit", "Foundation", "objc"):
 
 from onionpress import browser, native_messaging_host, onion_proxy  # noqa: E402
 from onionpress.docker import Docker  # noqa: E402
+from onionpress.platform import resolve_paths  # noqa: E402
 from fake_docker import FakeDocker  # noqa: E402
 
 ONION = "a" * 56 + ".onion"
@@ -148,9 +149,12 @@ class TestNativeHostProxyPort(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(native_messaging_host, "APP_SUPPORT", tmp):
             docker = native_messaging_host._docker()
+            paths = resolve_paths(data_dir=tmp)
         self.assertIsInstance(docker, Docker)
-        self.assertTrue(docker.env["DOCKER_HOST"].startswith(f"unix://{tmp}/"),
-                        docker.env["DOCKER_HOST"])
+        self.assertEqual(docker.paths.data_dir, tmp)
+        # The socket resolve_paths picks for that data dir: Colima's under
+        # it on a Mac, the rootless or system one on Linux.
+        self.assertEqual(docker.env["DOCKER_HOST"], f"unix://{paths.docker_socket}")
 
 
 class _ProxyServer:
