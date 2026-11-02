@@ -3,11 +3,12 @@
 1. Never the live install: every node lives under a scratch root outside
    the real home, gets an environment built from nothing (no inherited
    DOCKER_HOST, COLIMA_HOME, ...), and is refused the moment it answers
-   with the live install's onion address. A Mac node also refuses to
-   start while a launchd agent with OnionPress's daemon label belongs to
-   anything but itself: the label is per macOS user, not per data
-   directory, so a test node and the live install would take over each
-   other's agent.
+   with the live install's onion address. A Mac node's daemon runs under
+   the label the product derives from its data dir (#505,
+   daemon_client.agent_label), never the live install's
+   `org.onionpress.daemon`; the node refuses to start while its own label
+   is loaded for anything outside the scratch root, or if its data dir
+   would get the bare label.
 2. Nothing reaches a public OnionPress service: every node's config is
    written before its first start (BASELINE_CONFIG), and at teardown the
    tripwire looks for the canonical OnionHeaven hub and OnionHome
@@ -16,6 +17,7 @@
 
 import os
 import re
+import sys
 
 from . import PROJECT_DIR
 
@@ -24,7 +26,8 @@ from . import PROJECT_DIR
 DEFAULT_SCRATCH_ROOT = "/tmp/ope2e"
 MAX_SCRATCH_ROOT_LEN = 40
 
-# OnionPress's launchd label (src/onionpress/daemon.py AGENT_LABEL).
+# OnionPress's launchd label for the account's own ~/.onionpress
+# (src/onionpress/daemon_client.py AGENT_LABEL): the live install's.
 DAEMON_AGENT_LABEL = "org.onionpress.daemon"
 
 # Written to ~/.onionpress/config before a node's first start. OnionPress
@@ -98,11 +101,28 @@ def check_not_live(address, live_address):
                            "it reached the live install. Stopping.")
 
 
-def check_daemon_agent(launchctl_print_output, rc, scratch_root):
-    """UnsafeTarget when the gui-domain agent `org.onionpress.daemon` is
-    loaded for a program outside scratch_root (the live install's, or a
-    leftover of another run). `launchctl print` output and its exit code
-    are passed in; rc != 0 means not loaded."""
+def node_agent_label(data_dir):
+    """The daemon's launchd label for a node whose data dir is *data_dir*:
+    the product's own rule (daemon_client.agent_label, issue #505), so it
+    cannot drift from what the node's daemon registers. UnsafeTarget if
+    that is the live install's bare label (the data dir is the account's
+    own ~/.onionpress)."""
+    src = os.path.join(PROJECT_DIR, "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from onionpress import daemon_client
+    label = daemon_client.agent_label(data_dir)
+    if label == DAEMON_AGENT_LABEL:
+        raise UnsafeTarget(f"data dir {data_dir} gets the live install's launchd label "
+                           f"{DAEMON_AGENT_LABEL}")
+    return label
+
+
+def check_daemon_agent(launchctl_print_output, rc, scratch_root, label=DAEMON_AGENT_LABEL):
+    """UnsafeTarget when the gui-domain agent *label* is loaded for a
+    program outside scratch_root (the live install's, or a leftover of
+    another run). `launchctl print` output and its exit code are passed
+    in; rc != 0 means not loaded."""
     if rc != 0:
         return
     program = ""
@@ -119,10 +139,9 @@ def check_daemon_agent(launchctl_print_output, rc, scratch_root):
     if program and os.path.realpath(program).startswith(root + os.sep):
         return
     raise UnsafeTarget(
-        f"launchd agent {DAEMON_AGENT_LABEL} is loaded for {program or 'an unknown program'}. "
-        "OnionPress's daemon label is one per macOS user, so a Mac test node would take "
-        "over that agent (or it ours). Run Mac nodes when no OnionPress daemon of another "
-        "install is loaded.")
+        f"launchd agent {label} is loaded for {program or 'an unknown program'}. "
+        "A Mac test node would take over that agent (or it ours). Remove that agent, "
+        "or use another scratch root.")
 
 
 def baseline_config_text(extra=None):

@@ -79,6 +79,12 @@ class MacNode(Node):
         return os.path.join(self.home, ".onionpress", "colima")
 
     @property
+    def agent_label(self):
+        """The node daemon's launchd label: derived from its data dir
+        (issue #505), never the live install's org.onionpress.daemon."""
+        return safety.node_agent_label(os.path.join(self.home, ".onionpress"))
+
+    @property
     def wp_port(self):
         return 8080 + self.port_offset
 
@@ -138,9 +144,9 @@ class MacNode(Node):
 
     # ── lifecycle ───────────────────────────────────────────────────────
     def check_daemon_agent(self):
-        r = run(["launchctl", "print", f"gui/{os.getuid()}/{safety.DAEMON_AGENT_LABEL}"],
-                timeout=20, log=self.log)
-        safety.check_daemon_agent(r.out, r.rc, self.root)
+        label = self.agent_label
+        r = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], timeout=20, log=self.log)
+        safety.check_daemon_agent(r.out, r.rc, self.root, label)
 
     def _copy_app(self):
         kind, path = self.app_source
@@ -213,8 +219,8 @@ class MacNode(Node):
         agent of ours that is still loaded, remove the scratch dir."""
         if keep:
             # VM and containers stay up for inspection; the daemon goes,
-            # since its launchd label is the user's one (safety.py). The
-            # next run's leftover cleanup quits the rest.
+            # so no agent of a kept node stays loaded. The next run's
+            # leftover cleanup quits the rest.
             if os.path.exists(self.launcher_path):
                 self.launcher(["daemon", "stop"], timeout=120)
             return
@@ -223,12 +229,12 @@ class MacNode(Node):
         colima = os.path.join(self.bin_dir, "colima")
         if os.path.exists(colima):
             run([colima, "delete", "--force"], env=self.colima_env(), timeout=600, log=self.log)
-        r = run(["launchctl", "print", f"gui/{os.getuid()}/{safety.DAEMON_AGENT_LABEL}"],
-                timeout=20, log=self.log)
+        label = self.agent_label
+        r = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], timeout=20, log=self.log)
         try:
-            safety.check_daemon_agent(r.out, r.rc, self.root)
+            safety.check_daemon_agent(r.out, r.rc, self.root, label)
             if r.rc == 0:     # loaded, and ours
-                run(["launchctl", "bootout", f"gui/{os.getuid()}/{safety.DAEMON_AGENT_LABEL}"],
+                run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
                     timeout=30, log=self.log)
         except safety.UnsafeTarget:
             pass              # someone else's: never touch it
