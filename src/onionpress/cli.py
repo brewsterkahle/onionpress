@@ -204,8 +204,8 @@ def _launcher_log_func() -> Callable[[str], None]:
 
 def _log_wordpress_egress_verdict(result, log: Callable[[str], None],
                                  log_file: str) -> None:
-    """The launchers' block_wordpress_egress() verdict lines (Phase 4,
-    #120), worded as each launcher's bash body worded them: the Mac's
+    """The egress step's verdict lines (Phase 4, #120), worded as the
+    launchers' bash bodies worded them before the step moved here: the Mac's
     start log ticks a step that is in place and points at the log file,
     Linux's names the LAN. A failure is a WARNING: the launchers start
     anyway (the Mac notes the status in its START SUMMARY)."""
@@ -2403,7 +2403,7 @@ def _run_start_step(run):
 
 
 def _run_migrate_key_volume(run):
-    # The launchers' migrate_key_volume(): ContainerManager's, logged in
+    # Once the launchers' migrate_key_volume(): ContainerManager's, logged in
     # the launcher's format; no OnionPressCLI setup (it runs before the
     # stack is up). Unlike the two steps above, its status matters: 1
     # stops the start, since starting tor would create an empty
@@ -2795,7 +2795,7 @@ def _add_errors_file(p):
 
 
 def _run_wordpress_egress(run):
-    # The launchers' block_wordpress_egress() (Phase 4, #120): run
+    # Once the launchers' block_wordpress_egress() (Phase 4, #120): run
     # before they start the containers, so no OnionPressCLI setup
     # (config/secrets creation, port probing). Their bash body is
     # `… 2>&1 | tee -a "$LOG_FILE"` and returns 0 whatever happens

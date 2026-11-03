@@ -148,8 +148,8 @@ DEFAULT_PREFIX = "op2"
 def vanity_key_dir(data_dir: str) -> str | None:
     """The imported or generated key's folder under shared/vanity-keys/:
     the first whose name is a whole v3 onion address, a folder and not a
-    link (it is bind-mounted into a container). The launchers'
-    vanity_key_dir()."""
+    link (it is bind-mounted into a container). The one reader since
+    the launchers' bash copies went (2026-11-02)."""
     from .key_manager import is_valid_onion_address
     base = os.path.join(data_dir, "shared", "vanity-keys")
     try:
@@ -448,7 +448,7 @@ class KeySeed:
 # ---- the core services (#442.6) ----
 
 def egress_step(paths, docker, *, wp_port: int | None, log, errors: StartErrors | None) -> None:
-    """The launchers' block_wordpress_egress: wordpress_egress.ensure
+    """The egress step (once the launchers' block_wordpress_egress): wordpress_egress.ensure
     (issue #144) before the first `compose up`, its verdict in the
     launcher's words; a block not in place is a WARNING and, on the Mac,
     `wordpress-egress` in the START SUMMARY. Never stops the start."""
