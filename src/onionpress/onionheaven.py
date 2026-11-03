@@ -193,6 +193,16 @@ def get_registration_choice(app):
     return registration_choice(app.read_config_value("REGISTER_WITH_ONIONHEAVEN", ""))
 
 
+def reference_hub(app):
+    """The hub the reachability probe may use as a reference onion
+    (HealthChecker's hub_reference): this process's configured hub while
+    the install registers, else "". An install that does not register
+    never contacts a hub, not even to see whether Tor works."""
+    if get_registration_choice(app) != "yes":
+        return ""
+    return ONIONHEAVEN_ADDRESS
+
+
 def _choice_label(choice):
     """REGISTER_WITH_ONIONHEAVEN as a log line shows it."""
     return choice if choice in ("yes", "no") else "unrecognized"

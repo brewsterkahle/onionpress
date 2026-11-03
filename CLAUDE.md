@@ -1000,6 +1000,15 @@
 - The choice is re-read before every request carrying the key; nothing
   goes out unless registering. An explicit `no` sends one signed
   `/unregister`, retried every 15 min. `tests/test_onionheaven_opt_out.py`.
+- **The probe asks the hub only while registering**: the failure path's
+  reference onions (`HealthChecker.reference_onions`) take the hub from
+  `hub_reference` (the daemon's: `onionheaven.reference_hub`, the
+  configured hub or "" unless the choice is `yes`), else only
+  `WELL_KNOWN_ONIONS`. `daemon offline` holds the probe until a pass sees
+  the stack down (`Daemon._stop_hold`, at most `STOP_HOLD_SECONDS`).
+  `TestTheProbeAsksTheHubOnlyWhileRegistering` in
+  `tests/test_onionheaven_opt_in.py`, the stop-hold cases in
+  `TestStatusPass` (`tests/test_mac_daemon.py`).
 - **One client, `onionheaven.OnionHeavenClient`, in one daemon on both
   platforms** (#407): the hub lock (`onionheaven-hub.lock` next to the
   record, #404) orders every /online, /unregister and record write with

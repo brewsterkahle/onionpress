@@ -444,6 +444,60 @@ class TestStatusPass(_DaemonCase):
         req.assert_not_called()
         self.assertIn("log-only", "".join(self._log_text()))
 
+    def test_daemon_offline_holds_the_probe_until_the_stack_is_down(self):
+        """`daemon offline` (the launcher's stop) holds the probe: the
+        containers going down fail every probe, which is no evidence
+        about the onion service, so no failure path runs and nothing
+        counts towards a republish. The first pass that sees the stack
+        down lifts the hold."""
+        self.tick()
+        self.assertTrue(self.d.is_ready)
+        self.d._offline_now()
+        self.health.external = (False, "000:rc=137")
+        self.health.check_external_reachability = mock.Mock(return_value=(False, "000:rc=137"))
+        self.d._recovery.trigger.reset = mock.Mock()
+        self.tick()
+        self.tick()
+        self.health.check_external_reachability.assert_not_called()
+        self.d._recovery.trigger.reset.assert_called()
+        self.assertIsNone(self.d._recovery.trigger.failing_since)
+        self.assertTrue(self.d.is_ready, "a stop is not a failing probe")
+        self.docker.answers["ps -a --filter label=com.docker.compose.project"] = \
+            "onionpress-tor\texited\tdocker\nonionpress-wordpress\texited\tdocker\n"
+        self.tick()
+        self.assertFalse(self.d._stopping)
+        self.docker.answers["ps -a --filter label=com.docker.compose.project"] = \
+            "onionpress-tor\trunning\tdocker\nonionpress-wordpress\trunning\tdocker\n"
+        self.tick()                                   # the next start probes again
+        self.health.check_external_reachability.assert_called()
+
+    def test_a_probe_running_when_the_stop_begins_counts_for_nothing(self):
+        self.tick()
+
+        def _stop_lands_mid_probe(address):
+            self.d._offline_now()
+            return (False, "000:rc=137")
+        self.health.check_external_reachability = _stop_lands_mid_probe
+        self.tick()
+        self.tick()
+        self.assertIsNone(self.d._recovery.trigger.failing_since)
+        self.assertTrue(self.d.is_ready)
+
+    def test_the_stop_hold_ends_after_its_cap(self):
+        """A stop that never took the stack down (it failed, or a restart
+        came back between two passes) holds the probe no longer than
+        STOP_HOLD_SECONDS; a wake lifts it too."""
+        self.tick()
+        self.d._offline_now()
+        self.assertTrue(self.d._stop_hold())
+        self.d._stopping_since -= op_daemon.STOP_HOLD_SECONDS + 1
+        self.assertFalse(self.d._stop_hold())
+        self.assertFalse(self.d._stopping)
+        self.d._offline_now()
+        with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True):
+            self.d.handle_wake()
+        self.assertFalse(self.d._stop_hold())
+
     def test_no_internet_is_offline_and_resets_the_window(self):
         self.tick()
         self.health.internet = False

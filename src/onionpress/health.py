@@ -75,15 +75,14 @@ WEDGE_CLASSIFY_FETCH_WAIT_SECONDS = 20
 
 # Onions used to decide whether onionheaven's tor is itself able to reach
 # anything, when it says our site is unreachable but our own tor disagrees.
-# The hub is tried first; the others only when it does not answer, so
+# The install's hub is tried first, and only while it registers with one
+# (HealthChecker's hub_reference: an opted-out install never contacts the
+# hub, not even here); the others only when it does not answer, so
 # third-party onions see traffic only while the hub is down. Any HTTP
 # answer from any one of them proves the client has working circuits.
 # Addresses verified 2026-10-11 on the owners' own pages:
 #   torproject.org  — support.torproject.org/onionservices (v3 example)
 #   duckduckgo.com  — duckduckgo.com/duckduckgo-help-pages/privacy/no-tracking
-ONIONHEAVEN_HUB_ADDRESS = (
-    "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-)
 WELL_KNOWN_ONIONS = (
     ("torproject", "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"),
     ("duckduckgo", "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"),
@@ -233,9 +232,15 @@ class HealthChecker:
         self,
         docker: Docker,
         log_func: Callable[[str], None] | None = None,
+        hub_reference: Callable[[], str] | None = None,
     ):
+        """*hub_reference* answers the hub to use as the first reference
+        onion (onionheaven.reference_hub: the configured hub while the
+        install registers, else ""). Asked on every check; without it
+        only the WELL_KNOWN_ONIONS are tried."""
         self.docker = docker
         self.log_func = log_func
+        self.hub_reference = hub_reference
 
     def _log(self, msg: str) -> None:
         if self.log_func:
@@ -401,8 +406,6 @@ class HealthChecker:
     # it on self✓/external✗ disagreement and don't want to re-probe the
     # hub on every health cycle.
     _ONIONHEAVEN_HEALTH_TTL_SECONDS = 60.0
-    # Kept as class attributes for callers/tests that reach for them here.
-    _ONIONHEAVEN_HUB_ADDRESS = ONIONHEAVEN_HUB_ADDRESS
 
     # ----- probe transport ------------------------------------------------
 
@@ -564,9 +567,10 @@ class HealthChecker:
           1. `GETINFO status/circuit-established` on onionheaven's control
              port. A 0 is a definite no — no curl can succeed — and costs
              no Tor traffic. Anything else is inconclusive.
-          2. The OnionHeaven hub.
+          2. The install's OnionHeaven hub, only while it registers with
+             one (reference_onions).
           3. The WELL_KNOWN_ONIONS, one at a time, only if the hub did not
-             answer. Before this the hub was the single oracle: with the
+             answer or was not asked. Before this the hub was the single oracle: with the
              hub down, every external failure was downgraded to
              "degraded" and reported as reachable, so wedge detection
              switched itself off fleet-wide, silently.
@@ -580,17 +584,31 @@ class HealthChecker:
         self._onionheaven_health_cache = (now, ok)
         return ok
 
+    def reference_onions(self) -> tuple[tuple[str, str], ...]:
+        """The onions _onionheaven_can_reach_anything tries, in order: the
+        hub hub_reference names (none when it answers "" or fails), then
+        the WELL_KNOWN_ONIONS."""
+        hub = ""
+        if self.hub_reference is not None:
+            try:
+                hub = (self.hub_reference() or "").strip()
+            except Exception as e:
+                self._log(f"Reachability: no hub reference ({e})")
+        return ((("hub", hub),) if hub else ()) + WELL_KNOWN_ONIONS
+
     def _onionheaven_can_reach_anything(self) -> bool:
         answer = self._control_getinfo("onionheaven", "status/circuit-established")
         if "circuit-established=0" in answer:
             self._log("Reachability: onionheaven tor has no established circuits")
             return False
-        for name, onion in (("hub", ONIONHEAVEN_HUB_ADDRESS),) + WELL_KNOWN_ONIONS:
+        onions = self.reference_onions()
+        asked_hub = onions[0][0] == "hub"
+        for name, onion in onions:
             pr = self._curl_onion("onionheaven", onion, path=PROBE_PATH_FALLBACK)
             reached = bool(pr.code) and not pr.code.startswith("000") \
                 and pr.code != "takeover"
             if reached:
-                if name != "hub":
+                if name != "hub" and asked_hub:
                     self._log(
                         f"Reachability: onionheaven tor cannot reach the "
                         f"OnionHeaven hub but reached {name} ({pr.code}) — "

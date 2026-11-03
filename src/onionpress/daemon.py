@@ -139,6 +139,10 @@ from .daemon_client import (  # noqa: F401
 
 UPLOAD_TRIGGER_MARKER = ".upload-analytics"
 
+# How long `daemon offline` holds the probe at most (Daemon._stop_hold):
+# a stop takes the containers down well inside it.
+STOP_HOLD_SECONDS = 120
+
 # The state file and status.json are written by onionpress.status_writer
 # (one writer for both platforms, issue #523); the names stay here for
 # the CLI, the uninstaller and the tests.
@@ -251,7 +255,9 @@ class Daemon(PortAttributes):
         self.log_file = self._onionpress_log.current_path()
 
         self._docker = docker or Docker(paths, log_func=self.log)
-        self._health_checker = health_checker or HealthChecker(self._docker, log_func=self.log)
+        self._health_checker = health_checker or HealthChecker(
+            self._docker, log_func=self.log,
+            hub_reference=lambda: onionheaven.reference_hub(self))
         self._wedge_probe_next = 0.0
         self._wedge_last_episode = None
 
@@ -313,7 +319,10 @@ class Daemon(PortAttributes):
         self._onionname_collision = None
         self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
         self._quitting = False
+        # Set by `daemon offline` (the launcher's stop): no probe until the
+        # stop has taken the stack down (_stop_hold).
         self._stopping = False
+        self._stopping_since = 0.0
         self._consecutive_fail_count = 0
         self._wedge_warning_fired = False
         self._last_not_running = None
@@ -619,8 +628,11 @@ class Daemon(PortAttributes):
 
     def _offline_now(self):
         """USR1 (`onionpress daemon offline`, from the launcher's `stop`):
-        tell the hub /offline now, as the menubar's Stop did before
-        stopping the containers, and acknowledge."""
+        hold the probe (_stop_hold), tell the hub /offline now, as the
+        menubar's Stop did before stopping the containers, and
+        acknowledge."""
+        self._stopping = True
+        self._stopping_since = time.monotonic()
         try:
             if self.hub_client.registration_succeeded and not self.is_onionheaven:
                 try:
@@ -634,6 +646,21 @@ class Daemon(PortAttributes):
                     f.write(str(os.getpid()))
             except OSError:
                 pass
+
+    def _stop_hold(self):
+        """True while a stop announced by `daemon offline` is under way:
+        the containers going down make every probe fail, which is no
+        evidence about the onion service. Lifted by the first pass that
+        sees the stack down (check_status), by a wake, or after
+        STOP_HOLD_SECONDS when the stop never took the stack down (a
+        failed stop, or a restart quicker than one status pass)."""
+        if not self._stopping:
+            return False
+        if time.monotonic() - self._stopping_since < STOP_HOLD_SECONDS:
+            return True
+        self._stopping = False
+        self.log("daemon: the stack did not go down after `daemon offline`; probing again")
+        return False
 
     # -- start-up ------------------------------------------------------------
 
@@ -987,6 +1014,7 @@ class Daemon(PortAttributes):
                 self._check_wordpress_installed()
                 self._hub_loops()
             else:
+                self._stopping = False
                 if was_running or self.is_ready:
                     self.log("Service stopped")
                     self.last_status_logged = None
@@ -1044,6 +1072,12 @@ class Daemon(PortAttributes):
     def _full_health_pass(self):
         """Internet is there: WordPress, then the dual probe and the #266
         recovery step (RecoveryWindow, shared with Linux)."""
+        if self._stop_hold():
+            # A stop is taking the stack down: no probe, so no failure
+            # path (reference onions, wedge classification) and nothing
+            # towards a republish.
+            self._recovery.note_offline()
+            return
         current_status = (self.is_running, self.onion_address)
         should_log = (current_status != self.last_status_logged) or not self.is_ready
         if not self._wordpress_confirmed:
@@ -1053,6 +1087,11 @@ class Daemon(PortAttributes):
         else:
             wordpress_ready = True
         tor_reachable = self.check_tor_reachability(log_result=should_log)
+        if self._stop_hold():
+            # The stop began while this probe ran: its failure is the
+            # stop's.
+            self._recovery.note_offline()
+            return
         self._reachability_stats.record_probe(tor_reachable, self._last_probe_code, self._last_probe_ms)
         self._recovery.step(self._tor_internally_ready, tor_reachable,
                             self._last_probe_code, self._last_probe_why)
@@ -1375,6 +1414,7 @@ class Daemon(PortAttributes):
         self._maybe_emit_snapshot(force=True)
         self._reachability_stats.reset_session(time.time())
         self._recovery.note_wake()
+        self._stopping = False
         self._sleeping = False
         self.startup_time = time.time()
         self.caffeine.start()
