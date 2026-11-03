@@ -80,30 +80,6 @@ sys.path[:0] = sys.argv.pop(1).split(":")
 runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' "$ONIONPRESS_PYTHONPATH" "$@"
 }
 
-# True only for a well-formed v3 onion address: 56 lowercase base32
-# characters, then ".onion", and nothing else (no newline, no "/"). The
-# rule of key_manager.is_valid_onion_address; a test keeps the two
-# together. The letters are spelled out because a range like a-z can take
-# in other characters in some locales.
-is_onion_address() {
-    [[ "$1" =~ ^[abcdefghijklmnopqrstuvwxyz234567]{56}\.onion$ ]]
-}
-
-# The imported or generated key's directory under vanity-keys/: the first
-# one whose name is a whole onion address (is_onion_address), not merely
-# "*.onion". Its name is taken for the address and the directory is
-# bind-mounted into a container. Prints nothing and fails if there is none.
-vanity_key_dir() {
-    local d
-    for d in "$DATA_DIR/shared/vanity-keys"/*.onion; do
-        if [ -d "$d" ] && [ ! -L "$d" ] && is_onion_address "$(basename "$d")"; then
-            echo "$d"
-            return 0
-        fi
-    done
-    return 1
-}
-
 # Hand a file to the WordPress container, written as www-data: stdin goes to
 # $1, mode ${2:-600} once in place (a temporary file beside it, renamed
 # over it). Never as root: www-data owns /var/lib/onionpress and the web
@@ -114,13 +90,6 @@ wp_put() {
     docker exec -i -u www-data onionpress-wordpress \
         sh -c 't=$(mktemp "$1.XXXXXX") || exit 1; if cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"; then exit 0; fi; rm -f "$t"; exit 1' \
         sh "$1" "${2:-600}"
-}
-
-# Run a command in the WordPress container as www-data: what the launcher
-# reads from or removes in www-data's folders (a root `cat` would follow a
-# planted link to a file only root may read).
-wp_exec() {
-    docker exec -u www-data onionpress-wordpress "$@"
 }
 
 # Run wp-cli in the WordPress container as www-data: wp_cli <args...>, and
@@ -294,44 +263,6 @@ unset _img_var _img_val
 # through the CLI (Phase 4, #120).
 using_local_images() {
     op_py --data-dir "$DATA_DIR" using-local-images
-}
-
-# Whether the address given is the OnionHeaven hub's (issue #345): the Mac
-# daemon's rule, onionheaven.is_onionheaven_instance. Every node runs an
-# onionheaven container (its heartbeat monitor idles off the hub), so a
-# running one says nothing about the node's mode.
-is_onionheaven_hub() {
-    op_py --data-dir "$DATA_DIR" is-onionheaven-hub "$1"
-}
-
-# The image every one-shot helper that handles the onion service key runs
-# from (the key volume migration, the key seeds, the backup's key reads):
-# the stack's own tor image, pinned by digest like the rest, or the locally
-# built one. Never a floating tag such as `alpine`, which a registry or a
-# mirror could swap for an image that reads the key. Each run overrides the
-# entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
-
-# Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
-# volume migration and the first-run seed come before any pull. A missing
-# image is pulled by its pinned reference, never when the stack runs locally
-# built images. Returns 1 when it is not here and cannot be. Linux only:
-# create_backup's key read runs the helper; the Python start steps use
-# containers.ensure_key_helper_image.
-ensure_key_helper_image() {
-    if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
-        return 0
-    fi
-    if using_local_images; then
-        log "ERROR: the locally built tor image $KEY_HELPER_IMAGE is not here (build it with build/build-images.sh)"
-        return 1
-    fi
-    log "Pulling $KEY_HELPER_IMAGE for the onion service key helpers..."
-    if ! docker pull "$KEY_HELPER_IMAGE" >> "$LOG_FILE" 2>&1; then
-        log "ERROR: could not pull $KEY_HELPER_IMAGE"
-        return 1
-    fi
-    docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
 }
 
 # Create default config if it doesn't exist (0600, issue #397: it may hold
@@ -651,26 +582,8 @@ setup_bundled_plugins() {
 # ─── OnionHeaven farm (takeover containers) ─────────────────────────
 #
 # Takeover container lifecycle is now managed by the heartbeat monitor
-# inside the onionheaven container (via docker socket). The shell script
-# only needs to stop containers on shutdown.
-
-stop_onionheaven_farm() {
-    # Stop all takeover containers, all at once, with a second's grace each:
-    # their onion services are ephemeral (ADD_ONION), and one after another
-    # at Docker's default 10 s a farm of any size outlasted a stop.
-    local container pids=""
-    for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-(poll|takeover)-[0-9]+$'); do
-        {
-            docker stop -t 1 "$container" >> "$LOG_FILE" 2>&1 || true
-            docker rm "$container" >> "$LOG_FILE" 2>&1 || true
-            log "OnionHeaven farm: stopped $container"
-        } &
-        pids="$pids $!"
-    done
-    if [ -n "$pids" ]; then
-        wait $pids || true
-    fi
-}
+# inside the onionheaven container (via docker socket); the stop's
+# `stop-containers` stops them on shutdown.
 
 # Clean stress-test entries and refresh takeover workers with current code.
 # reset_onionheaven() drives Docker through the farm controller, which only
@@ -712,17 +625,6 @@ start_post_up() {
 
 
 
-# Whether Docker has volume $1: 0 yes, 1 no, 2 Docker could not say (the
-# daemon is not up yet, e.g. the Colima VM is still booting). Callers must
-# treat 2 as "stop", never as "no": a missing key volume is the first-run
-# signal, so reading a Docker error as absence turns an upgrade into a first
-# run. Kept identical in the macOS and Linux launchers; a test enforces that.
-docker_volume_state() {
-    local names
-    names=$(docker volume ls --format '{{.Name}}' 2>>"$LOG_FILE") || return 2
-    printf '%s\n' "$names" | grep -qx -- "$1"
-}
-
 
 # Wait up to $1 seconds for the Docker daemon to answer; returns 1 if it
 # never does. Kept identical in the macOS and Linux launchers.
@@ -744,21 +646,6 @@ wait_for_docker() {
     return 0
 }
 
-
-# One-time migration of the onion service key volume from its historical
-# name, onionpress-arti-state (until 2026-09-25), to onionpress-onion-keys:
-# ContainerManager.migrate_key_volume (Phase 4, #120; CLAUDE.md, "The key
-# volume migration fails loudly"), run through the shared CLI. It runs
-# before the first-run check, which keys off the NEW volume's existence, so
-# its exit status is this function's and a 1 stops the start (the callers'
-# `if ! migrate_key_volume`): an empty onionpress-onion-keys that starting
-# tor would create passes for the migrated key on the next start. The log
-# lines reach the log and the terminal as log's do; PIPESTATUS keeps the
-# Python's status past tee.
-migrate_key_volume() {
-    op_py --data-dir "$DATA_DIR" migrate-key-volume 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
-}
 
 # Rootless Docker's default port driver (RootlessKit "builtin") does not
 # carry a visitor's address: everyone who opens WordPress's published port,
@@ -784,39 +671,12 @@ note_if_lan_looks_local() {
     return 0
 }
 
-# WordPress and MariaDB reach nothing outside Docker (issue #144). Their
-# network's bridge (onionpress-wp0, docker-compose.yml) gets the
-# ONIONPRESS-WP chain before anything starts on it: only replies to
-# connections made from outside (the published port, LAN browsers,
-# docker-proxy) leave the bridge or reach the host itself. Where the rules
-# go, from onionpress/wordpress_egress.py (shared with macOS):
-#   rootless Docker  RootlessKit's network namespace, entered as its owner
-#                    (nsenter -U --preserve-credentials -n -m), as Docker's
-#                    rootless docs do;
-#   system Docker    the host, through a one-shot helper container
-#                    (--privileged --pid host --network none, the pinned
-#                    tor image) running the host's own iptables. The docker
-#                    group can do that already; this user is not root. The
-#                    .deb's docker.service drop-in does it at boot, before
-#                    Docker restarts the containers.
-# The same call shuts the Tor side (onionpress-network, bridge
-# onionpress-tor0: tor, onionheaven, cloudflared, takeover workers) off from
-# this machine and private addresses (the LAN), and refuses WordPress's
-# published port (ONIONPRESS_WP_PORT) from anything but loopback: a
-# container on any bridge, other projects' too, would otherwise reach it
-# through docker-proxy and arrive as the gateway auto-login trusts.
-# Best effort: without the chain the site still starts (WordPress's own
-# requests still go through Tor) and the log says so. The body is
-# onionpress.cli's (Phase 4, #120): it logs the verdict in this script's
-# log format, tee'd into the log, and its status never stops the start.
-block_wordpress_egress() {
-    op_py --data-dir "$DATA_DIR" wordpress-egress --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
-    return 0
-}
-
-# Rootless Docker's network namespace is new, and holds none of the rules
-# above, each time the rootless daemon starts; the daemon re-applies them
-# when it changes (Daemon._watch_rootless_netns).
+# WordPress and MariaDB reach nothing outside Docker (issue #144): the
+# egress rules are onionpress.wordpress_egress's, applied by the start
+# (start.start_core) before the first `compose up`. Rootless Docker's
+# network namespace is new, and holds none of them, each time the rootless
+# daemon starts; the daemon re-applies them when it changes
+# (Daemon._watch_rootless_netns).
 
 start_containers() {
     log "Starting OnionPress containers..."
@@ -902,61 +762,21 @@ start_cloudflare_tunnel() {
     fi
 }
 
+# The stop is onionpress.cli's `stop-containers` (ContainerManager.stop,
+# both platforms): the OnionHeaven farm's takeover workers first, then
+# compose down, always with the Cloudflare override file, so a tunnel whose
+# token was just removed goes down with the rest. The status is the
+# stop's, not tee's: `stop` and `quit` report a failed stop
+# (tests/test_launcher_dispatch_linux.py).
 stop_containers() {
-    log "Stopping OnionPress containers..."
-    stop_onionheaven_farm
-    # Capture the offset BEFORE compose-down so the next start can wait
-    # for the TIME_WAIT sockets to clear and reuse the same offset.
-    # Without this the next start sees the post-down TIME_WAIT sockets
-    # as "taken" and bumps to a higher offset, leaving the user on a
-    # different port number across restarts. Best-effort.
-    echo "${ONIONPRESS_PORT_OFFSET:-0}" > "$DATA_DIR/.previous-port-offset" 2>/dev/null || true
-    cd "$DOCKER_DIR"
-    # The status is compose's, not tee's or log's: `stop` reports a failed
-    # stop (tests/test_launcher_dispatch_linux.py).
-    local down_out down_rc=0
-    down_out=$(docker compose "${COMPOSE_WITH_CF[@]}" down 2>&1) || down_rc=$?
-    [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
-    if [ "$down_rc" -ne 0 ]; then
-        log "ERROR: stopping the containers failed (compose down exited $down_rc)"
-        return "$down_rc"
-    fi
-    log "Containers stopped"
-    # The daemon's next pass (within 10 s) writes the stopped status the
-    # tray and the pages read.
+    op_py --data-dir "$DATA_DIR" stop-containers 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
 }
 
 # ─── Status queries ──────────────────────────────────────────────────
 
 
 # ─── OnionHeaven on/off ─────────────────────────────────────────────
-
-# Before this install forgets its onion service key (reset, key import, a
-# restore to another address, uninstall): ask every OnionHeaven hub that
-# may hold a copy to delete it, while the key is still here to sign the
-# request. onionpress.cli onionheaven-unregister sends the signed
-# /unregister for the whole address to the hub the registration record
-# names, through the tor container (which must be running), and says what
-# it did; with nothing registered it does and prints nothing (the daemon's
-# own beats are held off a released key by the record, as on the Mac).
-# Usage: onionheaven_release <reason> [<address whose key stays>]. Sets
-# ONIONHEAVEN_RELEASE_RC (0 nothing left on a hub, 1 something the user
-# could still take back, 3 something nothing here can take back, other:
-# the command failed) and returns 1 only when the user chose to stop at
-# the question. Kept identical to the Mac launcher's.
-onionheaven_release() {
-    local answer=""
-    ONIONHEAVEN_RELEASE_RC=0
-    op_py onionheaven-unregister --reason "$1" \
-        ${2:+--keep-address "$2"} || ONIONHEAVEN_RELEASE_RC=$?
-    # 0 and 3: nothing the user could still do. Anything else (1, or a
-    # failure of the command itself) may leave a key on a hub: ask.
-    case "$ONIONHEAVEN_RELEASE_RC" in 0|3) return 0 ;; esac
-    [ "$ONIONPRESS_YES" = "true" ] && return 0
-    printf "Continue anyway? The hub keeps the key listed above. [y/N] "
-    read -r answer || true
-    [ "$answer" = "y" ] || [ "$answer" = "Y" ]
-}
 
 # `onionpress onionheaven enable|disable|status [--json]`: one
 # implementation for both platforms in src/onionpress/onionheaven.py

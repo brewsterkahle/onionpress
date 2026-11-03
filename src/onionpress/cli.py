@@ -2412,6 +2412,31 @@ def _run_migrate_key_volume(run):
     return 0 if _start_step_manager(paths).migrate_key_volume() else 1
 
 
+def _run_stop_containers(run):
+    # Both launchers' stop_containers() (`stop`, `quit`, `restart`, an
+    # update, a setup that restarts): ContainerManager.stop, the farm
+    # workers first, then compose down with the Cloudflare override always,
+    # so a tunnel whose token was just removed goes down too. Logged in the
+    # launcher's format; 1 when compose down failed (`stop` and `quit`
+    # report it). The offset is noted first, so the next start waits for
+    # this one's port to free instead of moving to the next offset
+    # (ports.wait_for_previous_port).
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    manager = _start_step_manager(paths)
+    log = _launcher_log_func()
+    log("Stopping OnionPress containers...")
+    try:
+        with open(os.path.join(paths.data_dir, ports.PREVIOUS_OFFSET_SENTINEL), "w") as f:
+            f.write(str(manager.port_config.offset))
+    except OSError:
+        pass
+    if not manager.stop(include_onionheaven=True):
+        log("ERROR: stopping the containers failed (compose down)")
+        return 1
+    log("Containers stopped")
+    return 0
+
+
 def _add_bundled_plugins(sub, name):
     what = ("Put the pinned Internet Archive Link Fixer and Cache Enabler "
             "releases in the WordPress container (downloaded over Tor, checked "
@@ -2746,9 +2771,9 @@ def _add_is_onionheaven_hub(sub, name):
 
 
 def _run_is_onionheaven_hub(run):
-    # The Linux launcher's is_onionheaven_hub() (issue #345): the Mac
-    # daemon's rule, by address. No OnionPressCLI setup (every status
-    # tick, beside a live stack).
+    # The hub rule by address (issue #345), what the Linux launcher's
+    # is_onionheaven_hub() ran until it had no caller left. No
+    # OnionPressCLI setup (it may run beside a live stack).
     from .onionheaven import is_onionheaven_instance
     return 0 if is_onionheaven_instance(run.args.address) else 1
 
@@ -2795,14 +2820,13 @@ def _add_errors_file(p):
 
 
 def _run_wordpress_egress(run):
-    # The launchers' block_wordpress_egress() (Phase 4, #120): run
-    # before they start the containers, so no OnionPressCLI setup
-    # (config/secrets creation, port probing). Their bash body is
-    # `… 2>&1 | tee -a "$LOG_FILE"` and returns 0 whatever happens
-    # (the Mac puts a non-zero status into its START SUMMARY), so the
-    # verdict is logged here in their `[ts] msg` format; --check (not
-    # a launcher's call) prints the bare status line. Never a
-    # traceback: whatever goes wrong is the WARNING's words.
+    # What the launchers' block_wordpress_egress() ran (Phase 4, #120;
+    # the start's step is start-core's now, and the Linux daemon runs
+    # this when rootless Docker's namespace changes): no OnionPressCLI
+    # setup (config/secrets creation, port probing). The verdict is
+    # logged in the launchers' `[ts] msg` format; --check prints the
+    # bare status line. Never a traceback: whatever goes wrong is the
+    # WARNING's words.
     import dataclasses
     from . import wordpress_egress
     args = run.args
@@ -3375,6 +3399,11 @@ _COMMANDS = [
             "with no network; exit 1 (the start must stop) when Docker does "
             "not answer, the copy fails or the image is not here"),
      _run_migrate_key_volume),
+    ("stop-containers",
+     _plain("Stop the stack: the OnionHeaven farm workers, then compose down "
+            "with the Cloudflare override (token or not); both launchers' "
+            "stop; exit 1 when compose down failed"),
+     _run_stop_containers),
     ("install-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("setup-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),

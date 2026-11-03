@@ -425,6 +425,19 @@ ROWS = [
     Row("migrate-key-volume", ["migrate-key-volume"],
         "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
         returns=mock.Mock(**{"migrate_key_volume.return_value": False})),
+    # Both launchers' stop_containers(): ContainerManager.stop with the farm,
+    # the launcher's offset noted; 1 when compose down failed
+    # (tests/test_stop_containers.py runs it).
+    Row("stop-containers", ["stop-containers"],
+        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
+        returns=mock.Mock(**{"stop.return_value": True}),
+        env={"ONIONPRESS_PORT_OFFSET": "10000"},
+        check=lambda t, m: (
+            m.return_value.stop.assert_called_once_with(include_onionheaven=True),
+            t.assertEqual(m.call_args.args[2].offset, 10000))),
+    Row("stop-containers", ["stop-containers"],
+        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"stop.return_value": False})),
     # Phase 4 (#120): the Linux launcher's db_import() is backup.db_import,
     # what restore_container_artifacts runs; the password is stdin's first
     # line, never argv. A failure raises there and is exit 1 here
@@ -434,7 +447,8 @@ ROWS = [
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=1, returns=False),
-    # Issue #345: the Linux launcher's is_onionheaven_hub() is this.
+    # Issue #345: what the Linux launcher's is_onionheaven_hub() ran (the
+    # function had no caller left and went).
     Row("is-onionheaven-hub", ["is-onionheaven-hub", ONION],
         "onionheaven.is_onionheaven_instance", mock.call(ONION), rc=0, returns=True),
     Row("is-onionheaven-hub", ["is-onionheaven-hub"],

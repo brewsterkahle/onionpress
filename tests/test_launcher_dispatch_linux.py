@@ -134,30 +134,27 @@ class TestStartDaemon(_Case):
 
 
 class TestStopAndRestart(_Case):
-    STUBS = ("setup_db_passwords", "stop_onionheaven_farm", "start_containers",
+    STUBS = ("setup_db_passwords", "start_containers",
              "wait_for_services", "start_daemon")
 
     def test_stop_asks_the_daemon_offline_then_stops_the_stack(self):
         r = self.l.run("stop")
         self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.l.calls()
-        # Always with the cloudflared override, so a removed token's tunnel goes too.
-        down = "bin docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml down"
-        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline"])
-        self.assertLess(calls.index(f"py {self.dd()} daemon offline"), calls.index(down))
-        self.assertIn("Containers stopped", r.stdout)
-        with open(os.path.join(self.l.data_dir, ".previous-port-offset")) as f:
-            self.assertEqual(f.read().strip(), "0")
+        # The stop is `onionpress stop-containers` (ContainerManager.stop:
+        # the farm, then compose down always with the Cloudflare override;
+        # the offset noted for the next start: tests/test_stop_containers.py).
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline",
+                                             f"{self.dd()} stop-containers"])
+        self.assertFalse([c for c in self.l.calls() if c.startswith("bin docker")])
 
     def test_a_daemon_that_cannot_go_offline_does_not_stop_the_stop(self):
         r = self.l.run("stop", env={"STUB_RC_PY": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Containers stopped", r.stdout)
+        self.assertIn(f"{self.dd()} stop-containers", self.l.py_calls())
 
-    def test_a_failed_compose_down_is_the_exit_status(self):
-        r = self.l.run("stop", env={"STUB_RC_DOCKER_DOWN": "3"})
+    def test_a_failed_stop_is_the_exit_status(self):
+        r = self.l.run("stop", env={"STUB_RC_STOP_CONTAINERS": "3"})
         self.assertEqual(r.returncode, 3)
-        self.assertIn("ERROR: stopping the containers failed", r.stdout)
         self.assertNotIn("write_status", self.l.fn_calls(), "the daemon's pass reports the state")
 
     def test_restart(self):
@@ -170,7 +167,7 @@ class TestStopAndRestart(_Case):
         self.assertNotIn("start_container_log_capture", fns)
 
     def test_a_failed_stop_still_restarts(self):
-        r = self.l.run("restart", env={"STUB_RC_DOCKER_DOWN": "1"})
+        r = self.l.run("restart", env={"STUB_RC_STOP_CONTAINERS": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("WARNING: restart: the stop failed", r.stdout)
         self.assertIn("start_containers", self.l.fn_calls())

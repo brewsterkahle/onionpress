@@ -96,6 +96,19 @@ class TestMacCensus(unittest.TestCase):
             'bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" PYTHONSAFEPATH=1 '
             '"$_BUNDLED_PYTHON_BIN" "$@"; }', _read(MAC))
 
+    def test_every_direct_run_of_the_bundled_python_sets_safe_path(self):
+        """A line that runs "$_BUNDLED_PYTHON_BIN" itself (the `daemon`
+        case's exec, so launchd's pid is the daemon) sets PYTHONSAFEPATH=1
+        as the wrapper does: the agent's plist runs it with launchd's cwd,
+        and a terminal's `onionpress daemon` with the owner's."""
+        runs = [(n, line) for n, line in _code_lines(_read(MAC))
+                if '"$_BUNDLED_PYTHON_BIN"' in line]
+        self.assertGreaterEqual(len(runs), 2, "the wrapper and the daemon's exec")
+        for n, line in runs:
+            self.assertIn("PYTHONSAFEPATH=1 ", line, f"{MAC}:{n}: {line.strip()}")
+            self.assertLess(line.index("PYTHONSAFEPATH=1 "), line.index('"$_BUNDLED_PYTHON_BIN"'),
+                            f"{MAC}:{n}: set after the interpreter, an argument")
+
     def test_every_bundled_python_c_says_dash_p(self):
         """-m goes through the wrapper's PYTHONSAFEPATH; a -c says -P too
         (none is left since the port probe moved to onionpress.ports,

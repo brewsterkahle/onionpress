@@ -585,8 +585,10 @@
   refusals), `scrub` is `scrub.run_scrub`'s platform cycle (the Mac's
   reset in place: `tests/test_scrub_mac.py`), `validate-oh-address` is
   `onionheaven.validate_hub_address` (`tests/test_validate_oh_address.py`),
-  `help` is `cli.launcher_help` (`tests/test_launcher_help.py`). What
-  stays bash: the Colima bootstrap, the Linux systemd/rootless and
+  `help` is `cli.launcher_help` (`tests/test_launcher_help.py`),
+  `stop_containers` is `onionpress stop-containers`
+  (`ContainerManager.stop`, the farm with it;
+  `tests/test_stop_containers.py`). What stays bash: the Colima bootstrap, the Linux systemd/rootless and
   install-state functions (`ONIONPRESS_BIND_HOST`), `config_value`,
   `start_cloudflare_tunnel`, `read_backup_password`, the daemon's and
   `start`'s pid lock and wait.
@@ -724,8 +726,8 @@
   exception: the Linux system-Docker egress helper, held to its shape).
   Write compose lists block style. Change a set only after a live test.
 - One-shot helpers: `--network none`, entrypoint overridden, sources
-  mounted read-only, the **pinned** tor image (`KEY_HELPER_IMAGE`,
-  `ensure_tor_image`), never a floating tag. Never `docker run -v` a volume
+  mounted read-only, the **pinned** tor image (`containers.tor_image`,
+  `ensure_tor_image`; the launchers run no helper), never a floating tag. Never `docker run -v` a volume
   that may not exist (it creates an empty one that passes for a key).
 - Never make a non-root process call su or sudo in the images; nothing uses
   raw sockets.
@@ -1245,8 +1247,9 @@
   launchers): with a token and an installed WordPress, last in a start
   (after provisioning and the bundled plugins) and at the end of every
   setup path (no restart needed); otherwise the container is removed.
-  Stops always name the override file. Ingress must be
-  `http://wordpress:80`. `tests/test_cloudflare_tunnel.py`.
+  Stops always name the override file, token or not
+  (`ContainerManager.stop`, `tests/test_stop_containers.py`). Ingress must
+  be `http://wordpress:80`. `tests/test_cloudflare_tunnel.py`.
 
 ## Colima Networking Gotcha
 - **SOCKS (9050) does not work through Colima port forwarding.** For any Tor

@@ -718,61 +718,21 @@ class TestOnionHomeOwnAddress(unittest.TestCase):
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 
 
-def _bash_function(text, name):
-    start = text.index(f"\n{name}() {{")
-    end = text.index("\n}\n", start)
-    return text[start:end + 3]
-
-
-def _bash(script, *args, env=None):
-    return subprocess.run(["bash", "-c", script, "bash", *args],
-                          capture_output=True, text=True, timeout=10,
-                          env={**os.environ, "LC_ALL": "en_US.UTF-8", **(env or {})})
-
-
 class TestLaunchers(unittest.TestCase):
 
-    def _functions(self, rel, *names):
-        text = _read(rel)
-        return "".join(_bash_function(text, n) for n in names)
-
-    def test_vanity_key_dir_is_identical_in_both_launchers(self):
-        bodies = [_bash_function(_read(p), "vanity_key_dir") for p in LAUNCHERS]
-        self.assertEqual(bodies[0], bodies[1])
-
-    def test_vanity_key_dir_takes_only_a_whole_address(self):
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        keys = os.path.join(tmp, "shared", "vanity-keys")
-        os.makedirs(os.path.join(keys, "aaa.onion"))
-        os.makedirs(os.path.join(keys, "a,source=" + tmp + ",.onion"))
-        os.makedirs(os.path.join(tmp, "elsewhere"))
-        os.symlink(os.path.join(tmp, "elsewhere"),
-                   os.path.join(keys, "b" * 56 + ".onion"))
+    def test_no_bash_address_rule_or_key_dir_is_left(self):
+        # vanity_key_dir and is_onion_address (its only user) had no caller
+        # left; key_manager.is_valid_onion_address is the rule, and the key
+        # folder is key_import's (current_vanity_address).
         for rel in LAUNCHERS:
-            fns = self._functions(rel, "is_onion_address", "vanity_key_dir")
-            r = _bash(fns + 'DATA_DIR="$1"; vanity_key_dir', tmp)
-            self.assertEqual((r.returncode, r.stdout), (1, ""), rel)
-            os.makedirs(os.path.join(keys, SITE), exist_ok=True)
-            r = _bash(fns + 'DATA_DIR="$1"; vanity_key_dir', tmp)
-            self.assertEqual((r.returncode, r.stdout.strip()),
-                             (0, os.path.join(keys, SITE)), rel)
-            shutil.rmtree(os.path.join(keys, SITE))
+            text = _read(rel)
+            with self.subTest(launcher=rel):
+                self.assertNotRegex(text, r"\b(vanity_key_dir|is_onion_address)\b")
 
     def test_no_launcher_picks_a_key_dir_by_suffix(self):
         for rel in LAUNCHERS:
             self.assertNotIn('find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion"',
                              _read(rel), rel)
-
-    def _with_fake_docker(self, rel, fn, content):
-        fns = self._functions(rel, "is_onion_address", fn)
-        script = ('docker() { printf "%s" "$FAKE_HOSTNAME"; }\n'
-                  'DOCKER_DIR="$1"; DATA_DIR="$1"\n' + fns + fn + "\n")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        r = _bash(script, tmp, env={"FAKE_HOSTNAME": content})
-        cache = os.path.join(tmp, "healthcheck-address")
-        return r, (open(cache).read() if os.path.exists(cache) else None)
 
     def test_no_bash_reader_of_the_site_address_is_left(self):
         # get_onion_address had no callers; the readers are Python's

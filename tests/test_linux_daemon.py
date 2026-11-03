@@ -646,11 +646,11 @@ class TestLauncher(unittest.TestCase):
         self.assertLess(update.index("daemon stop --no-offline"), update.index("stop_containers"))
         self.assertLess(update.index("start_containers"), update.index("start_daemon"))
 
-    def test_the_release_function_is_the_macs(self):
-        linux = _bash_function(self.launcher, "onionheaven_release")
-        mac = _bash_function(_read("app/MacOS/onionpress"), "onionheaven_release")
-        norm = lambda t: _code(t).replace("op_py ", "bundled_python -m onionpress.cli ")
-        self.assertEqual(norm(linux), norm(mac))
+    def test_no_release_function_is_left(self):
+        # The hub release is the CLI's on both platforms (release_onionheaven;
+        # tests/test_onionheaven_lifecycle.py): no bash copy to keep equal.
+        for text in (self.launcher, _read("app/MacOS/onionpress")):
+            self.assertNotIn("onionheaven_release", text)
 
     def test_handle_action_still_marks_its_cgroup(self):
         # The daemon's unit ends with the daemon (an update restarts it):
