@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
@@ -170,6 +171,54 @@ class TestTrayReadsTheDaemonsState(unittest.TestCase):
         icon = self.tray[self.tray.index("    def _update_icon("):]
         icon = icon[:icon.index("\n    def ", 10)]
         self.assertIn("ICONS.get(view.icon, ICON_STOPPED)", icon)
+
+
+class TestTrayLogIsRedacted(unittest.TestCase):
+    """tray.log gets the menubar's RotatingLog redaction: the home folder
+    is "~" as each line is written, and a rolled file goes through
+    redact.make_scrub_fn before it is kept (tokens, credentials)."""
+
+    def setUp(self):
+        tray = _read(TRAY)
+        self.block = tray[tray.index("_HOME = os.path.expanduser"):tray.index("os.makedirs(DATA_DIR")]
+        self.tray = tray
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.dir, True))
+
+    def _ns(self, home):
+        import logging
+        from onionpress import redact
+        ns = {"os": os, "logging": logging, "redact": redact, "DATA_DIR": self.dir}
+        with unittest.mock.patch.dict(os.environ, {"HOME": home}):
+            exec(self.block, ns)
+        return ns
+
+    def test_the_handler_is_wired(self):
+        self.assertIn("from onionpress import redact  # noqa: E402", self.tray)
+        self.assertIn("_log_handler.rotator = _rotate_scrubbed", self.tray)
+        self.assertIn("logger.addFilter(_HomeAsTilde())", self.tray)
+
+    def test_a_rolled_file_is_scrubbed_and_private(self):
+        ns = self._ns("/home/someone")
+        src = os.path.join(self.dir, "tray.log")
+        with open(src, "w") as f:
+            f.write("open http://x/?token=abc123secret\nCLOUDFLARE_TUNNEL_TOKEN=eyJabcdefghijklmnopq\n")
+        dest = src + ".1"
+        ns["_rotate_scrubbed"](src, dest)
+        self.assertFalse(os.path.exists(src))
+        with open(dest) as f:
+            text = f.read()
+        self.assertNotIn("abc123secret", text)
+        self.assertNotIn("eyJabcdefghijklmnopq", text)
+        self.assertEqual(os.stat(dest).st_mode & 0o777, 0o600)
+
+    def test_the_home_folder_is_a_tilde(self):
+        import logging
+        ns = self._ns("/home/someone")
+        record = logging.LogRecord("t", logging.INFO, __file__, 1,
+                                   "reading %s", ("/home/someone/.onionpress/config",), None)
+        self.assertTrue(ns["_HomeAsTilde"]().filter(record))
+        self.assertEqual(record.getMessage(), "reading ~/.onionpress/config")
 
 
 class TestLinuxLauncherBackupCheck(unittest.TestCase):

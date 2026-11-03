@@ -67,6 +67,7 @@ from gi.repository import Gtk, GLib, AyatanaAppIndicator3 as AppIndicator, Notif
 # a tray without it is a broken install, not a degraded mode.
 from onionpress import config as _op_config  # noqa: E402
 from onionpress import daemon_client  # noqa: E402
+from onionpress import redact  # noqa: E402
 from onionpress import setup_logic as _setup_logic  # noqa: E402  (names and titles only)
 from onionpress import ui_client  # noqa: E402
 
@@ -120,16 +121,49 @@ ICONS = {"running": ICON_RUNNING, "starting": ICON_STARTING, "stopped": ICON_STO
 
 # ─── Logging ────────────────────────────────────────────────────────────
 
-os.makedirs(DATA_DIR, exist_ok=True)
+# The menubar's RotatingLog redaction (log_rotation, redact): the home
+# folder is "~" in every line as it is written, and a rolled file is
+# scrubbed (redact.make_scrub_fn: tokens, credentials) before it is kept.
+_HOME = os.path.expanduser("~")
+_scrub_rolled = redact.make_scrub_fn(DATA_DIR, scrub_ips=False)
+
+
+class _HomeAsTilde(logging.Filter):
+    def filter(self, record):
+        if _HOME and _HOME != os.sep:
+            record.msg = record.getMessage().replace(_HOME, "~")
+            record.args = None
+        return True
+
+
+def _rotate_scrubbed(source: str, dest: str) -> None:
+    """RotatingFileHandler's rotator: *source* scrubbed into *dest*
+    (0600). Fail-open as RotatingLog is: a scrubbing bug never costs the
+    log history."""
+    with open(source, "rb") as f:
+        raw = f.read()
+    try:
+        raw = _scrub_rolled(raw)
+    except Exception:
+        pass
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+    os.remove(source)
+
+
+os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
 _log_handler = logging.handlers.RotatingFileHandler(
     TRAY_LOG, maxBytes=5 * 1024 * 1024, backupCount=3
 )
+_log_handler.rotator = _rotate_scrubbed
 _log_handler.setFormatter(logging.Formatter(
     "%(asctime)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 ))
 logger = logging.getLogger("onionpress-tray")
 logger.setLevel(logging.INFO)
+logger.addFilter(_HomeAsTilde())
 logger.addHandler(_log_handler)
 logger.addHandler(logging.StreamHandler())
 
