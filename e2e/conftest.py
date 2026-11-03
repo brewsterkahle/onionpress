@@ -10,6 +10,10 @@
   run on is reported skipped with the reason.
 - Modules marked `incremental` are one scenario per node: after a step
   fails, the rest of that module is skipped on that platform.
+- `ready_node` is the node as T0 leaves it (installed, started, set up:
+  harness.scenario.ensure_ready), for tiers after T0, whether or not T0
+  ran in the same session. If getting it there fails, the first test that
+  asked says why and every later one on that node is skipped.
 - Every outcome goes into the run's report; pytest_sessionfinish collects
   evidence, runs the tripwire, tears the nodes down and writes
   report.md + results.json.
@@ -22,7 +26,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from harness import safety  # noqa: E402
+from harness import safety, scenario  # noqa: E402
 from harness.platforms import DEFAULT_LINUX_GUEST, LINUX_GUESTS, PLATFORMS, canonical_platform  # noqa: E402
 from harness.report import Outcome  # noqa: E402
 from harness.session import Options, Session  # noqa: E402
@@ -129,6 +133,18 @@ def e2e(request):
 def node(request):
     session = _session(request.config)
     return session.nodes[request.param]
+
+
+@pytest.fixture
+def ready_node(node, e2e):
+    failed = getattr(node, "ready_failed", "")
+    if failed:
+        pytest.skip(f"{node.name} could not be made ready: {failed}")
+    try:
+        return scenario.ensure_ready(e2e, node)
+    except Exception as e:
+        node.ready_failed = (str(e).splitlines() or [type(e).__name__])[0][:300]
+        raise
 
 
 def _test_id(item):

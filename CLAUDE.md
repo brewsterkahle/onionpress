@@ -275,6 +275,13 @@
 - **A new `onionpress` subcommand needs a row in `tests/test_cli_dispatch.py`**
   (the census fails otherwise; grouping commands go in `PARENTS`), and its
   handler a case in `tests/test_cli_commands.py` / `test_cli_edges.py`.
+- **e2e tiers after T0 start from `ready_node`** (`e2e/harness/scenario.
+  ensure_ready`: install, start, setup, each only if T0 has not), live in
+  `e2e/test_t<N>_<letter>_*.py` (run.sh's glob, name order: read-only
+  modules first), and keep their logic in `e2e/harness/` where the unit
+  suite reaches it; T1 (a)'s capability check imports
+  `tests/test_container_capabilities.py`'s census, never a copy.
+  `ScenarioTest` / `HardeningTest` in `tests/test_e2e_harness.py`.
 - The e2e suite's platforms are OS families, `macos` and `linux`
   (`e2e/harness/platforms.py`); the distro is a node fact. Linux-host gates
   use `HostFacts.debian_based` (`ID` or `ID_LIKE`), never `distro ==
