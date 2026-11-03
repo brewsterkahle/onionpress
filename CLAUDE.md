@@ -338,8 +338,18 @@
   (`tests/test_settings_page_nonces.py`, a census).
 - Page Stop/Restart go through the launcher's cases (Linux asks the
   daemon for `/offline` first). `tests/test_linux_settings_page_stop.py`. Share Now is
-  taken by the long-running process and refused while sharing is off.
-  `tests/test_settings_page_share_now.py`.
+  handle-action's `upload-analytics` (`analytics_sharing.request_upload`'s
+  data-dir marker, refused while sharing is off; nothing in the volume, no
+  per-cycle `docker exec`). `tests/test_settings_page_share_now.py`.
+- **The page does none of the host's work** (#528): its release line is
+  `status.json`'s `release` (`status_writer.release_status`, the cache of
+  `handle_action.check_release`; its button is the `update` action), never
+  a request of its own; `config-current.json` has one writer, the status
+  writer (the form shows unapplied `config-updates.json` on top); the
+  status page writes no `requested-action`. Every PHP copy of a host
+  constant (fields, token pattern, restart keys, result files, actions,
+  request id, the onion shape) is held to its source.
+  `tests/test_settings_page_host_constants.py`.
 - **`onionpress config get|set|unset|list` is the apps' one writer of
   `~/.onionpress/config`** (`config.CLI_CONFIG_KEYS`). A new setting gets
   its `config set` entry first (check, `CONFIG_KEY_HELP`, `NEEDS_RESTART` /

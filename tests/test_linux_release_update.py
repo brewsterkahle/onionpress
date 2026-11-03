@@ -731,17 +731,15 @@ class TestSettingsPageOnlyChecks(unittest.TestCase):
         self.assertIn("run `onionpress update` on this machine", handle_action.LINUX_UPDATE_AVAILABLE_MSG)
         self.assertNotIn("settings-page-update-check", _read(LINUX))
 
-    def test_the_page_says_so_on_linux(self):
+    def test_the_page_says_so_on_both_platforms(self):
+        # Issue #528: the page's update is a check on both platforms, its
+        # release line the host's answer (status.json's "release").
         php = _read("app/Resources/plugins/onionpress-settings.php")
-        self.assertIn("$update_checks_only = is_array( $status_now ) && isset( $status_now['platform'] )",
-                      php)
-        self.assertIn("'update' => $update_checks_only ? 'Checking for a new release of' : 'Updating'",
-                      php)
-        self.assertIn("var updateChecksOnly = <?php echo ( 'linux' === $current_platform )", php)
-        linux = php[php.index("if (data.update && data.latest && updateChecksOnly) {"):]
-        linux = linux[:linux.index("} else if (data.update && data.latest) {")]
-        self.assertIn("<code>onionpress update</code> on this machine", linux)
-        self.assertNotIn("Update Now", linux)
+        self.assertIn("'update' => 'Checking for a new release of',", php)
+        self.assertNotIn("update_checks_only", php)
+        self.assertNotIn("updateChecksOnly", php)
+        self.assertNotIn("Update Now", php)
+        self.assertNotIn("'update';", php[php.index("$downtime_actions"):][:300])
 
 
 if __name__ == "__main__":

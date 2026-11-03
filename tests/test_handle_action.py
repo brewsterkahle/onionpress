@@ -281,7 +281,7 @@ class TestQuietTick(_Case):
     def test_every_verb_is_known(self):
         self.assertEqual(ha.ACTIONS, ("start", "restart", "stop", "check-reachability",
                                       "import-key-file", "create-backup", "restore-backup",
-                                      "refresh-status", "update"))
+                                      "refresh-status", "update", "upload-analytics"))
 
 
 class TestStartStop(_Case):
@@ -1008,6 +1008,71 @@ class TestApplyConfig(_Case):
             result = ha.handle(self.host("macos"))
         self.assertEqual(result, {"handled": "check-reachability", "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
         self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "yes")
+
+
+class TestUploadAnalytics(_Case):
+    """Share Now (issue #528): a handle-action verb over
+    analytics_sharing.request_upload, the data dir's marker the daemon
+    takes; nothing in the volume."""
+
+    def config(self, text):
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write(text)
+
+    def marker(self):
+        return os.path.exists(os.path.join(self.data_dir, ".upload-analytics"))
+
+    def test_sharing_off_is_said_and_nothing_requested(self):
+        self.config("SHARE_ANALYTICS_WITH_ONIONHOME=no\n")
+        self.docker.put("request-id", "R1\n")
+        self.request("upload-analytics")
+        ha.handle(self.host("linux"))
+        res = self.docker.result("analytics-result.json")
+        self.assertEqual((res["success"], res["error"], res["request_id"]),
+                         (False, ha.SHARING_OFF_PAGE_MSG, "R1"))
+        self.assertFalse(self.marker())
+        self.assertEqual(self.argvs(), [])
+
+    def test_requested_leaves_the_marker(self):
+        self.config("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+        self.request("upload-analytics")
+        with mock.patch("onionpress.analytics_sharing.daemon_running", return_value=True):
+            ha.handle(self.host("macos"))
+        res = self.docker.result("analytics-result.json")
+        self.assertTrue(res["success"])
+        self.assertIn("Upload queued", res["message"])
+        self.assertTrue(self.marker())
+
+    def test_no_daemon_is_a_failure(self):
+        self.config("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+        self.request("upload-analytics")
+        with mock.patch("onionpress.analytics_sharing.daemon_running", return_value=False):
+            ha.handle(self.host("linux"))
+        res = self.docker.result("analytics-result.json")
+        self.assertFalse(res["success"])
+        self.assertIn("not running", res["error"])
+        self.assertFalse(self.marker())
+
+    def test_throttled_like_the_others(self):
+        self.assertEqual(ha.RESULT_FILES["upload-analytics"], "analytics-result.json")
+        self.assertIn("upload-analytics", ha.MIN_INTERVAL)
+
+
+class TestCheckRelease(_Case):
+    """check_release keeps the answer the status writer shows the page
+    (status.json's "release", issue #528)."""
+
+    def test_the_answer_is_kept_for_the_status_writer(self):
+        from onionpress import status_writer
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": True, "current": "2.6.1", "latest": "2.6.2",
+             "installable": True}) + "\n"}})
+        result = ha.check_release(self.host("linux"))
+        self.assertTrue(result["update_available"])
+        release = status_writer.release_status(self.data_dir)
+        self.assertEqual((release["latest"], release["update_available"]), ("2.6.2", True))
+        self.assertEqual(self.docker.result("update-result.json"), None,
+                         "the check alone answers no request")
 
 
 class TestTunnelToken(_Case):

@@ -68,7 +68,8 @@ REQUEST_ID_FILE = "request-id"
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 ACTIONS = ("start", "restart", "stop", "check-reachability", "import-key-file",
-           "create-backup", "restore-backup", "refresh-status", "update")
+           "create-backup", "restore-backup", "refresh-status", "update",
+           "upload-analytics")
 
 # The most bytes read from a request file (issue #396): `head -c` in the
 # container, and a file over its limit is dropped, never truncated into
@@ -86,7 +87,8 @@ READ_LIMITS = {REQUEST_FILE: 256, REQUEST_ID_FILE: 256,
 # daemon rewrites status.json after every handled action anyway.
 MIN_INTERVAL = {"start": 60, "restart": 60, "stop": 60,
                 "create-backup": 60, "restore-backup": 60, "import-key-file": 60,
-                "update": 60, "check-reachability": 30, "refresh-status": 0}
+                "update": 60, "check-reachability": 30, "refresh-status": 0,
+                "upload-analytics": 60}
 THROTTLE_FILE = ".handle-action-times.json"
 
 # Each action's result file for the page (what its poll reads). Removed
@@ -99,6 +101,7 @@ RESULT_FILES = {
     "create-backup": "backup-result.json",
     "restore-backup": "restore-result.json",
     "update": "update-result.json",
+    "upload-analytics": "analytics-result.json",
 }
 
 PENDING_DIR = "pending-action"
@@ -419,6 +422,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
         "restore-backup": lambda: _restore_backup(host, confirmed),
         "refresh-status": lambda: _refresh_status(host),
         "update": lambda: _update(host),
+        "upload-analytics": lambda: _upload_analytics(host),
     }
     fn = handlers[action]
     try:
@@ -539,6 +543,39 @@ def _stop(host):
         "success": r.returncode == 0, "action": "stop",
         "message": "OnionPress stopped" if r.returncode == 0 else "stop failed; see the OnionPress log",
         "completed_at": now_iso()})
+
+
+# The page's wording when sharing is off (the CLI's names the command).
+SHARING_OFF_PAGE_MSG = (
+    "Log sharing is off, so nothing is uploaded. Set \"Share diagnostic logs "
+    "with OnionHome\" to Enabled, save the settings, then Share Now.")
+
+
+def _upload_analytics(host):
+    """Share Now (issue #528): analytics_sharing.request_upload, what
+    `onionpress upload-analytics` runs, leaves the data dir's marker the
+    daemon takes within a cycle; nothing while sharing is off. Until
+    #528 the page touched a file in the volume that the daemon looked
+    for with a `docker exec` every cycle."""
+    import io
+    from . import analytics_sharing
+    if not analytics_sharing.sharing_enabled(host.paths.config_file):
+        host.log("Settings page: Share Now refused: log sharing is off")
+        host.write_result("analytics-result.json", {
+            "success": False, "error": SHARING_OFF_PAGE_MSG, "completed_at": now_iso()})
+        return
+    out = io.StringIO()
+    rc = analytics_sharing.request_upload(host.paths, host.os_name, out=out)
+    said = out.getvalue().strip()
+    host.log(f"Settings page: Share Now: {said}")
+    if rc == 0:
+        result = {"success": True, "completed_at": now_iso(),
+                  "message": "Upload queued: it runs within a minute, or as soon as "
+                             "the site is online."}
+    else:
+        result = {"success": False, "error": said or "the upload was not requested",
+                  "completed_at": now_iso()}
+    host.write_result("analytics-result.json", result)
 
 
 def _refresh_status(host):
@@ -847,20 +884,26 @@ def _update(host):
     """Report only, on both platforms: anything running in WordPress can
     write requested-action, so this never installs anything. The page
     learns whether a release is newer than the installed one and how to
-    install it: `onionpress update --check --json` (cli.cmd_update, the
-    one updater of both platforms), its answer kept five minutes
-    (_cached_update_check) and written to update-result.json with the
+    install it (check_release), written to update-result.json with the
     request's id. Installing is the menubar's Check for Updates... on a
     Mac, which asks the person at the Mac, or `onionpress update` at a
     terminal on either platform. Through 2.5.6 the Mac ran `update --yes`
     here: an unattended download and install of the latest release on
     the page's say-so; through 2.6.1 Linux had a bash twin of this."""
     host.log("Settings page: update check requested")
+    host.write_result("update-result.json", check_release(host))
+
+
+def check_release(host):
+    """The release check's answer: `onionpress update --check --json`
+    (cli.cmd_update, the one updater of both platforms), kept five
+    minutes in UPDATE_CHECK_CACHE (_cached_update_check). That file is
+    also what the status writer shows the page as status.json's
+    "release" (issue #528: the page makes no GitHub request of its own)."""
     result = _cached_update_check(host)
     if result is not None:
         host.log("Settings page update check: answered with the one from the last 5 minutes")
-        host.write_result("update-result.json", result)
-        return
+        return result
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
     if r.returncode != 0 or ans.get("error") or "update_available" not in ans:
@@ -889,7 +932,7 @@ def _update(host):
             "success": True, "update_available": available, "installable": installable,
             "message": message, "current": current, "latest": latest, "checked_at": now_iso()}
     _cache_update_check(host, result)
-    host.write_result("update-result.json", result)
+    return result
 
 
 # ---------------------------------------------------------------------------

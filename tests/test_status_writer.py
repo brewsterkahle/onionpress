@@ -391,7 +391,7 @@ class TestWrite(_Sandbox):
         mac_fields = {"state", "version", "onion_address", "onionname", "tor_impl", "uptime_seconds",
                       "bootstrap_pct", "onion_reachable", "onion_http_code", "containers",
                       "updated_at", "platform", "load_avg", "host_uptime_seconds", "onionheaven",
-                      "config"}
+                      "config", "release"}
         linux_fields = {"wayback_queue_count", "wp_installed", "onboarded", "mkp224o_available",
                         "wp_admin_password_path", "vanity_in_progress", "serving_from_wayback",
                         "wp_port"}
@@ -578,6 +578,43 @@ class TestWrite(_Sandbox):
 # ---------------------------------------------------------------------------
 # One writer: the wiring
 # ---------------------------------------------------------------------------
+
+class TestReleaseStatus(unittest.TestCase):
+    """status.json's "release" (issue #528): the host's last release
+    check for the Settings page, its fields only, scrubbed, never a link."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="op-release-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, sw.RELEASE_CACHE)
+
+    def put(self, doc):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(doc if isinstance(doc, str) else json.dumps(doc))
+
+    def test_none_without_a_check(self):
+        self.assertIsNone(sw.release_status(self.dir))
+        self.put("not json")
+        self.assertIsNone(sw.release_status(self.dir))
+        self.put([1, 2])
+        self.assertIsNone(sw.release_status(self.dir))
+
+    def test_the_fields_only_scrubbed(self):
+        self.put({"success": False, "latest": None, "update_available": False,
+                  "error": "Could not check for updates: /Users/someone/.onionpress/x failed",
+                  "extra": "dropped", "current": {"nested": 1}})
+        release = sw.release_status(self.dir)
+        self.assertNotIn("extra", release)
+        self.assertNotIn("current", release)
+        self.assertNotIn("someone", release["error"])
+
+    def test_a_link_is_not_followed(self):
+        other = os.path.join(self.dir, "other.json")
+        with open(other, "w") as f:
+            json.dump({"success": True, "latest": "9.9.9"}, f)
+        os.symlink(other, self.path)
+        self.assertIsNone(sw.release_status(self.dir))
+
 
 class TestWiring(unittest.TestCase):
 
