@@ -527,7 +527,10 @@ run_setup() {
             *) args+=("$1"); shift ;;
         esac
     done
-    ONIONPRESS_SETUP_PASSWORD="$setup_pass" ONIONPRESS_IA_PASSWORD="$ia_pass" \
+    # A UI hands the passwords over in the environment itself (issue #527):
+    # kept unless `--pass` / `--ia-password` were given.
+    ONIONPRESS_SETUP_PASSWORD="${setup_pass:-${ONIONPRESS_SETUP_PASSWORD:-}}" \
+        ONIONPRESS_IA_PASSWORD="${ia_pass:-${ONIONPRESS_IA_PASSWORD:-}}" \
         ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
         op_py --data-dir "$DATA_DIR" setup --launcher "$INSTALL_DIR/onionpress" "${args[@]}"
 }
@@ -1213,8 +1216,9 @@ main() {
             run_setup "$@" || setup_rc=$?
             case "$setup_rc" in
                 0)
-                    # The site is set up: the tunnel, if there is a token.
-                    start_cloudflare_tunnel true
+                    # The site is set up: the tunnel, if there is a token
+                    # (its lines on stderr, after `setup --json`'s answer).
+                    start_cloudflare_tunnel true >&2
                     ;;
                 2) exit 0 ;;
                 10)
@@ -1224,34 +1228,24 @@ main() {
                     ;;
                 *) exit 1 ;;
             esac
-            echo ""
-            echo "  Setup complete! Your site is now running."
-            echo "  Admin panel: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/wp-admin"
-            echo "  Status page: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status"
+            # On stderr: `setup --json`'s answer stays the last line of stdout.
+            echo "" >&2
+            echo "  Setup complete! Your site is now running." >&2
+            echo "  Admin panel: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/wp-admin" >&2
+            echo "  Status page: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status" >&2
             ;;
 
         provision)
-            # Provision an already-installed WordPress with user-chosen
-            # site title, username, and password.  Used in headless / SSH
-            # installs after the auto-install bootstrap (systemd path where
-            # the container auto-installs WP with a random admin password).
-            # Unlike `setup`, this works when WP is already installed.
-            #
-            # Usage: onionpress provision [--adopt-existing]
-            #   → interactive terminal prompts
+            # Provision a WordPress the start installed (headless / SSH
+            # installs where the container auto-installed it): `onionpress
+            # provision` (setup_logic, issue #527): asked at the terminal,
+            # or --user/--title/--language with the password in
+            # ONIONPRESS_SETUP_PASSWORD (the tray's way); --json for a UI.
             # An installed WordPress is adopted only when OnionPress
             # installed it (the .wordpress-installed-by-onionpress marker),
             # else refused: whoever reached wp-admin/install.php first
             # chose its admin (issue #464). --adopt-existing keeps it anyway.
-            PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -I -B -c "
-import sys
-sys.path[:0] = sys.argv.pop(1).split(':')
-from onionpress.docker import Docker
-from onionpress.platform import resolve_paths
-from onionpress.setup_logic import provision_interactive
-sys.exit(0 if provision_interactive(docker=Docker(resolve_paths(data_dir=sys.argv.pop(1))),
-                                    adopt_existing='--adopt-existing' in sys.argv[1:]) else 1)
-" "$ONIONPRESS_PYTHONPATH" "$DATA_DIR" "${@:2}"
+            op_py --data-dir "$DATA_DIR" provision "${@:2}"
             ;;
 
         provision-post-install)

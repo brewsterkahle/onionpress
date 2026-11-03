@@ -110,11 +110,12 @@ class TestTheLiterals(unittest.TestCase):
         start = text.index("\n        provision)\n")
         end = text.index("\n            ;;\n", start)
         case = text[start:end]
-        # Through the one docker runner (issue #477), built for this install.
-        self.assertIn("provision_interactive(docker=Docker(resolve_paths(data_dir=sys.argv.pop(1))),", case)
-        self.assertIn("adopt_existing='--adopt-existing' in sys.argv[1:])", case)
-        self.assertIn('"$ONIONPRESS_PYTHONPATH" "$DATA_DIR" "${@:2}"', case)
+        # `onionpress provision` (issue #527), its flags passed on whole.
+        self.assertIn('op_py --data-dir "$DATA_DIR" provision "${@:2}"', case)
         self.assertIn("--adopt-existing", setup_logic.FOREIGN_INSTALL_MSG)
+        from onionpress import cli
+        args = cli.build_parser()[0].parse_args(["provision", "--adopt-existing"])
+        self.assertTrue(args.adopt_existing)
 
 
 class TestPythonSide(unittest.TestCase):

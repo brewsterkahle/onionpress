@@ -311,32 +311,64 @@ class TestOpen(Sandbox):
         with mock.patch.object(app_commands.launcher_ops, "login_target",
                                return_value="file:///home/x/OnionPress/.auto-login/login-1.html") as lt, \
                 mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
+            rc = app_commands.open_command("site", self.paths, with_address(), out=self.out)
+        self.assertEqual(rc, 0)
+        lt.assert_called_once_with("http://localhost:18080/", docker=mock.ANY)
+        ob.assert_called_once_with("file:///home/x/OnionPress/.auto-login/login-1.html")
+        self.assertEqual(self.out.getvalue(), "Opening http://localhost:18080/\n")
+
+    def test_the_onion_goes_to_open_onion(self):
+        with mock.patch.object(app_commands.launcher_ops, "open_onion",
+                               return_value={"ok": True, "browser": "Tor Browser"}) as oo:
             rc = app_commands.open_command("onion", self.paths, with_address(), out=self.out)
         self.assertEqual(rc, 0)
-        lt.assert_called_once_with(f"http://{ADDR}/", docker=mock.ANY)
-        ob.assert_called_once_with("file:///home/x/OnionPress/.auto-login/login-1.html",
-                                   prefer_tor=True)
+        oo.assert_called_once_with(f"http://{ADDR}/", docker=mock.ANY,
+                                   data_dir=self.paths.data_dir, say=mock.ANY)
         self.assertEqual(self.out.getvalue(), f"Opening http://{ADDR}/\n")
 
-    def test_onion_without_an_address_fails(self):
-        with mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
-            rc = app_commands.open_command("onion", self.paths, FakeDocker(), out=self.out)
-        self.assertEqual(rc, 1)
-        ob.assert_not_called()
-        self.assertIn("No onion address", self.err.getvalue())
+    def test_open_json_answers(self):
+        for answer, rc, text in (
+                ({"ok": True, "browser": "Tor Browser"}, 0, None),
+                ({"paste_url": f"http://{ADDR}/?op_login=T"}, 0, "paste this"),
+                ({"ok": True, "launching": True}, 0, "starting already"),
+                ({"error": "No Tor-capable browser found", "no_browser": True}, 1, None)):
+            with self.subTest(answer=answer):
+                with mock.patch.object(app_commands.launcher_ops, "open_onion",
+                                       return_value=answer):
+                    out = io.StringIO()
+                    self.assertEqual(app_commands.open_command(
+                        "onion", self.paths, with_address(), json_output=True, out=out), rc)
+                    self.assertEqual(json.loads(out.getvalue()),
+                                     {"url": f"http://{ADDR}/", **answer})
+                    out = io.StringIO()
+                    self.assertEqual(app_commands.open_command(
+                        "onion", self.paths, with_address(), out=out), rc)
+                    if text:
+                        self.assertIn(text, out.getvalue())
 
-    def test_mac_tor_browser_branch(self):
-        from onionpress import browser, launcher_ops
-        self.assertIn(browser.TOR_BROWSER_PATH, launcher_ops.TOR_BROWSER_APPS)
-        with mock.patch.object(launcher_ops.sys, "platform", "darwin"), \
-                mock.patch.object(launcher_ops, "_tor_browser_running", return_value=None), \
-                mock.patch.object(launcher_ops.shutil, "which", return_value=None), \
-                mock.patch.object(launcher_ops.os.path, "isdir",
-                                  side_effect=lambda p: p == browser.TOR_BROWSER_PATH), \
-                mock.patch.object(launcher_ops.subprocess, "Popen") as popen:
-            launcher_ops.open_in_browser("file:///x.html", prefer_tor=True)
-        self.assertEqual(popen.call_args.args[0],
-                         ["open", "-a", browser.TOR_BROWSER_PATH, "file:///x.html"])
+    def test_onion_without_an_address_fails(self):
+        with mock.patch.object(app_commands.launcher_ops, "open_onion") as oo:
+            rc = app_commands.open_command("onion", self.paths, FakeDocker(), out=self.out)
+            self.assertEqual(rc, 1)
+            out = io.StringIO()
+            self.assertEqual(app_commands.open_command("onion", self.paths, FakeDocker(),
+                                                       json_output=True, out=out), 1)
+        oo.assert_not_called()
+        self.assertIn("No onion address", self.err.getvalue())
+        self.assertIn("No onion address", json.loads(out.getvalue())["error"])
+
+    def test_the_default_browser_on_each_platform(self):
+        from onionpress import launcher_ops
+        for platform, argv in (("darwin", ["open", "http://x/"]),
+                               ("linux", ["xdg-open", "http://x/"])):
+            with self.subTest(platform), \
+                    mock.patch.object(launcher_ops.sys, "platform", platform), \
+                    mock.patch.object(launcher_ops.subprocess, "Popen") as popen:
+                launcher_ops.open_in_browser("http://x/")
+            self.assertEqual(popen.call_args.args[0], argv)
+        with mock.patch.object(launcher_ops.subprocess, "Popen", side_effect=OSError("no")), \
+                self.assertRaises(RuntimeError):
+            launcher_ops.open_in_browser("http://x/")
 
 
 class StubRegistrar:

@@ -505,7 +505,10 @@ run_setup() {
             *) args+=("$1"); shift ;;
         esac
     done
-    ONIONPRESS_SETUP_PASSWORD="$setup_pass" ONIONPRESS_IA_PASSWORD="$ia_pass" \
+    # A UI hands the passwords over in the environment itself (issue #527):
+    # kept unless `--pass` / `--ia-password` were given.
+    ONIONPRESS_SETUP_PASSWORD="${setup_pass:-${ONIONPRESS_SETUP_PASSWORD:-}}" \
+        ONIONPRESS_IA_PASSWORD="${ia_pass:-${ONIONPRESS_IA_PASSWORD:-}}" \
         ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
         bundled_python -m onionpress.cli --data-dir "$DATA_DIR" setup --launcher "$SCRIPT_DIR/onionpress" "${args[@]}"
 }
@@ -1579,8 +1582,9 @@ main() {
             run_setup "$@" || setup_rc=$?
             case "$setup_rc" in
                 0)
-                    # The site is set up: the tunnel, if there is a token.
-                    start_cloudflare_tunnel true
+                    # The site is set up: the tunnel, if there is a token
+                    # (its lines on stderr, after `setup --json`'s answer).
+                    start_cloudflare_tunnel true >&2
                     ;;
                 2) exit 0 ;;
                 10)
@@ -1590,9 +1594,10 @@ main() {
                     ;;
                 *) exit 1 ;;
             esac
-            echo ""
-            echo "  Setup complete! Your site is now running."
-            echo "  Admin panel: http://localhost:${ONIONPRESS_WP_PORT}/wp-admin"
+            # On stderr: `setup --json`'s answer stays the last line of stdout.
+            echo "" >&2
+            echo "  Setup complete! Your site is now running." >&2
+            echo "  Admin panel: http://localhost:${ONIONPRESS_WP_PORT}/wp-admin" >&2
             ;;
 
         backup)

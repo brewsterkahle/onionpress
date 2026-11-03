@@ -712,23 +712,15 @@ class TestLinuxWaitThenOpenUsesWrapper(unittest.TestCase):
     """
 
     def test_wait_then_open_prefers_start_tor_browser_wrapper(self):
-        src = _read("linux/onionpress-tray")
-        # Carve the _wait_then_open function body so we don't accidentally
-        # match an unrelated `firefox.real` reference elsewhere in the file.
-        m = re.search(
-            r'def\s+_wait_then_open\(\)[^\n]*:(.*?)(?=\n\s{0,8}def\s+\w|\Z)',
-            src, re.DOTALL)
-        self.assertIsNotNone(
-            m, "_wait_then_open helper must exist in linux/onionpress-tray")
-        body = m.group(1)
-        # Wrapper path must be referenced.
-        self.assertRegex(
-            body, r'start-tor-browser',
-            "_wait_then_open must launch the URL via the start-tor-browser "
-            "wrapper. Spawning firefox.real with -new-tab directly hits "
-            "the profile lock and pops Tor Browser's native 'already "
-            "running' dialog instead of opening the URL in a new tab.",
-        )
+        # The cold launch's wait is launcher_ops.open_onion's since issue
+        # #527 (`onionpress open onion`, the tray's and the menubar's).
+        import inspect
+        from onionpress import launcher_ops
+        body = inspect.getsource(launcher_ops._new_tab_argv)
+        self.assertIn('"start-tor-browser"', body)
+        self.assertLess(body.index("[wrapper,"), body.index("[firefox_real,"))
+        self.assertIn("_new_tab_argv(running,", inspect.getsource(launcher_ops._open_onion_linux))
+        self.assertNotIn("_wait_then_open", _read("linux/onionpress-tray"))
 
 
 class TestLinuxOnionAddressSharedToWp(unittest.TestCase):

@@ -1859,12 +1859,16 @@ def _add_open(sub, name):
              "admin (wp-admin), settings (the OnionPress Settings page) or onion "
              "(the .onion address, in Tor Browser where it is installed)")
     p.add_argument("what", choices=("site", "admin", "settings", "onion"))
+    p.add_argument("--json", action="store_true",
+                   help="The answer as one JSON object (ok and browser; paste_url when "
+                        "Tor Browser runs and takes no new tab; error and no_browser)")
 
 
 def _run_open(run):
     from . import app_commands
     paths, _log, docker, _os_name = _app_setup(run)
-    return app_commands.open_command(run.args.what, paths, docker, out=sys.stdout)
+    return app_commands.open_command(run.args.what, paths, docker,
+                                     json_output=run.args.json, out=sys.stdout)
 
 
 def _add_onionname(sub, name):
@@ -1880,6 +1884,9 @@ def _add_onionname(sub, name):
                     "while the site is running, recorded in the config; a taken "
                     "name is refused with suggestions (exit 2)")
     p_set.add_argument("name", metavar="NAME")
+    p_set.add_argument("--rename-admin", action="store_true",
+                       help="Rename the WordPress admin whose login is the current "
+                            "onionname to NAME (after a collision)")
     p_set.add_argument("--json", action="store_true", help="As JSON")
 
 
@@ -1895,7 +1902,8 @@ def _run_onionname(run):
     # plain `docker`), so the docker environment _hub_context sets up.
     _hub_context(args.data_dir, log)
     return app_commands.onionname_set(args.name, paths, docker, os_name, log,
-                                      json_output=args.json, out=sys.stdout)
+                                      json_output=args.json, out=sys.stdout,
+                                      rename_admin=args.rename_admin)
 
 
 # ---- OnionPressCLI's commands ----
@@ -2535,6 +2543,33 @@ def _add_setup(sub, name):
     p.add_argument("--launcher", default=None,
                    help="The launcher that runs provision-post-install and "
                         "setup-bundled-plugins (default: this install's)")
+    _add_setup_answers(p)
+
+
+def _add_setup_answers(p):
+    """The flags `setup` and `provision` share (issue #527: the UIs run them)."""
+    from .setup_logic import SETUP_LANGUAGES
+    p.add_argument("--language", default="en_US", choices=SETUP_LANGUAGES,
+                   help="WordPress's language (default en_US)")
+    p.add_argument("--register-later", action="store_true",
+                   help="Record the onionname without registering it with OnionHome now "
+                        "(the daemon registers it, or asks for another, once the site runs)")
+    p.add_argument("--json", action="store_true",
+                   help="Ask nothing; progress on stderr, the answer as one JSON object "
+                        "(ok, user, onionname; or error, and for a taken onionname "
+                        "suggestions)")
+
+
+def _setup_answer(rc: int, report: dict, paths) -> dict:
+    """`setup --json`'s answer for its exit *rc* (the SETUP_* codes)."""
+    from . import app_commands, setup_logic
+    if rc == setup_logic.SETUP_ALREADY_INSTALLED:
+        return {"already_installed": True, **report}
+    if rc in (setup_logic.SETUP_DONE, setup_logic.SETUP_RESTART):
+        report.pop("error", None)
+        return {"ok": True, "restart": rc == setup_logic.SETUP_RESTART, **report,
+                "onionname": app_commands.onionname_record(paths.config_file)}
+    return {"error": "the setup failed (see the OnionPress log)", **report}
 
 
 def _run_setup(run):
@@ -2560,12 +2595,69 @@ def _run_setup(run):
         # OnionPressCLI constructed for a setup.
         return _cli(run).cmd_restore(password, zip_path, run.hub_recovery_key)
 
-    return setup_logic.setup_from_terminal(
-        data_dir=paths.data_dir, mac=mac,
-        launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
-        docker=Docker(paths), manager=_start_step_manager(paths), user=args.user,
-        title=args.title, from_backup=args.from_backup, ia_account=args.ia_account,
-        log=log, restore=restore)
+    report = {}
+    try:
+        rc = setup_logic.setup_from_terminal(
+            data_dir=paths.data_dir, mac=mac,
+            launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
+            docker=Docker(paths), manager=_start_step_manager(paths), user=args.user,
+            title=args.title, from_backup=args.from_backup, ia_account=args.ia_account,
+            log=log, restore=restore, language=args.language, paths=paths,
+            interactive=not args.json, register_later=args.register_later, report=report,
+            say=(lambda message: print(message, file=sys.stderr, flush=True)) if args.json
+            else print)
+    except Exception as e:  # no traceback for a UI to show
+        log(f"ERROR: setup: {type(e).__name__}: {e}")
+        report["error"] = f"the setup failed: {e}"
+        rc = setup_logic.SETUP_FAILED
+    if args.json:
+        print(json.dumps(_setup_answer(rc, report, paths)))
+    return rc
+
+
+def _add_provision(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Provision a WordPress the start installed (headless Linux installs): "
+             "the title, the admin (renamed to the onionname), its password and the "
+             "subsite. Asked at the terminal, or with --user (and --title, --language) "
+             f"the password in ${{{_SETUP_PASSWORD_ENV}}}. Exit 0 done, 1 failed")
+    p.add_argument("--user", default="", help="The admin username (an onionname)")
+    p.add_argument("--title", default="", help="The site title")
+    p.add_argument("--adopt-existing", action="store_true",
+                   help="Provision a WordPress OnionPress did not install (issue #464: "
+                        "whoever reached its installer first chose its admin)")
+    _add_setup_answers(p)
+
+
+def _run_provision(run):
+    # Linux's `provision)` case (issue #527; it was inline Python there).
+    from . import setup_logic
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    docker = Docker(paths)
+    os_name = detect_os().value
+    if not args.user and not args.json:
+        return 0 if setup_logic.provision_interactive(
+            paths.data_dir, docker=docker, adopt_existing=args.adopt_existing,
+            os_name=os_name) else 1
+    log = _make_log_func(paths.log_file)
+    report = {}
+    try:
+        ok = setup_logic.provision_from_flags(
+            data_dir=paths.data_dir, docker=docker, os_name=os_name, user=args.user,
+            title=args.title, language=args.language, adopt_existing=args.adopt_existing,
+            register_later=args.register_later, log=log, paths=paths, report=report,
+            say=(lambda message: print(message, file=sys.stderr, flush=True)) if args.json
+            else print)
+    except Exception as e:  # no traceback for a UI to show
+        log(f"ERROR: provision: {type(e).__name__}: {e}")
+        report["error"] = f"the provisioning failed: {e}"
+        ok = False
+    if args.json:
+        print(json.dumps(_setup_answer(setup_logic.SETUP_DONE if ok else setup_logic.SETUP_FAILED,
+                                       report, paths)))
+    return 0 if ok else 1
 
 
 def _add_start_post_up(sub, name):
@@ -3359,6 +3451,7 @@ _COMMANDS = [
             "else; always exits 0"),
      _run_start_step),
     ("setup", _add_setup, _run_setup),
+    ("provision", _add_provision, _run_provision),
     ("start-containers", _add_start_containers, _run_start_containers),
     ("start-post-up", _add_start_post_up, _run_start_post_up),
     ("wait-for-services", _add_wait_for_services, _run_wait_for_services),

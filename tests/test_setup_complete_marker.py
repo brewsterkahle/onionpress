@@ -183,7 +183,9 @@ class TestMacLauncherSetupWritesIt(unittest.TestCase):
     def test_a_completed_setup(self):
         r = self._run("--user", "alice", "--pass", "hunter22", "--email", "a@example.org")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Setup complete!", r.stdout)
+        # On stderr (issue #527): `setup --json`'s answer stays stdout's last line.
+        self.assertIn("Setup complete!", r.stderr)
+        self.assertNotIn("Setup complete!", r.stdout)
         self.assertIn("run_setup --user alice --pass hunter22 --email a@example.org",
                       self._calls())
         self.assertNotIn("start_containers", self._calls())
@@ -193,7 +195,7 @@ class TestMacLauncherSetupWritesIt(unittest.TestCase):
     def test_a_completed_setup_from_backup(self):
         r = self._run("--from-backup", "pw", "/x/backup.zip", STUB_SETUP_RC=10)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("Setup complete!", r.stdout)
+        self.assertIn("Setup complete!", r.stderr)
         calls = self._calls()
         self.assertLess(calls.index("stop_containers"), calls.index("start_containers"))
         self.assertLess(calls.index("start_containers"), calls.index("wait_for_services"))
