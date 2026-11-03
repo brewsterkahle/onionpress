@@ -839,7 +839,7 @@ class TestWordPressConsumers(unittest.TestCase):
 ALLOWED_SUFFIX_TESTS = {
     # Display only: shortens an address for a menu title (both UIs).
     ("src/onionpress/ui_client.py", "short_onion"),
-    ("src/menubar.py", "do_update"),
+    ("src/onionpress/ui_client.py", "status_view"),
     # Equality with a fixed address follows.
     ("src/onionpress/onionheaven.py", "is_onionheaven_instance"),
     ("src/onionpress/onionheaven.py", "should_auto_prevent_sleep"),

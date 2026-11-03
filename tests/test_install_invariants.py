@@ -1817,7 +1817,11 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
         self.assertIn('rc = self.launcher.wait("start")', text)
         self.assertIn("return self.run(*args, capture=False, timeout=timeout).returncode",
                       _read("src/onionpress/ui_client.py"))
-        self.assertIn('"Status: Start failed — see View Logs"', text)
+        # The title is the shared view's (ui_client.status_view), given
+        # the menubar's own last start result.
+        self.assertIn("start_failed=self._start_failed_rc is not None", text)
+        self.assertIn('"Status: Start failed — see View Logs"',
+                      _read("src/onionpress/ui_client.py"))
 
 
 if __name__ == "__main__":
