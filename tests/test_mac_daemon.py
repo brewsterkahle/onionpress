@@ -1066,19 +1066,15 @@ class TestUpdateOrder(unittest.TestCase):
 
 class TestMenubarIsAView(unittest.TestCase):
     """src/menubar.py holds no loop that talks to docker, the hub or Tor:
-    its one background loop reads the daemon's state file; every docker
-    call left is an action's (the first-run setup's wp-cli, the login
-    token), never a thread or timer's. Those run through the one runner,
-    onionpress.docker.Docker (issue #477), which holds no loop: the
-    menubar builds one (self.docker) and hands it to those actions."""
+    its one background loop reads the daemon's state file. Since issue
+    #527 it runs docker nowhere: the first-run setup, the onionname and
+    the login token are `onionpress setup`, `onionname set` and `open`."""
 
     LOOP_MODULES = ("health", "onion_proxy", "thumbnails", "power",
                     "analytics_sharing", "reachability_stats", "system_metrics",
                     "reachability", "mac_power")
-    # Methods that may name docker: one-shot actions of the first-run setup
-    # and the login token (not loops), as before this phase.
-    DOCKER_ALLOWED = {"_generate_login_url", "_read_onion_address", "_get_admin_username",
-                      "_register_onionname_during_setup", "_rename_wp_admin", "_wp_core_install"}
+    # Methods that may name docker: none since issue #527.
+    DOCKER_ALLOWED = set()
 
     def setUp(self):
         self.src = _read("src/menubar.py")
@@ -1120,9 +1116,10 @@ class TestMenubarIsAView(unittest.TestCase):
     def test_containers_is_not_imported_transitively(self):
         """Issue #475: the menubar asks image_overrides, not containers
         (which runs the stack), whether the images are local builds. The
-        runner itself (onionpress.docker, issue #477) is in the closure:
-        a wrapper with no loop, the one way the menubar's few one-shot
-        actions run docker."""
+        runner itself (onionpress.docker, issue #477) is in the closure,
+        a wrapper with no loop, through the modules the welcome screen
+        takes its name and title helpers from; nothing in the menubar
+        runs it (issue #527)."""
         self.assertIn("onionpress.docker", ui_import_closure())
         self.assertNotIn("onionpress.containers", ui_import_closure())
         tree = ast.parse(_read("src/onionpress/image_overrides.py"))

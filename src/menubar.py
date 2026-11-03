@@ -43,7 +43,6 @@ sys.path.insert(0, script_dir)
 from onionpress import install_native_messaging
 from onionpress import onionheaven
 from onionpress import key_manager
-from onionpress import onion_hostname
 from onionpress import login_item
 from onionpress import daemon_client as op_daemon
 try:
@@ -67,8 +66,6 @@ from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog, current_log_path
 from onionpress import redact
 from onionpress import ui_client
-from onionpress.docker import Docker
-from onionpress import auto_login
 from onionpress import splash_tips
 
 
@@ -321,10 +318,6 @@ class OnionPressApp(PortAttributes, rumps.App):
         else:
             _app_bundle = None
         self._paths = resolve_paths(data_dir=self.app_support, app_bundle=_app_bundle)
-        # The one docker runner (issue #477), for the first-run setup's
-        # one-shot wp-cli calls and the login token; every loop is the
-        # daemon's.
-        self.docker = Docker(self._paths, log_func=self.log)
 
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
@@ -376,8 +369,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         self.version = "2.6.1"
 
         # The environment of this process's children: the launcher (which
-        # sets its own), auto_login's token mint and the first-run setup's
-        # wp-cli calls run the bundled docker against this install's VM.
+        # sets its own) runs the bundled docker against this install's VM.
         docker_config_dir = os.path.join(self.app_support, "docker-config")
         os.environ["PATH"] = f"{self.bin_dir}:{os.environ.get('PATH', '')}"
         os.environ["COLIMA_HOME"] = self.colima_home
@@ -774,29 +766,30 @@ class OnionPressApp(PortAttributes, rumps.App):
 
     def _resolve_onionname_collision(self, collision):
         """The daemon's onionname retry hit a collision: ask for another
-        name, record it with `config set ONIONNAME`, and have the daemon
-        try again (.onionname-retry)."""
+        name and hand it to `onionpress onionname set NAME --rename-admin`
+        (issue #527): registered, recorded, the WordPress admin renamed,
+        the daemon's retry rearmed. A name taken again is asked again."""
         name = collision.get("name") or ""
-        new_name = self._prompt_onionname_collision(name, collision.get("suggestions") or [])
-        if not new_name:
-            self.log("onionname: collision left unresolved (no new name chosen)")
-            return
-        try:
-            from onionpress.onionnames_client import validate_name
-            if not validate_name(new_name)[0]:
-                self.log(f"onionname: {new_name!r} is not a valid onionname; not changed")
+        suggestions = collision.get("suggestions") or []
+        for _ in range(5):
+            new_name = self._prompt_onionname_collision(name, suggestions)
+            if not new_name:
+                self.log("onionname: collision left unresolved (no new name chosen)")
                 return
-        except ImportError:
-            pass
-        self._rename_wp_admin(name, new_name)
-        self.write_config_value("ONIONNAME", new_name)
-        self.write_config_value("ONIONNAME_REGISTERED", "no")
-        try:
-            with open(os.path.join(self.app_support, op_daemon.ONIONNAME_RETRY_MARKER), "w") as f:
-                f.write(new_name)
-        except OSError:
-            pass
-        self.log(f"onionname: '{name}' -> '{new_name}', registration retried by the daemon")
+            rc, answer, out, err = self.launcher.run_json(
+                "onionname", "set", new_name, "--rename-admin", "--json", timeout=180)
+            answer = answer or {}
+            if answer.get("error") == "taken":
+                name, suggestions = new_name, answer.get("suggestions") or []
+                continue
+            if rc != 0 or not answer.get("ok"):
+                failure = answer.get("error") or ui_client.launcher_failure(
+                    out, err, "see the OnionPress log")
+                self.log(f"onionname: {new_name!r} not taken on: {failure}")
+                self.show_native_alert("Onionname Not Changed", failure, style="warning")
+                return
+            self.log(f"onionname: '{collision.get('name')}' -> '{new_name}'")
+            return
 
     def _wait_for_state(self, predicate, timeout):
         """Wait up to *timeout* s for the daemon's state to satisfy
@@ -1260,23 +1253,27 @@ class OnionPressApp(PortAttributes, rumps.App):
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
-    def _generate_login_url(self, base_url):
-        """Return base_url with a one-time auto-login token, or None.
-
-        The token reaches WordPress on stdin (auto_login.mint) and the URL
-        must reach the browser through op_browser.open_url, never through a
-        command line: ps shows every user's argv, and whoever redeems the
-        token first is the admin. Log base_url, never the result.
-        """
-        return auto_login.login_url(base_url, docker=self.docker, log_func=self.log)
-
     def open_local_site(self, _):
-        """Open the local WordPress site in the default browser"""
-        name = self.read_config_value("ONIONNAME", "")
-        local_base = f"{self.local_url}/{name}/" if name else self.local_url
-        op_browser.open_url(self._generate_login_url(local_base) or local_base,
-                            log_func=self.log)
-        self.log(f"Opened local site: {local_base}")
+        """The local site in the default browser, logged in (`onionpress
+        open site`: the token reaches the browser through a file:// page,
+        never a command line)."""
+        self.launcher.run_async("open", "site")
+
+    def _open_onion(self):
+        """`onionpress open onion --json` (the CLI's open_onion, the one
+        implementation, issue #527): Tor Browser, a browser whose extension
+        is connected, Brave (not logged in), or the install dialog."""
+        rc, answer, out, err = self.launcher.run_json("open", "onion", "--json", timeout=60)
+        answer = answer or {}
+        if answer.get("no_browser"):
+            self.dismiss_setup_dialog()
+            self.dismiss_launch_splash()
+            self.show_browser_install_dialog()
+        elif rc != 0 or not answer.get("ok"):
+            self.log("Opening the onion address failed: " + (answer.get("error") or
+                     ui_client.launcher_failure(out, err, "see the OnionPress log")))
+        else:
+            self.log(f"Opened the site in {answer.get('browser')}")
 
     def monitor_tor_browser_install(self):
         """Monitor for Tor Browser installation and offer to open site when detected."""
@@ -1284,9 +1281,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             "Tor Browser",
             op_browser.TOR_BROWSER_PATH,
             "Contents/MacOS/firefox",
-            lambda url: op_browser.open_url(
-                self._generate_login_url(url) or url, op_browser.TOR_BROWSER_PATH,
-                self.log),
+            lambda url: self._open_onion(),
         )
 
     def monitor_brave_install(self):
@@ -1295,11 +1290,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             "Brave Browser",
             op_browser.BRAVE_BROWSER_PATH,
             "Contents/MacOS/Brave Browser",
-            # No auto-login token: Brave's Tor window takes the URL only on
-            # its command line, which every local user can read.
-            lambda url: subprocess.run([
-                os.path.join(op_browser.BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser"),
-                "--tor", url]),
+            lambda url: self._open_onion(),
         )
 
     def _monitor_browser_install(self, name, app_path, executable_subpath, open_func):
@@ -1352,11 +1343,8 @@ class OnionPressApp(PortAttributes, rumps.App):
 
     def open_tor_browser(self, _):
         """Open the onion address in the best available browser."""
-        base = self._onion_url()
-        if base:
-            if not op_browser.open_onion_url(base, self.app_support, self.log,
-                                             add_login=self._generate_login_url):
-                self.show_browser_install_dialog()
+        if self._onion_url():
+            threading.Thread(target=self._open_onion, daemon=True).start()
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
@@ -1405,19 +1393,10 @@ class OnionPressApp(PortAttributes, rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            # The auto-login token goes only to browsers that get the URL
-            # through LaunchServices (op_browser.open_url); logs get url.
-            url = self._onion_url() or f"http://{self.onion_address}/"
-
-            if op_browser.is_tor_browser_installed():
-                self.log(f"Auto-opening Tor Browser: {url}")
-                op_browser.open_url(self._generate_login_url(url) or url,
-                                    op_browser.TOR_BROWSER_PATH, self.log)
-            else:
-                # Wait for the onion proxy (the daemon's) to start
+            if not op_browser.is_tor_browser_installed():
+                # An extension browser gets the address once its extension
+                # talks to the daemon's onion proxy: give it the chance.
                 self._wait_for_state(lambda s: s.get("proxy_running"), 15)
-
-                # Wait up to 5 seconds for a browser extension to register
                 ext_browser = None
                 for i in range(5):
                     ext_browser = self.extension_connected_recently()
@@ -1426,26 +1405,11 @@ class OnionPressApp(PortAttributes, rumps.App):
                     self.log(f"Waiting for extension registration... ({i+1}/5)")
                     time.sleep(1)
                 if ext_browser:
-                    self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
-                    # Open browser first so extension can set up SOCKS routing
+                    self.log(f"Starting {ext_browser} for its extension")
                     subprocess.run(["open", "-a", ext_browser])
-                    if op_browser.wait_for_extension_active(self.app_support):
-                        self.log("Extension active, opening .onion URL")
-                    else:
+                    if not op_browser.wait_for_extension_active(self.app_support):
                         self.log("Extension did not poll within 30s, opening .onion URL anyway")
-                    op_browser.open_url(self._generate_login_url(url) or url,
-                                        ext_browser, self.log)
-                    subprocess.run(["osascript", "-e", f'tell application "{ext_browser}" to activate'])
-                elif op_browser.is_brave_installed():
-                    # Without a token: see op_browser.open_onion_url.
-                    self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
-                    brave_exe = os.path.join(op_browser.BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser")
-                    subprocess.run([brave_exe, "--tor", url])
-                else:
-                    self.log("No Tor-capable browser found - showing options dialog")
-                    self.dismiss_setup_dialog()
-                    self.dismiss_launch_splash()
-                    self.show_browser_install_dialog()
+            self._open_onion()
 
     def check_address_prefix_change(self):
         """No-op: the vanity prefix is chosen once at install (welcome
@@ -1586,54 +1550,10 @@ class OnionPressApp(PortAttributes, rumps.App):
     # unreachable we proceed with the user's chosen name and retry on every
     # subsequent launch (see _retry_pending_onionname).
 
-    def _read_onion_address(self):
-        """Return the local wordpress .onion address, or None if not yet written."""
-        try:
-            addr = onion_hostname.read_served_address(self.docker)
-            if addr:
-                return addr
-        except Exception as e:
-            self.log(f"onionname: can't read onion address: {e}")
-        return None
-
-    def _save_onionname(self, name, onionaddress, registered):
-        """Persist onionname state to ~/.onionpress/config."""
-        self.write_config_value("ONIONNAME", name)
-        self.write_config_value("ONIONNAME_ADDRESS", onionaddress or "")
-        self.write_config_value(
-            "ONIONNAME_REGISTERED", "yes" if registered else "no"
-        )
-
     def _get_admin_username(self):
-        """Return the WordPress admin user's login.
-
-        Preference order:
-        1. ONIONNAME from ~/.onionpress/config (fast path, no subprocess).
-        2. First administrator returned by wp user list in the running
-           WordPress container — for installs whose config predates
-           name-sync populating ONIONNAME, or where it was wiped.
-        3. "admin" as a last-resort fallback.
-
-        Caches a successful container query back to the config so future
-        calls hit the fast path.
-        """
-        name = self.read_config_value("ONIONNAME", "").strip()
-        if name:
-            return name
-        try:
-            result = self.docker.wp("user", "list", "--role=administrator",
-                                    "--field=user_login", timeout=10, offline=True,
-                                    quiet=True)
-            if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    login = line.strip()
-                    if login:
-                        self.write_config_value("ONIONNAME", login)
-                        return login
-        except Exception as e:
-            self.log(f"_get_admin_username: container query failed: {e}")
-        return "admin"
-
+        """The backup dialog's default login: the onionname, else blank
+        (`onionpress backup --check` finds the administrator itself)."""
+        return self.read_config_value("ONIONNAME", "").strip()
     def _prompt_onionname_collision(self, current_name, suggestions):
         """Modal alert — returns chosen new name or None if canceled.
 
@@ -1685,140 +1605,43 @@ class OnionPressApp(PortAttributes, rumps.App):
         return result["name"] or None
 
 
-    def _register_onionname_during_setup(self, sw):
-        """Try to register sw.admin_user with OnionHome.
-
-        On collision: prompt the user to pick a new name, update sw.admin_user,
-        retry. On unreachable / other failure: mark pending and let the
-        next-launch retry path handle it. Must not raise — failures here
-        should never block the install.
-        """
-        try:
-            from onionpress.onionnames_registrar import Registrar
-            from onionpress.onionnames_client import validate_name
-        except Exception as e:
-            self.log(f"onionname: cannot import registrar: {e}")
-            return
-
-        onionaddress = self._read_onion_address()
-        if not onionaddress:
-            self.log("onionname: no onion address yet, skipping register")
-            # Still save the preference so the retry path has something to
-            # register on the next launch.
-            self._save_onionname(sw.admin_user, "", registered=False)
-            return
-
-        reg = Registrar(self.docker, log=self.log)
-
-        max_attempts = 5
+    def _run_setup_command(self, sw):
+        """WordPress installed under the setup window's answers by
+        `onionpress setup --json` (issue #527: setup_logic, the one
+        install on both platforms): the onionname registered with OnionHome
+        first, the password in the environment. A name OnionHome has for
+        another site is asked again (the collision dialog) and the setup
+        run again; "Skip for now" installs under it unregistered
+        (--register-later: the daemon asks again once the site runs).
+        Never raises: a failure is the setup window's log line."""
         name = sw.admin_user
-        for attempt in range(max_attempts):
-            if sw:
-                sw.set_status(f"Reserving onionname '{name}'...")
-                sw.add_log(f"Registering '{name}' with OnionHome...")
-            self.log(f"onionname: register attempt {attempt + 1}: "
-                     f"{name} -> {onionaddress}")
-            result = reg.register(name, onionaddress)
-
-            if result.ok:
-                self.log(f"onionname: registered '{name}'")
-                sw.admin_user = name
-                self._save_onionname(name, onionaddress, registered=True)
-                if sw:
-                    sw.add_log(f"Onionname '{name}' registered")
-                return
-
-            if result.status == "collision":
-                self.log(f"onionname: '{name}' taken; prompting user")
-                suggestions = result.suggestions or []
-                new_name = self._prompt_onionname_collision(name, suggestions)
-                if not new_name:
-                    break
-                ok, _ = validate_name(new_name)
-                if not ok:
-                    # Keep the current (valid) name and ask again: this name
-                    # goes on to the WordPress install and the config file.
-                    self.log(f"onionname: user-entered {new_name!r} invalid, "
-                             "retrying with same prompt")
-                    continue
-                name = new_name
+        later = []
+        for _ in range(5):
+            sw.set_status("Configuring WordPress...")
+            sw.add_log(f"Installing WordPress as '{name}'...")
+            rc, answer, out, err = self.launcher.run_json(
+                "setup", "--user", name, "--title", sw.site_title,
+                "--language", getattr(sw, "language", "en_US") or "en_US", *later, "--json",
+                env={ui_client.SETUP_PASSWORD_ENV: sw.admin_pass}, on_line=sw.add_log, timeout=None)
+            answer = answer or {}
+            if answer.get("error") == "taken":
+                self.log(f"onionname: '{name}' taken; asking for another")
+                new_name = self._prompt_onionname_collision(name, answer.get("suggestions") or [])
+                if new_name:
+                    name = new_name
+                else:
+                    later = ["--register-later"]
                 continue
-
-            # Anything else is a non-collision failure — give up and let the
-            # retry-on-launch path handle it.
-            reason = result.reason or result.status
-            self.log(f"onionname: register failed ({result.status}: {reason})")
-            break
-
-        sw.admin_user = name
-        self._save_onionname(name, onionaddress, registered=False)
-        if sw:
-            sw.add_log(
-                "Onionname not registered with OnionHome yet — "
-                "will retry on next launch."
-            )
-
-    def _rename_wp_admin(self, old_name, new_name):
-        """Rename the WordPress admin user via WP-CLI (direct DB update)."""
-        try:
-            from onionpress.onionnames_client import validate_name
-        except ImportError:
+            if rc == 0 and answer.get("ok"):
+                sw.admin_user = answer.get("name") or name
+                sw.add_log("WordPress installed and configured")
+            else:
+                failure = answer.get("error") or ui_client.launcher_failure(
+                    out, err, "see the OnionPress log")
+                self.log(f"Setup failed (rc {rc}): {failure}")
+                sw.add_log(f"WordPress setup did not complete: {failure}")
             return
-        # Safety: both names must pass validation (alphanumeric + ._- only)
-        if not validate_name(old_name)[0] or not validate_name(new_name)[0]:
-            self.log("onionname: rename aborted — name failed validation")
-            return
-        result = self.docker.wp(
-            "db", "query",
-            f"UPDATE wp_users SET user_login='{new_name}', "
-            f"user_nicename='{new_name}' WHERE user_login='{old_name}'",
-            timeout=15, offline=True, quiet=True)
-        if result.returncode == 0:
-            self.log(f"WordPress admin renamed: '{old_name}' -> '{new_name}'")
-        else:
-            self.log(f"WordPress admin rename failed: {result.stderr.strip()}")
-
-    def _wp_core_install(self, sw):
-        """Delegate to setup_logic.install_fresh_wordpress() (shared with Linux).
-
-        Was a 70-line inline wp-cli sequence; now a thin wrapper that
-        bundles the SetupWindow's fields and points install_fresh_
-        wordpress at the Mac launcher for the provision-post-install
-        bash step. The two platforms share one install path now.
-        """
-        if not sw or not sw.admin_pass:
-            return
-        try:
-            from onionpress.setup_logic import install_fresh_wordpress
-            # One whole v3 address or "localhost": it becomes the site URL.
-            onion_addr = onion_hostname.read_served_address(self.docker) or "localhost"
-
-            def _log(msg):
-                self.log(msg)
-                if sw:
-                    sw.add_log(msg)
-
-            if sw:
-                sw.set_status("Configuring WordPress...")
-                sw.add_log(f"Installing WordPress as '{sw.admin_user}'...")
-            ok = install_fresh_wordpress(
-                site_title=sw.site_title,
-                onionname=sw.admin_user,
-                password=sw.admin_pass,
-                language=getattr(sw, "language", "en_US") or "en_US",
-                onion_addr=onion_addr,
-                docker=self.docker,
-                launcher_bin=self.launcher_script,
-                log_func=_log,
-            )
-            if sw:
-                sw.add_log("WordPress installed and configured" if ok else
-                           "WordPress setup did not complete (see above)")
-        except subprocess.SubprocessError as e:
-            # Not {e}: a subprocess error's message quotes the whole argv.
-            self.log(f"wp core install error: {type(e).__name__}")
-        except Exception as e:
-            self.log(f"wp core install error: {e}")
+        sw.add_log("WordPress setup did not complete: no onionname could be registered")
 
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.
@@ -1982,11 +1805,7 @@ class OnionPressApp(PortAttributes, rumps.App):
                         # WordPress or register a new onionname over it.
                         self.log("Restore from backup: skipping fresh WordPress install")
                     elif sw and sw.admin_pass:
-                        try:
-                            self._register_onionname_during_setup(sw)
-                        except Exception as e:
-                            self.log(f"onionname: register path errored: {e}")
-                        self._wp_core_install(sw)
+                        self._run_setup_command(sw)
                     if sw:
                         sw.complete_step(4)
                         sw.set_progress(5 / 8)

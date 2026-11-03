@@ -9,7 +9,8 @@ Platform-aware glue (Tor Browser detection, which container runtime) lives
 in callers.
 
 Operations:
-- open_in_browser(url, prefer_tor)         — launch via xdg-open / open / torbrowser-launcher
+- open_in_browser(url)                     — launch via xdg-open / open
+- open_onion(base_url, …)                  — the onion address in a Tor-capable browser, logged in
 - login_target(base_url) / open_login(...) — auto-login without the token in any argv
 - tor_image_has_mkp224o(image, docker=…)   — verify the tor image bundles mkp224o
 - generate_vanity_in_container(...)        — docker run mkp224o, write to vanity-keys/
@@ -26,7 +27,8 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 from . import auto_login, key_manager
 from .config import validate_address_prefix
@@ -164,51 +166,23 @@ TOR_BROWSER_APPS = ("/Applications/Tor Browser.app",
                     os.path.expanduser("~/Applications/Tor Browser.app"))
 
 
-def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
-    """Spawn a browser at `url`. Detached — does not wait.
+def open_in_browser(url: str) -> None:
+    """Spawn the default browser at `url`. Detached — does not wait.
 
     `url` lands in a command line, so it must never carry an auto-login
-    token: pass login_target()'s file:// URI instead.
+    token: pass login_target()'s file:// URI instead. An onion address
+    goes through open_onion (a Tor-capable browser).
     """
-    cmd: list[str]
-    if prefer_tor:
-        running = _tor_browser_running()
-        if running:
-            # Existing Tor Browser session — open the URL as a new tab in
-            # it rather than relaunching (which would trigger torbrowser-
-            # launcher's "already running" dialog). Must go through the
-            # `start-tor-browser` wrapper (sibling of firefox.real), not
-            # firefox.real directly: the wrapper sets HOME/cwd/env so
-            # Firefox's remoting finds the running profile. Without it,
-            # firefox.real spawns a fresh instance, hits the profile
-            # lock, and pops the "already running" dialog at the user.
-            wrapper = os.path.join(os.path.dirname(running),
-                                   "start-tor-browser")
-            if os.path.exists(wrapper) and os.access(wrapper, os.X_OK):
-                cmd = [wrapper, "-new-tab", url]
-            else:
-                # Fall back to direct firefox.real (older builds may not
-                # ship the wrapper). Still better than torbrowser-launcher
-                # since the live instance check above already passed.
-                cmd = [running, "-new-tab", url]
-        elif shutil.which("torbrowser-launcher"):
-            cmd = ["torbrowser-launcher", url]
-        elif sys.platform == "darwin":
-            # Tor Browser when it is installed (`onionpress open onion`);
-            # the default browser otherwise (the browser extension's
-            # proxy may route .onion there).
-            tor_app = next((a for a in TOR_BROWSER_APPS if os.path.isdir(a)), None)
-            cmd = ["open", "-a", tor_app, url] if tor_app else ["open", url]
-        else:
-            cmd = ["xdg-open", url]
-    elif sys.platform == "darwin":
+    if sys.platform == "darwin":
         cmd = ["open", url]
     else:
         cmd = ["xdg-open", url]
+        if url.startswith("file://") and _launch_default_web_browser(url):
+            return
+    _spawn(cmd)
 
-    if (cmd[0] == "xdg-open" and url.startswith("file://")
-            and _launch_default_web_browser(url)):
-        return
+
+def _spawn(cmd: list) -> None:
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
@@ -216,6 +190,106 @@ def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
                          start_new_session=True)
     except (OSError, FileNotFoundError) as e:
         raise RuntimeError(f"failed to launch browser ({cmd[0]}): {e}") from e
+
+
+# How long `open onion` waits for a cold-launched Tor Browser (Linux):
+# enough for torbrowser-launcher's first download (~80 MB, signature check)
+# and Tor's bootstrap.
+TOR_BROWSER_START_WAIT_SEC = 360
+NO_TOR_BROWSER_MSG = ("No Tor-capable browser found: install Tor Browser "
+                      "(https://www.torproject.org/download/)")
+
+
+def open_onion(base_url: str, *, docker, data_dir: str,
+               say: Callable[[str], None] = lambda message: None,
+               sleep: Callable[[float], None] = time.sleep) -> dict:
+    """Open *base_url* (http://<address>/<onionname>) logged in as the
+    owner in a browser that reaches onion services: the one implementation
+    the menubar, the tray and `onionpress open onion` share (issue #527).
+    The answer is `open onion --json`'s: {"ok": True, "browser": …} when
+    it was handed over; {"paste_url": …} (the token-bearing URL) when Tor
+    Browser runs and cannot be handed a tab (Linux: Tor Browser has no
+    remoting), for the person to paste; {"ok": True, "launching": True}
+    when a Tor Browser launch is already under way; {"error": …,
+    "no_browser": True} when there is none (a Mac with neither Tor
+    Browser, an extension browser nor Brave). *say* gets progress lines."""
+    if sys.platform == "darwin":
+        return _open_onion_mac(base_url, docker=docker, data_dir=data_dir)
+    return _open_onion_linux(base_url, docker=docker, say=say, sleep=sleep)
+
+
+def _open_onion_mac(base_url: str, *, docker, data_dir: str) -> dict:
+    from . import browser
+    tor_app = next((a for a in TOR_BROWSER_APPS if os.path.isdir(a)), None)
+    if tor_app:
+        _spawn(["open", "-a", tor_app, login_target(base_url, docker=docker)])
+        return {"ok": True, "browser": "Tor Browser"}
+    extension = browser.extension_connected_recently(data_dir)
+    if extension:
+        _spawn(["open", "-a", extension, login_target(base_url, docker=docker)])
+        return {"ok": True, "browser": extension, "extension": True}
+    if browser.is_brave_installed():
+        # Brave's Tor window takes the URL only on Brave's command line,
+        # which every local user can read: the site opens, not logged in.
+        _spawn([os.path.join(browser.BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser"),
+                "--tor", base_url])
+        return {"ok": True, "browser": "Brave Browser", "logged_in": False}
+    return {"error": NO_TOR_BROWSER_MSG, "no_browser": True}
+
+
+def _torbrowser_launcher_running() -> bool:
+    try:
+        return subprocess.run(["pgrep", "-x", "torbrowser-launcher"],
+                              capture_output=True, timeout=3).returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _new_tab_argv(firefox_real: str, target: str) -> list:
+    # Through the start-tor-browser wrapper, not firefox.real: the wrapper
+    # sets HOME/cwd/env so Firefox's remoting finds the running profile;
+    # firefox.real alone spawns a fresh instance, hits the profile lock and
+    # pops Tor Browser's "already running" dialog.
+    wrapper = os.path.join(os.path.dirname(firefox_real), "start-tor-browser")
+    if os.path.exists(wrapper) and os.access(wrapper, os.X_OK):
+        return [wrapper, "-new-tab", target]
+    return [firefox_real, "-new-tab", target]
+
+
+def _open_onion_linux(base_url: str, *, docker, say, sleep) -> dict:
+    # A running Tor Browser cannot be handed a tab: it ships without DBus
+    # remoting, so `-new-tab` falls through to a new instance, hits the
+    # profile lock and pops "Tor Browser is already running". The URL is
+    # given back for the person to paste (it reaches Tor Browser on no
+    # command line; the token is honoured once pasted).
+    if _tor_browser_running():
+        return {"paste_url": login_url(base_url, docker=docker) or base_url}
+    # A launch under way (an earlier `open onion` waits for it): a second
+    # torbrowser-launcher would hit the profile lock.
+    if _torbrowser_launcher_running():
+        return {"ok": True, "launching": True, "browser": "Tor Browser"}
+    if not shutil.which("torbrowser-launcher"):
+        # Whatever the default browser makes of the .onion.
+        open_in_browser(login_target(base_url, docker=docker))
+        return {"ok": True, "browser": "default"}
+    if cleanup_stale_tor_browser_locks():
+        say("Removed stale Tor Browser lock files before launching")
+    # Cold launch with no URL: one on torbrowser-launcher's command line is
+    # tried during Tor's bootstrap, fails and is never retried. Once
+    # firefox.real is up the URL goes in as a tab, which waits for the
+    # circuit; the token is minted then, so its two minutes start when the
+    # browser is there to use it.
+    _spawn(["torbrowser-launcher"])
+    say("Tor Browser is starting: your site opens once it connects to Tor")
+    waited = 0
+    while waited < TOR_BROWSER_START_WAIT_SEC:
+        sleep(2)
+        waited += 2
+        running = _tor_browser_running()
+        if running:
+            _spawn(_new_tab_argv(running, login_target(base_url, docker=docker)))
+            return {"ok": True, "browser": "Tor Browser"}
+    return {"error": f"Tor Browser did not start within {TOR_BROWSER_START_WAIT_SEC // 60} minutes"}
 
 
 def tor_image_has_mkp224o(image: str = DEFAULT_TOR_IMAGE, *, docker) -> bool:

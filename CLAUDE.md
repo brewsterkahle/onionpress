@@ -543,12 +543,33 @@
   key, no new one), marks the setup complete and has the launcher restart.
   Never a WordPress under temporary credentials. `tests/test_terminal_setup.py`,
   `TestLauncherRestorePaths` in `tests/test_backup_metadata_validation.py`.
+- **Both UIs install through `onionpress setup --json`** (#527; the tray's
+  legacy branch `provision --json`): the password in
+  `ONIONPRESS_SETUP_PASSWORD` (`ui_client.SETUP_PASSWORD_ENV`, kept by
+  `run_setup` unless `--pass`), progress on stderr, the answer stdout's
+  last line (the case's closing lines on stderr). The onionname is
+  registered before the install on both platforms
+  (`setup_logic.setup_onionname` over `app_commands.register_onionname`,
+  `onionname set`'s); a taken one installs nothing and answers
+  `{"error": "taken", "suggestions"}`, `--register-later` records it
+  unregistered; a later collision is `onionname set NAME --rename-admin`
+  (`rename_wp_user`: $wpdb, logins on stdin, `site_admins`). Neither UI
+  imports the install, the registrar, `onion_hostname`, `auto_login` or
+  `wp_files`; `--language` is one of `SETUP_LANGUAGES` (both UIs' lists
+  test-held). `tests/test_setup_through_the_cli.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
   live in `src/onionpress/app_commands.py`, shared by both platforms, never
   constructing `OnionPressCLI`. The browser never gets the login token.
   `tests/test_cli_app_commands.py`.
+- **One open-logged-in implementation: `launcher_ops.open_onion`**
+  (`open onion --json`, both UIs, #527): Tor Browser or an extension
+  browser gets `login_target`'s file:// page, Brave the bare URL; a
+  running Linux Tor Browser answers `{"paste_url"}`, a cold launch waits
+  for firefox.real and sends the tab through `start-tor-browser`; a Mac
+  with none answers `no_browser`. `TestOpenOnion` in
+  `tests/test_auto_login_off_argv.py`.
 - **Each launcher's default case delegates to `onionpress.cli`**: a verb
   with no case of its own (`ensure-archive-s3-keys`, `check-for-update`)
   is the CLI's, and every verb the daemon, menubar, tray, `handle_action`,

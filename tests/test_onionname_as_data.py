@@ -174,27 +174,29 @@ class TestInstallersRefuseInvalidNames(unittest.TestCase):
 
 
 class TestCollisionPromptKeepsValidName(unittest.TestCase):
-    """menubar._register_onionname_during_setup: an invalid name typed into
-    the collision prompt is not adopted (it would become the install's
-    admin user and the ONIONNAME config line)."""
+    """setup_logic.setup_onionname (the setup's onionname, issue #527; it
+    was the menubar's _register_onionname_during_setup): an invalid name
+    typed after a collision is not adopted (it would become the install's
+    admin user and the ONIONNAME config line); it is asked again."""
 
     def test_invalid_entry_continues_before_adopting(self):
-        with open(os.path.join(PROJECT_ROOT, "src", "menubar.py"),
-                  encoding="utf-8") as f:
-            tree = ast.parse(f.read())
-        func = next(n for n in ast.walk(tree)
-                    if isinstance(n, ast.FunctionDef)
-                    and n.name == "_register_onionname_during_setup")
-        guards = [n for n in ast.walk(func)
-                  if isinstance(n, ast.If)
-                  and ast.unparse(n.test) == "not ok"]
-        self.assertEqual(len(guards), 1)
-        self.assertIsInstance(guards[0].body[-1], ast.Continue)
-        adopt = [n for n in ast.walk(func)
-                 if isinstance(n, ast.Assign)
-                 and ast.unparse(n) == "name = new_name"]
-        self.assertEqual(len(adopt), 1)
-        self.assertGreater(adopt[0].lineno, guards[0].lineno)
+        import types
+        from onionpress import app_commands
+        typed = ["bad name!", "../x", "goodname"]
+        tried = []
+
+        def register(name, *_a, **_k):
+            tried.append(name)
+            status = "taken" if name == "alice" else "registered"
+            return app_commands.OnionnameOutcome(status, name, ["sugg1"], "", "")
+        with mock.patch.object(app_commands, "register_onionname", side_effect=register):
+            got = setup_logic.setup_onionname(
+                "alice", paths=types.SimpleNamespace(data_dir="/x", config_file="/x/c"),
+                docker=None, os_name="macos", log=lambda m: None, say=lambda m: None,
+                input_func=lambda prompt: typed.pop(0))
+        self.assertEqual(got, "goodname")
+        self.assertEqual(tried, ["alice", "goodname"], "no invalid name reached OnionHome")
+        self.assertEqual(typed, [])
 
 
 class TestNoWpEvalBuiltFromVariables(unittest.TestCase):

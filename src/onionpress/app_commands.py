@@ -310,20 +310,41 @@ def open_target(what, paths, docker):
     raise ValueError(f"open: what is {what!r}; one of {', '.join(OPEN_TARGETS)}")
 
 
-def open_command(what, paths, docker, *, out=None):
-    """`onionpress open site|admin|settings|onion`, logged in as the
-    owner: the browser gets launcher_ops.login_target's file:// page
-    (the token never on a command line)."""
+def open_command(what, paths, docker, *, json_output=False, out=None):
+    """`onionpress open site|admin|settings|onion [--json]`, logged in as
+    the owner: the browser gets launcher_ops.login_target's file:// page
+    (the token never on a command line); the onion address goes to a
+    Tor-capable browser through launcher_ops.open_onion, the one
+    implementation the menubar and the tray call (issue #527). With
+    --json the answer is one JSON object (open_onion's for `onion`)."""
     out = out or sys.stdout
+
+    def say(message):
+        print(message, file=sys.stderr if json_output else out, flush=True)
+
+    url = ""
     try:
         url, prefer_tor = open_target(what, paths, docker)
+        if prefer_tor:
+            answer = launcher_ops.open_onion(url, docker=docker, data_dir=paths.data_dir,
+                                             say=say)
+        else:
+            launcher_ops.open_in_browser(launcher_ops.login_target(url, docker=docker))
+            answer = {"ok": True, "browser": "default"}
     except RuntimeError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    launcher_ops.open_in_browser(launcher_ops.login_target(url, docker=docker),
-                                 prefer_tor=prefer_tor)
-    print(f"Opening {url}", file=out)
-    return 0
+        answer = {"error": str(e)}
+    if json_output:
+        print(json.dumps({"url": url, **answer}), file=out)
+    elif answer.get("error"):
+        print(f"ERROR: {answer['error']}", file=sys.stderr)
+    elif answer.get("paste_url"):
+        print("Tor Browser is already running: paste this into a new tab (it logs you "
+              f"in once, for two minutes):\n{answer['paste_url']}", file=out)
+    elif answer.get("launching"):
+        print("Tor Browser is starting already: open the site once it is up.", file=out)
+    else:
+        print(f"Opening {url}", file=out)
+    return 1 if answer.get("error") else 0
 
 
 # ---------------------------------------------------------------------------
@@ -367,28 +388,32 @@ def _save_onionname(paths, log, name, address, registered):
         log(_config.set_config_value(paths.config_file, key, value).describe())
 
 
-def onionname_set(name, paths, docker, os_name, log, *, json_output=False, out=None,
-                  registrar=None):
-    """`onionpress onionname set NAME [--json]`: the menubar's pick-another-
-    name dialog. The name is checked, registered with OnionHome under the
-    served address when OnionPress is running, and recorded in the config
-    (ONIONNAME, ONIONNAME_ADDRESS, ONIONNAME_REGISTERED). A name OnionHome
-    says is taken is not recorded (exit 2, with its suggestions); one that
-    could not be registered now is recorded as unregistered and, on a Mac,
-    the daemon retries it (.onionname-retry)."""
+class OnionnameOutcome(collections.namedtuple(
+        "OnionnameOutcome", "status name suggestions note error")):
+    """What register_onionname did: status "registered" (OnionHome took
+    it for the served address), "recorded" (kept unregistered: the site
+    is not running, OnionHome did not answer, or *register* was False),
+    "taken" (OnionHome has it for another address: nothing recorded),
+    "invalid" (*error* says why: nothing recorded) or "unsaved" (the
+    config could not be written: *error*)."""
+
+
+def register_onionname(name, paths, docker, os_name, log, *, registrar=None,
+                       register=True):
+    """Check *name*, register it with OnionHome under the served address
+    when there is one, and record it in the config (ONIONNAME,
+    ONIONNAME_ADDRESS, ONIONNAME_REGISTERED) unless it is taken. One
+    implementation for `onionname set` and the setup (issue #527). A name
+    left unregistered is retried by the daemon (.onionname-retry on a Mac).
+    *register* False records it unregistered without asking OnionHome."""
     from . import setup_logic
-    out = out or sys.stdout
     name = (name or "").strip()
     ok, reason = setup_logic.validate_onionname(name)
     if not ok:
-        message = setup_logic.onionname_error_message(reason)
-        if json_output:
-            print(json.dumps({"error": message, "name": name}), file=out)
-        else:
-            print(f"ERROR: {message}", file=out)
-        return 2
+        return OnionnameOutcome("invalid", name, [], "",
+                                setup_logic.onionname_error_message(reason))
 
-    address = served_address(docker, paths.data_dir)
+    address = served_address(docker, paths.data_dir) if register else ""
     result = None
     if address:
         if registrar is None:
@@ -401,49 +426,92 @@ def onionname_set(name, paths, docker, os_name, log, *, json_output=False, out=N
             result = None
 
     if result is not None and result.status == "collision":
-        suggestions = list(result.suggestions or [])
         log(f"onionname: {name!r} is taken; not recorded")
-        if json_output:
-            print(json.dumps({"error": "taken", "name": name, "suggestions": suggestions}),
-                  file=out)
-        else:
-            print(f"The onionname '{name}' is already taken.", file=out)
-            if suggestions:
-                print("Suggestions: " + ", ".join(suggestions), file=out)
-        return 2
+        return OnionnameOutcome("taken", name, list(result.suggestions or []), "", "")
 
     registered = result is not None and result.ok
     try:
         _save_onionname(paths, log, name, address if registered else "", registered)
     except (ValueError, OSError) as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 2
-    note = ""
-    if not registered:
-        if os_name == "macos":
-            try:
-                with open(os.path.join(paths.data_dir, ONIONNAME_RETRY_MARKER), "w") as f:
-                    f.write(str(datetime.datetime.now(datetime.timezone.utc).timestamp()))
-            except OSError:
-                pass
-            note = ("Not registered yet: OnionPress registers it once the site is running "
-                    "(start OnionPress)." if not address else
-                    "Not registered yet (OnionHome did not answer): OnionPress keeps trying.")
-        else:
-            note = ("Not registered yet: run this command again while OnionPress is running."
-                    if not address else
-                    "Not registered yet (OnionHome did not answer): run this command again later.")
-        if result is not None:
-            log(f"onionname: {name!r} recorded, registration deferred ({result.status})")
-        else:
-            log(f"onionname: {name!r} recorded, OnionPress not running")
-    else:
+        return OnionnameOutcome("unsaved", name, [], "", str(e))
+    if registered:
         log(f"onionname: {name!r} registered for {address}")
-    record = onionname_record(paths.config_file)
-    if json_output:
-        print(json.dumps({"ok": True, **record, "note": note}), file=out)
-    elif registered:
-        print(f"Registered '{name}': {record['url']}", file=out)
+        return OnionnameOutcome("registered", name, [], "", "")
+    if os_name == "macos":
+        try:
+            with open(os.path.join(paths.data_dir, ONIONNAME_RETRY_MARKER), "w") as f:
+                f.write(str(datetime.datetime.now(datetime.timezone.utc).timestamp()))
+        except OSError:
+            pass
+        note = ("Not registered yet: OnionPress registers it once the site is running "
+                "(start OnionPress)." if not address else
+                "Not registered yet (OnionHome did not answer): OnionPress keeps trying.")
     else:
-        print(f"Recorded '{name}'. {note}", file=out)
-    return 0
+        note = ("Not registered yet: run this command again while OnionPress is running."
+                if not address else
+                "Not registered yet (OnionHome did not answer): run this command again later.")
+    if result is not None:
+        log(f"onionname: {name!r} recorded, registration deferred ({result.status})")
+    elif not register:
+        log(f"onionname: {name!r} recorded, registration left for later")
+    else:
+        log(f"onionname: {name!r} recorded, OnionPress not running")
+    return OnionnameOutcome("recorded", name, [], note, "")
+
+
+def onionname_set(name, paths, docker, os_name, log, *, json_output=False, out=None,
+                  registrar=None, rename_admin=False):
+    """`onionpress onionname set NAME [--rename-admin] [--json]`: the
+    menubar's pick-another-name dialog (register_onionname). A name
+    OnionHome says is taken is not recorded (exit 2, with its
+    suggestions). With *rename_admin* (after a collision, issue #527) the
+    WordPress admin whose login is the old onionname is renamed to NAME
+    (setup_logic.rename_wp_user); a rename that failed is exit 1, the
+    name recorded all the same."""
+    from . import setup_logic
+    out = out or sys.stdout
+    old_name = onionname_of(paths.config_file)
+    outcome = register_onionname(name, paths, docker, os_name, log, registrar=registrar)
+    if outcome.status == "unsaved":
+        print(f"ERROR: {outcome.error}", file=sys.stderr)
+        return 2
+    if outcome.status == "invalid":
+        if json_output:
+            print(json.dumps({"error": outcome.error, "name": outcome.name}), file=out)
+        else:
+            print(f"ERROR: {outcome.error}", file=out)
+        return 2
+    if outcome.status == "taken":
+        if json_output:
+            print(json.dumps({"error": "taken", "name": outcome.name,
+                              "suggestions": outcome.suggestions}), file=out)
+        else:
+            print(f"The onionname '{outcome.name}' is already taken.", file=out)
+            if outcome.suggestions:
+                print("Suggestions: " + ", ".join(outcome.suggestions), file=out)
+        return 2
+
+    renamed = None
+    if rename_admin and old_name and old_name != outcome.name:
+        renamed = setup_logic.rename_wp_user(old_name, outcome.name, docker=docker, log=log)
+    record = onionname_record(paths.config_file)
+    rename_error = ("" if renamed is not False else
+                    f"The WordPress admin is still '{old_name}': renaming it failed "
+                    "(see the OnionPress log)")
+    if json_output:
+        answer = {"ok": not rename_error, **record, "note": outcome.note}
+        if renamed is not None:
+            answer["admin_renamed"] = renamed
+        if rename_error:
+            answer["error"] = rename_error
+        print(json.dumps(answer), file=out)
+    else:
+        if outcome.status == "registered":
+            print(f"Registered '{outcome.name}': {record['url']}", file=out)
+        else:
+            print(f"Recorded '{outcome.name}'. {outcome.note}", file=out)
+        if renamed:
+            print(f"The WordPress admin is now '{outcome.name}'.", file=out)
+        elif rename_error:
+            print(f"ERROR: {rename_error}", file=sys.stderr)
+    return 1 if rename_error else 0

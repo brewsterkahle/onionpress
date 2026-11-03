@@ -39,6 +39,10 @@ from . import launcher_ops
 
 BACKUP_PASSWORD_ENV = launcher_ops.BACKUP_PASSWORD_ENV
 HUB_RECOVERY_KEY_ENV = launcher_ops.HUB_RECOVERY_KEY_ENV
+# `onionpress setup` / `provision`'s admin password (setup_logic's
+# SETUP_PASSWORD_ENV; a test keeps them equal): in the environment the
+# UIs hand the launcher, never on its argv.
+SETUP_PASSWORD_ENV = "ONIONPRESS_SETUP_PASSWORD"
 
 # A question left on the screen is not a yes: every UI dialog answers
 # Cancel after this long (onionpress.confirm).
@@ -49,7 +53,7 @@ SEALED_HUB_DATA_QUESTION = "sealed-hub-data-left-out"
 # Launcher subcommands whose arguments can carry a secret (the old
 # `backup <password>` / `restore <password> <zip>` forms, setup --pass,
 # import-key). A log gets their name only.
-UNLOGGED_ARGS = frozenset({"backup", "restore", "setup", "scrub", "import-key"})
+UNLOGGED_ARGS = frozenset({"backup", "restore", "setup", "provision", "scrub", "import-key"})
 
 
 def loggable(argv) -> str:
