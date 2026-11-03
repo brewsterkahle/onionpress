@@ -1191,8 +1191,8 @@ class Daemon(PortAttributes):
                 and not self._onionname_retry_in_flight and not self._onionname_retry_giveup):
             pending = self.read_config_value("ONIONNAME", "")
             registered = self.read_config_value("ONIONNAME_REGISTERED", "no") == "yes"
-            # Not with no OnionHome (ONIONHOME_ADDRESS empty, as the e2e
-            # harness sets it): onionnames_registrar.configured_onionhome.
+            # Not while OnionHeaven is off, nor with ONIONHOME_ADDRESS
+            # empty: onionnames_registrar.configured_onionhome.
             if pending and not registered and self._onionhome_address():
                 self._onionname_retry_in_flight = True
                 threading.Thread(target=self._retry_pending_onionname, daemon=True,

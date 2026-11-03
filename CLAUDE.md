@@ -1062,15 +1062,20 @@
   against heartbeats. `tests/test_onionheaven_lifecycle.py`.
 - Hub mode is decided by address (`is_onionheaven_instance`), never by a
   running container. `tests/test_linux_hub_mode.py`.
-- **An onionname is registered only with the config's OnionHome**:
-  `onionnames_registrar.configured_onionhome` (`ONIONHOME_ADDRESS`, the
-  key analytics sharing reads; absent is the default, empty or not one v3
-  address is none) for setup's `register_onionname` and the daemon's
-  retry. With none the name is recorded unregistered and never retried.
-  The e2e baseline config sets it empty, so no test node registers.
+- **Onionnames go with OnionHeaven** (#554): nothing registers an
+  onionname with OnionHome unless `REGISTER_WITH_ONIONHEAVEN` is on (the
+  `registration_choice` rule) and `ONIONHOME_ADDRESS` (the key analytics
+  sharing reads; absent is the default) is not empty or invalid:
+  `onionnames_registrar.configured_onionhome` for setup's
+  `register_onionname` and the daemon's retry, and
+  `onionpress_namesync_allowed` (from `config-current.json`, unreadable is
+  no) before the name-sync plugin's per-user and daily registrations. Off,
+  the name is recorded unregistered and never retried; names already
+  registered stay. The e2e baseline config turns both off.
   `TestConfiguredOnionHome` / `TestSetupOnionname` in
   `tests/test_setup_through_the_cli.py`, `TestOnionnameRetry` in
-  `tests/test_mac_daemon_paths.py`, `tests/test_e2e_harness.py`.
+  `tests/test_mac_daemon_paths.py`, `tests/test_name_sync_gate.py`,
+  `tests/test_e2e_harness.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - Backups prune WordPress derivatives by `src/onionpress/derivatives.py`'s

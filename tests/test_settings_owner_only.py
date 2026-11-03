@@ -365,7 +365,10 @@ class TestSharedVolumeCensus(unittest.TestCase):
     GATED = {"onionpress-settings.php", "onionpress-status.php"}
     # The auto-login plugin's token handling is reviewed on its own.
     SKIP = {"onionpress-auto-login.php"}
-    READ_OR_LEGACY = {"onion_address", "version",
+    # config-current.json: the host's allowlisted config, which the
+    # name-sync plugin reads for its OnionHeaven gate (#554); only the
+    # status writer writes it.
+    READ_OR_LEGACY = {"onion_address", "version", "config-current.json",
                       "wayback-queue.json", "wayback-archived.json"}
 
     def test_only_the_gated_pages_name_host_action_files(self):
