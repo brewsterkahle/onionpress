@@ -77,11 +77,11 @@ class TestIsOnionheavenHubCommand(unittest.TestCase):
 
 
 class TestBothPlatformsDecideByAddress(unittest.TestCase):
-    def test_linux_launcher_decides_nothing_itself(self):
+    def test_linux_launcher_delegates_to_the_cli(self):
         launcher = _read("linux/onionpress")
-        # Its is_onionheaven_hub (a delegation to `is-onionheaven-hub`) had
-        # no caller left and went; nothing in bash asks the mode.
-        self.assertNotIn("is_onionheaven_hub", launcher)
+        # `onionpress is-onionheaven-hub` is the rule; the launcher's bash
+        # wrapper had no caller left after #523 and was removed.
+        self.assertNotIn("\nis_onionheaven_hub() {", launcher)
         # The status is the writer's (#523): the rule by address there, and
         # never the old one (a running onionheaven container, which every
         # node has) in the launcher.

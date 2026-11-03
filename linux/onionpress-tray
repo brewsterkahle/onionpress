@@ -67,8 +67,7 @@ from gi.repository import Gtk, GLib, AyatanaAppIndicator3 as AppIndicator, Notif
 # a tray without it is a broken install, not a degraded mode.
 from onionpress import config as _op_config  # noqa: E402
 from onionpress import daemon_client  # noqa: E402
-from onionpress import launcher_ops  # noqa: E402
-from onionpress import setup_logic as _setup_logic  # noqa: E402
+from onionpress import setup_logic as _setup_logic  # noqa: E402  (names and titles only)
 from onionpress import ui_client  # noqa: E402
 
 
@@ -867,13 +866,39 @@ def confirm_quit(parent=None) -> bool:
 
 # ─── 6b. First-run setup dialog ─────────────────────────────────────────
 
+def _ask_another_onionname(parent, name: str, suggestions) -> Optional[str]:
+    """OnionHome has *name* for another site: the person picks another
+    (a suggestion filled in) or skips, which installs under *name*
+    unregistered (the daemon asks again once the site runs). Cancel is
+    the default; the name's rule is checked by the CLI."""
+    dlg = Gtk.MessageDialog(parent=parent, flags=0, message_type=Gtk.MessageType.QUESTION,
+                            buttons=Gtk.ButtonsType.NONE,
+                            text=f"The onionname '{name}' is already taken")
+    dlg.format_secondary_text(
+        "Pick a different onionname." + ("\n\nSuggestions: " + ", ".join(suggestions)
+                                         if suggestions else ""))
+    entry = Gtk.Entry()
+    entry.set_text(suggestions[0] if suggestions else "")
+    entry.set_activates_default(True)
+    dlg.get_content_area().pack_end(entry, False, False, 8)
+    dlg.add_button("Skip for now", Gtk.ResponseType.CANCEL)
+    dlg.add_button("Use this name", Gtk.ResponseType.OK)
+    dlg.set_default_response(Gtk.ResponseType.OK)
+    dlg.show_all()
+    response = _run_dialog(dlg)
+    new_name = entry.get_text().strip()
+    dlg.destroy()
+    return new_name if response == Gtk.ResponseType.OK and new_name else None
+
+
 class SetupDialog:
     """First-run wizard: welcome form → provisioning progress.
 
-    Shown by the tray when status.json transitions to
-    wp_installed=True, onboarded=False.  Calls
-    setup_logic.provision_existing_wordpress() in a background thread;
-    GLib.idle_add bridges thread → GTK.
+    Shown by the tray until the site is onboarded. Runs `onionpress
+    setup --json` (or `provision --json` for a WordPress the start
+    installed) through the launcher in a background thread (issue #527:
+    setup_logic in the CLI, the onionname registered with OnionHome
+    first); GLib.idle_add bridges thread → GTK.
 
     on_done(success: bool) is called on the GTK thread after provisioning
     completes.
@@ -1007,8 +1032,8 @@ class SetupDialog:
         grid.attach(self._pw_error, 1, row, 1, 1)
 
         # Language selector — same list/codes as the Mac SetupWindow so
-        # both platforms ship the same default options. Plumbed through
-        # to provision_existing_wordpress(language=…) below.
+        # both platforms ship the same default options (setup_logic.
+        # SETUP_LANGUAGES, test-held). Passed as `setup --language`.
         row += 1
         grid.attach(Gtk.Label(label="Language:", xalign=1), 0, row, 1, 1)
         self._language_options = [
@@ -1168,39 +1193,40 @@ class SetupDialog:
         except Exception as e:
             self._log(f"warn: failed to persist analytics pref: {e}")
 
-        # Branch on whether WordPress was already installed by a legacy
-        # bash-launcher auto-bootstrap (older installs) or is empty and
-        # waiting for us to do `wp core install` ourselves (the Mac-
-        # parity flow used by all new installs).
-        wp_already_installed = bool(self._status_wp_installed())
-        if wp_already_installed:
-            ok = _setup_logic.provision_existing_wordpress(
-                site_title=title,
-                onionname=onionname,
-                password=password,
-                language=language,
-                log_func=self._log,
-            )
-        else:
-            onion_addr = (self._status_onion_address() or "localhost")
-            ok = _setup_logic.install_fresh_wordpress(
-                site_title=title,
-                onionname=onionname,
-                password=password,
-                language=language,
-                onion_addr=onion_addr,
-                launcher_bin=LAUNCHER,
-                log_func=self._log,
-            )
+        # `setup` installs WordPress (the new path); `provision` takes one
+        # an older start auto-installed (the legacy bootstrap). Both
+        # register the onionname with OnionHome before WordPress gets it;
+        # a name OnionHome has for another site is asked again and the
+        # command run again (nothing was installed).
+        verb = "provision" if self._status_wp_installed() else "setup"
+        later = []
+        ok = False
+        for _ in range(5):
+            rc, answer, out, err = Launcher.run_json(
+                verb, "--user", onionname, "--title", title, "--language", language,
+                *later, "--json", env={ui_client.SETUP_PASSWORD_ENV: password},
+                on_line=self._log, timeout=None)
+            answer = answer or {}
+            if answer.get("error") == "taken":
+                new_name = _on_main_thread(
+                    lambda: _ask_another_onionname(self._dlg, onionname,
+                                                   answer.get("suggestions") or []))
+                if new_name:
+                    onionname = new_name
+                else:
+                    later = ["--register-later"]
+                continue
+            ok = rc == 0 and bool(answer.get("ok"))
+            if not ok:
+                self._log("setup failed: " + (answer.get("error") or ui_client.launcher_failure(
+                    out, err, "see the OnionPress log")))
+            break
         GLib.idle_add(self._done, ok)
 
     def _status_wp_installed(self) -> bool:
         # The tray's Status snapshot lives on a different thread; this
         # helper reads the file to avoid races during provisioning.
         return bool((_read_status() or {}).get("wp_installed"))
-
-    def _status_onion_address(self) -> str:
-        return (_read_status() or {}).get("onion_address", "") or ""
 
     # ── Thread-safe UI helpers ────────────────────────────────────────
 
@@ -1412,8 +1438,8 @@ class OnionPressTray:
             return
         # Trigger as soon as containers are up — WP may or may not be
         # installed. SetupDialog's _provision branches on wp_installed
-        # to either install_fresh_wordpress (new path) or
-        # provision_existing_wordpress (legacy auto-bootstrap path).
+        # to either `onionpress setup` (new path) or `onionpress
+        # provision` (legacy auto-bootstrap path).
         if self.status.state != "running" and self.status.state not in STARTING_STATES:
             return
         self._setup_shown = True
@@ -1427,7 +1453,7 @@ class OnionPressTray:
         """
         def _on_done(success):
             if success:
-                self._open_logged_in(f"http://localhost:{self.status.wp_port}/")
+                Launcher.run_async("open", "site")
             else:
                 # Mirror the Mac menubar: keep re-showing the dialog
                 # until setup succeeds. There's no "Setup…" menu item
@@ -1528,168 +1554,56 @@ class OnionPressTray:
             text=url,
         )
 
-    def _open_logged_in(self, base_url: str) -> None:
-        """Open base_url in the default browser, logged in as the admin.
-
-        The browser's command line gets a file:// page that redirects to
-        base_url with a one-time token (launcher_ops.login_target), never
-        the token itself: /proc/<pid>/cmdline is readable by every local
-        user, and whoever redeems the token first is the admin."""
-        launcher_ops.open_in_browser(launcher_ops.login_target(base_url))
-
     def _on_open_settings(self, *_):
-        self._open_logged_in(
-            f"http://localhost:{self.status.wp_port}/wp-admin/admin.php?page=onionpress-settings")
+        # Logged in: `onionpress open` hands the browser a file:// page,
+        # never the token on a command line.
+        Launcher.run_async("open", "settings")
 
     def _on_open_local(self, *_):
-        # Include /<onionname>/ so localhost takes the user to their
-        # subsite, not the network root. Matches Open in Tor Browser.
-        name = _onionname()
-        # No trailing slash on the subsite path — sunrise.php's subsite
-        # router (preg_match '#^/([^/]+)/#') only matches with BOTH
-        # leading and trailing slashes, so /<name> (no trailing slash)
-        # routes to blog_id=1 on first hit. (The op_login token is a
-        # network-wide transient now, found from any subsite.)
-        base = (f"http://localhost:{self.status.wp_port}/{name}"
-                if name else f"http://localhost:{self.status.wp_port}/")
-        self._open_logged_in(base)
+        # The local site at /<onionname>/, logged in.
+        Launcher.run_async("open", "site")
 
     def _on_open_onion(self, *_):
-        addr = self.status.onion_address
-        if not addr:
+        """`onionpress open onion --json` (the one implementation, issue
+        #527): Tor Browser cold-launched with the
+        site as a tab once it is up; the token-bearing URL to paste when
+        Tor Browser runs already (it takes no new tab); the default
+        browser without torbrowser-launcher."""
+        if not self.status.onion_address:
             return
-        # Include /<onionname>/ so the URL lands the user on their own
-        # subsite, matching what Copy Onion Address and "Open Local Site"
-        # already do. Login token IS included here (this is the
-        # "view my own site" flow, not the share-with-others flow).
-        name = _onionname()
-        # See _on_open_local for the no-trailing-slash rationale.
-        base = f"http://{addr}/{name}" if name else f"http://{addr}/"
-
-        # If Tor Browser is already running, we cannot inject a new tab:
-        # Tor Browser ships without DBus remoting registration (none of
-        # mozilla/firefox/torbrowser bus names appear under the user's
-        # session bus), so `firefox -new-tab URL` always falls through to
-        # the new-instance code path, hits the profile lock, and pops
-        # "Tor Browser is already running" at the user. start-tor-browser
-        # via the wrapper doesn't help — same firefox, same missing IPC.
-        # Setting the GTK clipboard from a window-less tray on Wayland
-        # silently no-ops too (no focused window to own it; no clipboard
-        # manager installed on this box). So we pop a tiny dialog whose
-        # window DOES own the clipboard, with the URL pre-selected and a
-        # Copy button. The auto-login token in the URL is honoured by
-        # the onionpress-auto-login.php mu-plugin once pasted.
-        # The dialog shows the token-bearing URL itself: it reaches Tor
-        # Browser by paste, on no command line.
-        existing = launcher_ops._tor_browser_running()
-        if existing:
-            self._show_url_copy_dialog(launcher_ops.login_url(base))
-            return
-
-        # Already mid-launch from a previous click? Don't kick off a
-        # second torbrowser-launcher — it would hit the profile lock
-        # file and pop "Tor Browser is already running" at the user.
-        # The first launch's wait-thread will still open the URL once
-        # firefox.real comes up.
         if self._tor_launch_in_progress:
             self.notifier.notify(
                 "tor-launching", "Tor Browser is starting",
                 "Already loading — your site will open once Tor connects.",
             )
             return
-
-        # Belt-and-braces: also check the process table for an in-flight
-        # torbrowser-launcher (handles the case where the user restarted
-        # the tray between clicks, losing our in-process flag).
-        try:
-            tbl = subprocess.run(["pgrep", "-x", "torbrowser-launcher"],
-                                  capture_output=True, timeout=3)
-            if tbl.returncode == 0:
-                self.notifier.notify(
-                    "tor-launching", "Tor Browser is starting",
-                    "Already loading — your site will open once Tor connects.",
-                )
-                return
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-
-        # Cold launch: passing a URL on the torbrowser-launcher command line
-        # fails silently if Tor hasn't bootstrapped yet — Tor Browser tries
-        # the request immediately, the request errors during bootstrap, and
-        # the URL is never retried. Instead, launch with no URL so the user
-        # gets the connect dialog cleanly, then in a background thread wait
-        # for firefox.real to appear and send the URL as a -new-tab. The
-        # tab itself will reload after Tor finishes bootstrapping.
-        import shutil as _sh
-        if not _sh.which("torbrowser-launcher"):
-            # Fall back to whatever the default browser makes of the .onion.
-            launcher_ops.open_in_browser(launcher_ops.login_target(base),
-                                         prefer_tor=False)
-            return
-
-        # Clean up stale lock files from a previous Tor Browser session
-        # that crashed / was force-killed. Otherwise torbrowser-launcher
-        # refuses to start and pops the "already running" dialog.
-        if launcher_ops.cleanup_stale_tor_browser_locks():
-            log("Removed stale Tor Browser lock files before launching")
-
-        try:
-            subprocess.Popen(
-                ["torbrowser-launcher"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL, start_new_session=True,
-            )
-        except (OSError, FileNotFoundError) as e:
-            log(f"failed to launch torbrowser-launcher: {e}")
-            return
-
         self._tor_launch_in_progress = True
-        self.notifier.notify(
-            "tor-launching", "Tor Browser is starting",
-            "Once it connects to Tor, your site will load automatically.",
-        )
 
-        def _wait_then_open():
+        def on_line(line):
+            if "Tor Browser is starting" in line:
+                GLib.idle_add(lambda: self.notifier.notify(
+                    "tor-launching", "Tor Browser is starting",
+                    "Once it connects to Tor, your site will load automatically.") and False)
+
+        def run():
             try:
-                # Up to 6 minutes — enough for a first-time install (~80 MB
-                # download + signature verify + Tor bootstrap).
-                for _ in range(180):
-                    time.sleep(2)
-                    fr = launcher_ops._tor_browser_running()
-                    if fr:
-                        # firefox.real is up. Go through the start-tor-
-                        # browser wrapper, NOT firefox.real directly:
-                        # the wrapper sets HOME/cwd/env so Firefox's
-                        # remoting finds the running profile. Without
-                        # it `firefox.real -new-tab URL` spawns a fresh
-                        # process, hits the profile lock, and pops TB's
-                        # native "already running" dialog. -new-tab via
-                        # the wrapper takes effect even while Tor is
-                        # still bootstrapping — the tab waits for the
-                        # circuit and then loads. The tab gets the
-                        # login_target page, minted now so the token's two
-                        # minutes start when the browser is there to use it.
-                        target = launcher_ops.login_target(base)
-                        wrapper = os.path.join(
-                            os.path.dirname(fr), "start-tor-browser")
-                        if os.path.exists(wrapper) and os.access(wrapper, os.X_OK):
-                            cmd = [wrapper, "-new-tab", target]
-                        else:
-                            cmd = [fr, "-new-tab", target]
-                        try:
-                            subprocess.Popen(
-                                cmd,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL,
-                                start_new_session=True,
-                            )
-                        except OSError as e:
-                            log(f"failed to send tab to Tor Browser: {e}")
-                        return
+                rc, answer, out, err = Launcher.run_json("open", "onion", "--json",
+                                                         on_line=on_line, timeout=None)
             finally:
                 self._tor_launch_in_progress = False
-        threading.Thread(target=_wait_then_open, daemon=True).start()
+            answer = answer or {}
+            if answer.get("paste_url"):
+                # The token-bearing URL reaches Tor Browser by paste, on
+                # no command line.
+                GLib.idle_add(lambda: self._show_url_copy_dialog(answer["paste_url"]) and False)
+            elif answer.get("launching"):
+                GLib.idle_add(lambda: self.notifier.notify(
+                    "tor-launching", "Tor Browser is starting",
+                    "Already loading — your site will open once Tor connects.") and False)
+            elif rc != 0 or not answer.get("ok"):
+                log("open onion failed: " + (answer.get("error") or ui_client.launcher_failure(
+                    out, err, "see the OnionPress log")))
+        threading.Thread(target=run, daemon=True).start()
 
     def _open_data_folder(self):
         subprocess.Popen(

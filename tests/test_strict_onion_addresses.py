@@ -2,8 +2,8 @@
 """Onion addresses are checked whole, not by "ends in .onion".
 
 An address that ends up in a URL, a path, a command or a registry has to be
-a well-formed v3 address and nothing else (key_manager.is_valid_onion_address
-and the launchers' is_onion_address). `x.endswith(".onion")` and
+a well-formed v3 address and nothing else (key_manager.is_valid_onion_address,
+which start.vanity_key_dir uses too). `x.endswith(".onion")` and
 `".onion" in x` accept "evil.example/" + 39 characters + ".onion": as the
 hub address, that is a URL path on a clearnet host, and the heartbeat POSTs
 the site's onion private key to it through a Tor exit. Covered here:
@@ -718,16 +718,46 @@ class TestOnionHomeOwnAddress(unittest.TestCase):
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 
 
+def _bash_function(text, name):
+    start = text.index(f"\n{name}() {{")
+    end = text.index("\n}\n", start)
+    return text[start:end + 3]
+
+
+def _bash(script, *args, env=None):
+    return subprocess.run(["bash", "-c", script, "bash", *args],
+                          capture_output=True, text=True, timeout=10,
+                          env={**os.environ, "LC_ALL": "en_US.UTF-8", **(env or {})})
+
+
 class TestLaunchers(unittest.TestCase):
 
-    def test_no_bash_address_rule_or_key_dir_is_left(self):
-        # vanity_key_dir and is_onion_address (its only user) had no caller
-        # left; key_manager.is_valid_onion_address is the rule, and the key
-        # folder is key_import's (current_vanity_address).
+    def _functions(self, rel, *names):
+        text = _read(rel)
+        return "".join(_bash_function(text, n) for n in names)
+
+    def test_no_bash_key_dir_reader_is_left(self):
+        # The launchers' vanity_key_dir / is_onion_address had no caller
+        # left once the start and the key steps moved to Python (#442,
+        # #524): start.vanity_key_dir is the one reader.
         for rel in LAUNCHERS:
             text = _read(rel)
-            with self.subTest(launcher=rel):
-                self.assertNotRegex(text, r"\b(vanity_key_dir|is_onion_address)\b")
+            for name in ("vanity_key_dir", "is_onion_address"):
+                self.assertNotIn(f"\n{name}() {{", text, rel)
+
+    def test_vanity_key_dir_takes_only_a_whole_address(self):
+        from onionpress import start
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        keys = os.path.join(tmp, "shared", "vanity-keys")
+        os.makedirs(os.path.join(keys, "aaa.onion"))
+        os.makedirs(os.path.join(keys, "a,source=" + tmp + ",.onion"))
+        os.makedirs(os.path.join(tmp, "elsewhere"))
+        os.symlink(os.path.join(tmp, "elsewhere"),
+                   os.path.join(keys, "b" * 56 + ".onion"))
+        self.assertIsNone(start.vanity_key_dir(tmp))
+        os.makedirs(os.path.join(keys, SITE))
+        self.assertEqual(start.vanity_key_dir(tmp), os.path.join(keys, SITE))
 
     def test_no_launcher_picks_a_key_dir_by_suffix(self):
         for rel in LAUNCHERS:

@@ -721,20 +721,18 @@ def _case_branch(text, label):
     return text[start:text.index("\n            ;;\n", start)]
 
 
-class TestReleaseFunctionInTheLaunchers(unittest.TestCase):
-    """The launchers' onionheaven_release (the CLI's onionheaven-unregister,
-    then "Continue anyway?") had no caller left once uninstall, reset, the
-    key import and the restore became the CLI's (#529, #524): each asks
-    `hub-holds-key` through the check/confirm protocol and releases
-    through release_onionheaven (TestLauncherPathsReleaseFirst). No bash
-    copy of the release may come back."""
+class TestNoReleaseFunctionInTheLaunchers(unittest.TestCase):
+    """Every path that ends a hub's hold on the key is Python's
+    (`uninstall.run`, `cmd_reset`, `scrub.phase_reset_in_place`,
+    `key_import.replace_key`; TestLauncherPathsReleaseFirst below), each
+    calling `release_onionheaven` and asking its own question. The
+    launchers' bash onionheaven_release had no caller left after #524 and
+    #529 and was removed: a second copy of the question would drift."""
 
-    def test_no_launcher_holds_the_release(self):
+    def test_neither_launcher_defines_it(self):
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
-            text = _read(rel)
             with self.subTest(rel=rel):
-                self.assertNotIn("onionheaven_release", text)
-                self.assertNotIn("onionheaven-unregister", text)
+                self.assertNotIn("\nonionheaven_release() {", _read(rel))
 
 
 class TestLauncherPathsReleaseFirst(unittest.TestCase):

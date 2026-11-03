@@ -712,23 +712,15 @@ class TestLinuxWaitThenOpenUsesWrapper(unittest.TestCase):
     """
 
     def test_wait_then_open_prefers_start_tor_browser_wrapper(self):
-        src = _read("linux/onionpress-tray")
-        # Carve the _wait_then_open function body so we don't accidentally
-        # match an unrelated `firefox.real` reference elsewhere in the file.
-        m = re.search(
-            r'def\s+_wait_then_open\(\)[^\n]*:(.*?)(?=\n\s{0,8}def\s+\w|\Z)',
-            src, re.DOTALL)
-        self.assertIsNotNone(
-            m, "_wait_then_open helper must exist in linux/onionpress-tray")
-        body = m.group(1)
-        # Wrapper path must be referenced.
-        self.assertRegex(
-            body, r'start-tor-browser',
-            "_wait_then_open must launch the URL via the start-tor-browser "
-            "wrapper. Spawning firefox.real with -new-tab directly hits "
-            "the profile lock and pops Tor Browser's native 'already "
-            "running' dialog instead of opening the URL in a new tab.",
-        )
+        # The cold launch's wait is launcher_ops.open_onion's since issue
+        # #527 (`onionpress open onion`, the tray's and the menubar's).
+        import inspect
+        from onionpress import launcher_ops
+        body = inspect.getsource(launcher_ops._new_tab_argv)
+        self.assertIn('"start-tor-browser"', body)
+        self.assertLess(body.index("[wrapper,"), body.index("[firefox_real,"))
+        self.assertIn("_new_tab_argv(running,", inspect.getsource(launcher_ops._open_onion_linux))
+        self.assertNotIn("_wait_then_open", _read("linux/onionpress-tray"))
 
 
 class TestLinuxOnionAddressSharedToWp(unittest.TestCase):
@@ -1256,18 +1248,18 @@ class TestKeyVolumeMigration(unittest.TestCase):
         end = text.index("\n}\n", start)
         return text[start:end]
 
-    def test_no_launcher_holds_the_migration(self):
-        """Phase 4 (#120): the migration is ContainerManager.migrate_key_volume
-        (TestKeyVolumeMigrationInPython), run by start.start_containers
-        (#442.8) and `onionpress start-tor` (#529); the launchers' bash
-        delegation, and docker_volume_state with it, had no caller left
-        and went. Nothing of either may come back in bash."""
+    def test_no_launcher_carries_the_migration(self):
+        """The migration is ContainerManager.migrate_key_volume, run by the
+        start (`start.start_containers`; TestKeyVolumeMigrationInPython,
+        tests/test_start_sequence.py) and by `onionpress migrate-key-volume`.
+        The launchers' bash delegations had no caller left once the start
+        moved to Python (#442) and were removed: no launcher may define one
+        again, nor `docker_volume_state`, the bash check it ran on."""
         for f in self.LAUNCHERS:
             text = _read(f)
             with self.subTest(launcher=f):
                 for name in ("migrate_key_volume", "docker_volume_state"):
                     self.assertNotIn(f"\n{name}() {{", text)
-                    self.assertNotRegex(text, rf"\b{name}\b")
 
     def test_migration_runs_before_first_run_detection(self):
         for f in self.LAUNCHERS:
@@ -1331,20 +1323,19 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 )
                 self.assertNotIn(
                     "docker volume ls", body,
-                    "start_containers must leave the volume questions to "
-                    "start-containers (ContainerManager.volume_state tells an "
-                    "absent volume from a Docker that did not answer).",
+                    "start_containers must ask about volumes through "
+                    "docker_volume_state, which tells an absent volume from "
+                    "a Docker that did not answer.",
                 )
 
-    def test_no_launcher_starts_tor_itself(self):
+    def test_every_tor_start_runs_the_migration_first(self):
         """Starting tor mounts onionpress-onion-keys, and Docker creates it,
         empty, when it is not there. Every later start would then take it
         for the migrated key (the migration skips an existing new volume)
         and Tor would mint a new address from the empty volume, while the
-        real key sat in onionpress-arti-state. So every start of tor runs
-        the migration first; every one is Python's now (start.post_up,
-        setup_logic, `onionpress start-tor`), and no `compose up ... tor`
-        may come back in a launcher, where nothing would run it."""
+        real key sat in onionpress-arti-state. So every `compose up ... tor`
+        in the launchers (start_containers, `start-tor`, `setup`) comes
+        after migrate_key_volume in its own function or case branch."""
         block_start = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\(\) \{|\s*[A-Za-z0-9_|-]+\)\s*)$")
         tor_up = re.compile(r"\bdocker compose\b.*\bup\b.*\btor\b")
         for f in self.LAUNCHERS:
@@ -1355,15 +1346,18 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     continue
                 found += 1
                 start = max(k for k in range(n) if block_start.match(lines[k]))
+                block = [l for l in lines[start:n] if not l.lstrip().startswith("#")]
                 with self.subTest(launcher=f, line=n + 1):
-                    self.fail(f"{lines[start].strip()!r} starts tor at line {n + 1} "
-                              "in bash, without the migration before it")
+                    self.assertTrue(
+                        any(re.search(r"\bif ! migrate_key_volume\b", l) for l in block),
+                        f"{lines[start].strip()!r} starts tor at line {n + 1} "
+                        "without migrate_key_volume before it")
             # The start's and the setup's tor are Python's since #442.7 and
             # #442.11 (start.post_up and setup_logic.setup_from_terminal,
             # both after the migration and behind key_volume_not_ready:
             # tests/test_start_post_up.py, tests/test_terminal_setup.py);
-            # the launchers' `start-tor` is `onionpress start-tor` (#529).
-            self.assertEqual(found, 0, f)
+            # what is left here is the launchers' own `start-tor`.
+            self.assertGreaterEqual(found, 0, f)
 
     def test_identity_wipes_drop_the_migration_marker(self):
         """A key import or restore removes both key volumes for a replaced
@@ -1399,14 +1393,19 @@ class TestKeyVolumeMigration(unittest.TestCase):
     def test_wipes_remove_both_names(self):
         """A replaced identity (key import, restore) must delete the old-name
         volume too, or the next start would migrate it back over the new key.
+        Every wipe is Python's now: the launchers name neither volume.
         """
-        # The launchers wipe no key volume of their own any more (the key
-        # import, the restore and the start's pending import are Python's).
         for f in ["src/onionpress/cli.py", "src/onionpress/backup.py"]:
             text = _read(f)
             with self.subTest(file=f):
                 self.assertIn("onionpress-onion-keys", text)
                 self.assertIn("onionpress-arti-state", text)
+        for f in self.LAUNCHERS:
+            text = _read(f)
+            with self.subTest(file=f):
+                self.assertNotIn("onionpress-arti-state", text,
+                                 "a key volume wipe in bash is a second copy "
+                                 "of the Python's wipe lists")
 
     def test_compose_mounts_the_new_volume(self):
         compose = "\n".join(
@@ -1932,47 +1931,6 @@ exit 0
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout, docker_calls, marker_left
 
-    # The migration as the launchers' runners reach it (`onionpress
-    # migrate-key-volume`, the bash delegation's body until it went: no
-    # caller was left), its lines tee'd into the log.
-    MIGRATE = ('rc=0; op_py --data-dir "$DATA_DIR" migrate-key-volume 2>&1 | tee -a "$LOG_FILE"; '
-               'echo "${PIPESTATUS[0]}"')
-
-    def test_migration_refuses_when_docker_does_not_answer(self):
-        """End to end through the CLI (Phase 4, #120): the Python's exit
-        status, and its lines reach the log."""
-        for f in self.LAUNCHERS:
-            with self.subTest(launcher=f):
-                state = {}
-                out, calls, _ = self._run(f, self.MIGRATE, mode="down", state=state)
-                # The tee'd lines come first (the launcher's log() tees too).
-                self.assertEqual(out.strip().splitlines()[-1], "1")
-                self.assertIn("ERROR: Docker did not say", out)
-                self.assertFalse([c for c in calls if not c.startswith("volume ls")],
-                                 f"nothing but the question may run: {calls}")
-                self.assertIn("ERROR: Docker did not say whether onionpress-onion-keys exists",
-                              state["log"])
-
-    def test_migration_copies_only_when_just_the_old_volume_exists(self):
-        cases = {
-            "onionpress-arti-state": True,                          # upgrade
-            "onionpress-onion-keys onionpress-arti-state": False,   # already migrated
-            "": False,                                              # fresh install
-        }
-        for f in self.LAUNCHERS:
-            for volumes, copies in cases.items():
-                with self.subTest(launcher=f, volumes=volumes):
-                    state = {}
-                    out, calls, _ = self._run(f, self.MIGRATE, volumes=volumes, state=state)
-                    self.assertEqual(out.strip().splitlines()[-1], "0")
-                    self.assertEqual(
-                        "volume create onionpress-onion-keys" in calls, copies, calls)
-                    self.assertEqual("Key volume migrated" in state["log"], copies)
-                    for c in calls:
-                        self.assertNotRegex(c, r"^volume rm .*onionpress-arti-state",
-                                            "the migration never removes the old volume")
-                    self.assertFalse(state["migration_marker"])
-
     def test_start_stops_before_any_volume_check_when_docker_never_answers(self):
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
@@ -2041,8 +1999,8 @@ class FakeKeyVolumeDocker:
 
 
 class TestKeyVolumeMigrationInPython(unittest.TestCase):
-    """ContainerManager.migrate_key_volume (Phase 4, #120; start.start_containers
-    and `onionpress start-tor` run it) against a fake docker: the cases the bash
+    """ContainerManager.migrate_key_volume (Phase 4, #120; both launchers'
+    migrate_key_volume run it) against a fake docker: the cases the bash
     harness ran until the body moved, and what those could not reach."""
 
     PIN = re.search(r"(?m)^ONIONPRESS_TOR_IMAGE=(\S+)$",

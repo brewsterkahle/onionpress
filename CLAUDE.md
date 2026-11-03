@@ -338,8 +338,27 @@
   (`tests/test_settings_page_nonces.py`, a census).
 - Page Stop/Restart go through the launcher's cases (Linux asks the
   daemon for `/offline` first). `tests/test_linux_settings_page_stop.py`. Share Now is
-  taken by the long-running process and refused while sharing is off.
-  `tests/test_settings_page_share_now.py`.
+  handle-action's `upload-analytics` (`analytics_sharing.request_upload`'s
+  data-dir marker, refused while sharing is off; nothing in the volume, no
+  per-cycle `docker exec`). `tests/test_settings_page_share_now.py`.
+- **The page does none of the host's work** (#528): its release line is
+  `status.json`'s `release` (`status_writer.release_status`, the cache of
+  `handle_action.check_release`; its button is the `update` action), never
+  a request of its own; `config-current.json` has one writer, the status
+  writer (the form shows unapplied `config-updates.json` on top); the
+  status page writes no `requested-action`. Every PHP copy of a host
+  constant (fields, token pattern, restart keys, result files, actions,
+  request id, the onion shape) is held to its source.
+  `tests/test_settings_page_host_constants.py`.
+- **The page's archive.org login is the host's** (#528 item 3):
+  handle-action's `archive-login` over `multisite.fetch_archive_s3_keys`
+  (archive.org's onion over Tor) and `save_archive_s3_keys`; no login code
+  in WordPress. The account and password cross the volume only in the
+  `archive-login` request file (0600, written only when `status.json`'s
+  `page_actions` lists the verb), read once and removed before the login
+  or with a throttled request (`INPUT_FILES`); neither is logged or in the
+  result. `TestArchiveLogin` in `tests/test_handle_action.py`,
+  `TestArchiveLoginIsTheHosts` in `tests/test_settings_page_host_constants.py`.
 - **`onionpress config get|set|unset|list` is the apps' one writer of
   `~/.onionpress/config`** (`config.CLI_CONFIG_KEYS`). A new setting gets
   its `config set` entry first (check, `CONFIG_KEY_HELP`, `NEEDS_RESTART` /
@@ -543,12 +562,33 @@
   key, no new one), marks the setup complete and has the launcher restart.
   Never a WordPress under temporary credentials. `tests/test_terminal_setup.py`,
   `TestLauncherRestorePaths` in `tests/test_backup_metadata_validation.py`.
+- **Both UIs install through `onionpress setup --json`** (#527; the tray's
+  legacy branch `provision --json`): the password in
+  `ONIONPRESS_SETUP_PASSWORD` (`ui_client.SETUP_PASSWORD_ENV`, kept by
+  `run_setup` unless `--pass`), progress on stderr, the answer stdout's
+  last line (the case's closing lines on stderr). The onionname is
+  registered before the install on both platforms
+  (`setup_logic.setup_onionname` over `app_commands.register_onionname`,
+  `onionname set`'s); a taken one installs nothing and answers
+  `{"error": "taken", "suggestions"}`, `--register-later` records it
+  unregistered; a later collision is `onionname set NAME --rename-admin`
+  (`rename_wp_user`: $wpdb, logins on stdin, `site_admins`). Neither UI
+  imports the install, the registrar, `onion_hostname`, `auto_login` or
+  `wp_files`; `--language` is one of `SETUP_LANGUAGES` (both UIs' lists
+  test-held). `tests/test_setup_through_the_cli.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
   live in `src/onionpress/app_commands.py`, shared by both platforms, never
   constructing `OnionPressCLI`. The browser never gets the login token.
   `tests/test_cli_app_commands.py`.
+- **One open-logged-in implementation: `launcher_ops.open_onion`**
+  (`open onion --json`, both UIs, #527): Tor Browser or an extension
+  browser gets `login_target`'s file:// page, Brave the bare URL; a
+  running Linux Tor Browser answers `{"paste_url"}`, a cold launch waits
+  for firefox.real and sends the tab through `start-tor-browser`; a Mac
+  with none answers `no_browser`. `TestOpenOnion` in
+  `tests/test_auto_login_off_argv.py`.
 - **Each launcher's default case delegates to `onionpress.cli`**: a verb
   with no case of its own (`ensure-archive-s3-keys`, `check-for-update`)
   is the CLI's, and every verb the daemon, menubar, tray, `handle_action`,
@@ -1024,6 +1064,15 @@
   against heartbeats. `tests/test_onionheaven_lifecycle.py`.
 - Hub mode is decided by address (`is_onionheaven_instance`), never by a
   running container. `tests/test_linux_hub_mode.py`.
+- **An onionname is registered only with the config's OnionHome**:
+  `onionnames_registrar.configured_onionhome` (`ONIONHOME_ADDRESS`, the
+  key analytics sharing reads; absent is the default, empty or not one v3
+  address is none) for setup's `register_onionname` and the daemon's
+  retry. With none the name is recorded unregistered and never retried.
+  The e2e baseline config sets it empty, so no test node registers.
+  `TestConfiguredOnionHome` / `TestSetupOnionname` in
+  `tests/test_setup_through_the_cli.py`, `TestOnionnameRetry` in
+  `tests/test_mac_daemon_paths.py`, `tests/test_e2e_harness.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - Backups prune WordPress derivatives by `src/onionpress/derivatives.py`'s
@@ -1170,7 +1219,7 @@
 - archive.org keys live in the main site's options; lock and back-off are
   network options via `onionpress_wayback_net_*` only; only the main site's
   cron runs the sweep; one archive.org login
-  (`multisite.fetch_archive_s3_keys`, over Tor).
+  (`multisite.fetch_archive_s3_keys`, over Tor), the Settings page's too.
   `tests/test_wayback_network_state.py` (tests use the
   `onionpress_wayback_net_key` filter, never live keys).
 

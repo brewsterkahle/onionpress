@@ -1074,13 +1074,15 @@ class TestLaunchers(unittest.TestCase):
                 self.assertNotIn("up -d wordpress db", body)
 
     def test_no_launcher_keeps_a_bash_step(self):
-        """Both starts run the step inside start-core (#442.6), and the
-        Linux daemon re-applies it when rootless Docker's namespace changes
-        (Daemon._watch_rootless_netns); Linux's block_wordpress_egress
-        delegation had no caller left and went. Neither launcher keeps one."""
+        """The start runs the step inside start-core (#442.6) on both
+        platforms, and the Linux daemon re-applies it through
+        `onionpress wordpress-egress` when RootlessKit's namespace is
+        replaced (`Daemon._watch_rootless_netns`). Linux's bash
+        block_wordpress_egress had no caller left after #407 and was
+        removed; neither launcher may define one again."""
         for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
-                self.assertNotIn("block_wordpress_egress", _read(path))
+                self.assertNotIn("\nblock_wordpress_egress() {", _read(path))
         # The Mac's start hands start-containers its errors file for the
         # START SUMMARY.
         mac = _function_body(_read(MAC_LAUNCHER), "start_containers")
@@ -1315,94 +1317,6 @@ class TestLaunchers(unittest.TestCase):
 
     def test_py2app_bundles_the_module(self):
         self.assertIn("'onionpress.wordpress_egress'", _read(os.path.join(ROOT, "setup.py")))
-
-
-class TestLauncherDelegationEndToEnd(unittest.TestCase):
-    """`onionpress wordpress-egress` run under bash the way Linux's
-    block_wordpress_egress ran it (until it had no caller left), with the
-    launchers' runner on this interpreter and a `docker` stub on PATH
-    (Phase 4, #120): the CLI's verdict line reaches the terminal and the
-    log file, and a block not in place is the WARNING and status 1."""
-
-    # The delegation's body: the CLI, tee'd into the log.
-    DELEGATION = ('op_py --data-dir "$DATA_DIR" wordpress-egress --wp-port '
-                  '"$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"\n')
-
-    STUB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$STUB_CALLS"
-case "$1" in
-  info) [ "${STUB_INFO_RC:-0}" -eq 0 ] || exit 1; echo '["name=seccomp"]' ;;
-  run) echo ok ;;
-esac
-exit 0
-"""
-
-    @staticmethod
-    def _python_uses_the_stub_docker():
-        """Without --bin-dir, Docker() takes the bundle's docker when there
-        is one (a Mac with OnionPress installed), not the stub on PATH."""
-        from onionpress.docker import Docker
-        from onionpress.platform import resolve_paths
-        with tempfile.TemporaryDirectory() as tmp:
-            return Docker(resolve_paths(data_dir=tmp)).docker_bin == "docker"
-
-    def _run(self, info_rc=0):
-        tmp = tempfile.mkdtemp(prefix="egress-bash-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        bin_dir = os.path.join(tmp, "bin")
-        os.mkdir(bin_dir)
-        stub = os.path.join(bin_dir, "docker")
-        with open(stub, "w", encoding="utf-8") as f:
-            f.write(self.STUB)
-        os.chmod(stub, 0o755)
-        log_file = os.path.join(tmp, "onionpress.log")
-        script = (
-            "set -e\n"
-            f'LOG_FILE="{log_file}"; DATA_DIR="{tmp}"; BIN_DIR="{bin_dir}"\n'
-            'ONIONPRESS_WP_PORT=8080; START_ERRORS=""\n'
-            'bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
-            'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
-            + "".join(_function_body(_read(MAC_LAUNCHER), fn) + "\n}\n"
-                      for fn in ("start_errors_file", "note_start_errors"))
-            + self.DELEGATION
-            + 'echo "rc=${PIPESTATUS[0]} errors=[$START_ERRORS]"\n')
-        env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
-               "STUB_CALLS": os.path.join(tmp, "calls"), "STUB_INFO_RC": str(info_rc),
-               "PY": sys.executable, "SRC": os.path.join(ROOT, "src"),
-               "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"}
-        res = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
-                             text=True, encoding="utf-8", timeout=120)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        with open(log_file, encoding="utf-8") as f:
-            log = f.read()
-        lines = res.stdout.splitlines()
-        return lines[:-1], lines[-1], log
-
-    def _check_runs_here(self):
-        if sys.platform == "darwin":
-            self.skipTest("the CLI's Linux path (docker info) is what the stub answers")
-        if not self._python_uses_the_stub_docker():
-            self.skipTest("the bundle's docker would be run, not the stub")
-
-    def test_in_place(self):
-        self._check_runs_here()
-        out, last, log = self._run()
-        self.assertEqual(last, "rc=0 errors=[]")
-        self.assertEqual(len(out), 1, out)
-        self.assertRegex(out[0], r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] (✓ )?"
-                         r"WordPress network egress block in place: ok \(system-docker\)$")
-        self.assertEqual(log, out[0] + "\n")
-
-    def test_not_in_place(self):
-        self._check_runs_here()
-        out, last, log = self._run(info_rc=1)
-        # The CLI's status says so; its callers (start-core, the daemon's
-        # re-apply) carry on.
-        self.assertEqual(last, "rc=1 errors=[]")
-        self.assertEqual(len(out), 1, out)
-        self.assertIn("] WARNING: WordPress network egress block not in place: "
-                      "error: Docker did not answer `docker info`.", out[0])
-        self.assertEqual(log, out[0] + "\n")
 
 
 if __name__ == "__main__":

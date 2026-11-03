@@ -65,7 +65,7 @@ def tor_image(config_file: str | None = None) -> str:
 
 
 # The onion service key volume, its name until 2026-09-25, and the marker the
-# key volume migration (`onionpress migrate-key-volume`) keeps beside an unverified copy of the
+# migration (ContainerManager.migrate_key_volume) keeps beside an unverified copy of the
 # first into the second. Starting Tor mounts the new volume, and Docker
 # creates it, empty, when it is not there: every later start would then
 # take it for the migrated key, and Tor would mint a new address.
@@ -346,8 +346,8 @@ class ContainerManager:
         that handles the onion service key runs from it: pulled by its
         pinned reference when missing, never for a locally built stack
         (using_local_images). None when it is not here and cannot be.
-        Mirrors ensure_key_helper_image() in both launchers (the key seeds,
-        Linux's backup key reads); migrate_key_volume runs it."""
+        The one copy since the launchers' ensure_key_helper_image went
+        (2026-11-02); migrate_key_volume runs it."""
         image = tor_image(self.paths.config_file)
         inspect = ["image", "inspect", "--format", "{{.Id}}", image]
         if self.docker.run(inspect, timeout=30, quiet=True).ok:
@@ -389,7 +389,7 @@ class ContainerManager:
         say (the daemon is not up yet, e.g. the Colima VM is still booting).
         Callers must treat 2 as "stop", never as "no": a missing key volume
         is the first-run signal, so reading a Docker error as absence turns
-        an upgrade into a first run. The launchers' docker_volume_state."""
+        an upgrade into a first run. (Once the launchers' docker_volume_state.)"""
         result = self.docker.run(["volume", "ls", "--format", "{{.Name}}"],
                                  timeout=30, quiet=True)
         if not result.ok:

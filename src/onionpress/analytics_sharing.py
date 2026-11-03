@@ -27,14 +27,12 @@ import time
 
 from onionpress import redact
 
-# Share Now (issue #351). The marker `onionpress upload-analytics` touches
-# in the data directory, and the file the Settings page's REST endpoint
-# touches in the onionpress-data volume (www-data's: the daemon takes it
-# as www-data). Both are taken by the daemon's status loop
-# (daemon.UPLOAD_TRIGGER_MARKER), which then uploads now; a test ties the
-# copies.
+# Share Now (issue #351). The marker request_upload leaves in the data
+# directory (`onionpress upload-analytics`, and the Settings page's
+# button through handle-action since #528), taken by the daemon's status
+# loop (daemon.UPLOAD_TRIGGER_MARKER), which then uploads now; a test
+# ties the copies.
 UPLOAD_TRIGGER_MARKER = ".upload-analytics"
-UPLOAD_TRIGGER_VOLUME_PATH = "/var/lib/onionpress/.upload-analytics"
 SHARING_CONFIG_KEY = "SHARE_ANALYTICS_WITH_ONIONHOME"
 SHARING_OFF_MSG = (
     f"Log sharing is off ({SHARING_CONFIG_KEY} is not yes), so nothing is "

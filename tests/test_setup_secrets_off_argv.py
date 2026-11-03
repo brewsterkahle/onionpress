@@ -264,11 +264,18 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
                 self.assertNotRegex(_read(rel), r"--(admin_password|user_pass)=")
 
     def test_menubar_logs_no_subprocess_argv(self):
+        """The menubar's setup is `onionpress setup --json` (issue #527):
+        the password in the environment, the launcher's argv logged
+        without the setup's arguments, a failure as the CLI says it."""
+        from onionpress import ui_client
         src = _read("src/menubar.py")
-        start = src.index("    def _wp_core_install(self, sw):")
+        start = src.index("    def _run_setup_command(self, sw):")
         body = src[start:src.index("\n    def ", start + 1)]
-        self.assertIn("except subprocess.SubprocessError as e:", body)
-        self.assertIn('self.log(f"wp core install error: {type(e).__name__}")', body)
+        self.assertIn("env={ui_client.SETUP_PASSWORD_ENV: sw.admin_pass}", body)
+        self.assertNotIn("admin_pass,", body.replace("sw.admin_pass}", ""))
+        self.assertIn("setup", ui_client.UNLOGGED_ARGS)
+        self.assertEqual(ui_client.loggable(["/l", "setup", "--user", "a", "--json"]),
+                         "/l setup <3 args not logged>")
 
 
 # ─── archive.org and the proxy's /setup ────────────────────────────────
@@ -467,7 +474,9 @@ class TestLaunchersKeepNoCopy(unittest.TestCase):
                              "multisite-install", "--admin_password", "xauthn"):
                     self.assertNotIn(gone, text)
                 fn = _function(text, "run_setup")
-                self.assertIn('ONIONPRESS_SETUP_PASSWORD="$setup_pass"', fn)
+                # The caller's environment value is kept unless --pass gives
+                # one (issue #527: a UI hands it over there).
+                self.assertIn('ONIONPRESS_SETUP_PASSWORD="${setup_pass:-${ONIONPRESS_SETUP_PASSWORD:-}}"', fn)
                 self.assertNotIn("$setup_pass\"\n", fn.split("ONIONPRESS_SETUP_PASSWORD")[0])
 
 

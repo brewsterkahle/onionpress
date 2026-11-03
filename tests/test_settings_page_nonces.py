@@ -46,8 +46,9 @@ class TestAjaxHandlers(unittest.TestCase):
         self.assertIn("check_ajax_referer( 'onionpress_check_update' )", body)
         self.assertLess(body.index("onionpress_settings_owner_allowed()"),
                         body.index("check_ajax_referer"))
-        self.assertLess(body.index("check_ajax_referer"), body.index("get_transient"))
-        self.assertLess(body.index("check_ajax_referer"), body.index("onionpress_curl_tor"))
+        self.assertLess(body.index("check_ajax_referer"), body.index("status.json"))
+        # No request of its own any more (issue #528): status.json's release.
+        self.assertNotIn("onionpress_curl_tor", body)
 
     def test_the_page_script_sends_each_nonce(self):
         self.assertIn("wp_create_nonce( 'onionpress_poll_action' )", self.text)
@@ -71,33 +72,17 @@ class TestStatusRefresh(unittest.TestCase):
         start = self.text.index("if ( $path !== 'onionpress-status-json' )")
         self.endpoint = self.text[start:self.text.index("\n} );", start)]
 
-    def test_the_request_file_is_written_only_with_the_nonce_and_never_over_a_request(self):
-        write = self.endpoint.index("@file_put_contents( '/var/lib/onionpress/requested-action'")
-        guard = self.endpoint[self.endpoint.rindex("if (", 0, write):write]
-        self.assertIn("onionpress_status_refresh_allowed()", guard)
-        self.assertIn("! file_exists( '/var/lib/onionpress/requested-action' )", guard)
-        self.assertEqual(self.endpoint.count("file_put_contents"), 1)
+    def test_the_endpoint_writes_nothing(self):
+        """Issue #528: the daemon rewrites status.json every pass, so the
+        endpoint asks the host for nothing; the nonce that guarded that
+        write (#402) went with it."""
+        self.assertNotIn("file_put_contents", self.endpoint)
+        self.assertNotIn("onionpress_status_refresh", self.text)
+        self.assertIn("fetch('/onionpress-status-json')", self.text)
 
-    def test_the_nonce_check_is_wp_verify_nonce_on_the_get_parameter(self):
-        fn = self.text[self.text.index("function onionpress_status_refresh_allowed()"):]
-        fn = fn[:fn.index("\n}")]
-        self.assertIn("wp_verify_nonce( $_GET['_wpnonce'], 'onionpress_status_refresh' )", fn)
-        self.assertIn("is_string( $_GET['_wpnonce'] )", fn)
-
-    def test_the_reply_renews_the_nonce_and_the_page_uses_it(self):
-        self.assertIn("'refresh_nonce' => wp_create_nonce( 'onionpress_status_refresh' )",
-                      self.endpoint)
-        self.assertIn("wp_create_nonce( 'onionpress_status_refresh' )", self.text)
-        self.assertIn("fetch('/onionpress-status-json?refresh=1&_wpnonce='+encodeURIComponent(refreshNonce))",
-                      self.text)
-        self.assertIn("fetch('/onionpress-status-json?_wpnonce='+encodeURIComponent(refreshNonce))",
-                      self.text)
-        self.assertIn("if(d.refresh_nonce)refreshNonce=d.refresh_nonce;", self.text)
-        self.assertNotIn("fetch('/onionpress-status-json')", self.text)
-
-    def test_the_viewer_check_still_comes_first(self):
+    def test_the_viewer_check_comes_first(self):
         self.assertLess(self.endpoint.index("onionpress_status_viewer_allowed()"),
-                        self.endpoint.index("onionpress_status_refresh_allowed()"))
+                        self.endpoint.index("file_get_contents"))
 
 
 if __name__ == "__main__":

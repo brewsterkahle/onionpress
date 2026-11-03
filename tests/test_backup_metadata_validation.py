@@ -178,12 +178,12 @@ class TestOnionAddressRule(unittest.TestCase):
                 self.assertFalse(key_manager.is_valid_onion_address(value))
 
     def test_no_bash_copy_of_the_rule_is_left(self):
-        """The launchers' is_onion_address (and vanity_key_dir, its only
-        caller) had no caller left and went: key_manager's rule is the one
-        (tests/test_strict_onion_addresses.py holds the others to it)."""
-        for path in LAUNCHERS:
-            with self.subTest(launcher=path):
-                self.assertNotRegex(_read(path), r"\bis_onion_address\b")
+        # key_manager.is_valid_onion_address is the one rule. The launchers'
+        # is_onion_address had no caller left once vanity_key_dir moved to
+        # start.vanity_key_dir, and was removed with it (2026-11-02).
+        for p in LAUNCHERS:
+            with self.subTest(launcher=p):
+                self.assertNotIn("\nis_onion_address() {", _read(p))
 
 
 class TestKeyConsistency(unittest.TestCase):

@@ -1,6 +1,6 @@
 """One-time admin auto-login links that never sit on a command line.
 
-The menubar (Mac), the tray and `onionpress dashboard` (Linux) open the
+`onionpress open` (the menubar's and the tray's) and `onionpress dashboard` open the
 user's site already logged in as its administrator: they store a random
 token in WordPress for TOKEN_TTL seconds and open the site with
 `?op_login=<token>`, which the onionpress-auto-login.php mu-plugin trades
@@ -11,10 +11,10 @@ users can share one Mac.
 
 - mint() hands the token to a fixed `wp eval` PHP (MINT_PHP) on stdin,
   through the caller's onionpress.docker.Docker.
-- On a Mac the URL reaches the browser through LaunchServices, called from
-  inside the menubar process (browser.open_url), not through `open`.
-- On Linux a browser takes URLs only on its command line, so it is given
-  the path of a 0600 page that redirects to the URL (write_redirect_page).
+- A browser is given the path of a 0600 page that redirects to the URL
+  (write_redirect_page), never the URL: on Linux a browser takes URLs only
+  on its command line, and since issue #527 the Mac opens the site through
+  `onionpress open` (launcher_ops.login_target) as Linux does.
 - A token is bound to where it is redeemed: a "local" token only over
   localhost and never through Tor, an "onion" token only on a .onion host
   (the mu-plugin checks).
@@ -116,7 +116,7 @@ def login_url(base_url: str, *, docker,
     return add_token(base_url, token) if token else None
 
 
-# ─── Linux: the redirect page ────────────────────────────────────────────
+# ─── The redirect page ────────────────────────────────────────────
 
 # Under a non-hidden top-level directory of $HOME: snap browsers (Ubuntu's
 # Firefox and Chromium) can read nothing in /tmp, $XDG_RUNTIME_DIR or a

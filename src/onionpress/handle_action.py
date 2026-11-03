@@ -3,8 +3,8 @@ handled once for both platforms (issue #366, CLI-first phase 2).
 
 The page asks the host for something by writing files into the shared
 volume (/var/lib/onionpress/, www-data's): `requested-action` names one of
-ACTIONS, and `backup-password`, `restore-password`, `restore-upload.zip`
-and `import-key-data` carry what the action needs. The daemon's status
+ACTIONS, and `backup-password`, `restore-password`, `restore-upload.zip`,
+`import-key-data` and `archive-login` carry what the action needs. The daemon's status
 loop runs `onionpress handle-action` on both platforms (until issue #407
 Linux's onionpress-watcher.timer ran it every 10 s). Anything running in WordPress
 can write those files, so the verbs are fixed, every result goes back to
@@ -68,7 +68,8 @@ REQUEST_ID_FILE = "request-id"
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 ACTIONS = ("start", "restart", "stop", "check-reachability", "import-key-file",
-           "create-backup", "restore-backup", "refresh-status", "update")
+           "create-backup", "restore-backup", "refresh-status", "update",
+           "upload-analytics", "archive-login")
 
 # The most bytes read from a request file (issue #396): `head -c` in the
 # container, and a file over its limit is dropped, never truncated into
@@ -76,8 +77,12 @@ ACTIONS = ("start", "restart", "stop", "check-reachability", "import-key-file",
 # a 16-character id, a password, a key (a PEM or base32, under a KiB),
 # config-updates.json (a few keys).
 READ_LIMIT = 64 * 1024
+# The page's archive.org login (issue #528): {"email", "password"} as
+# JSON, read once by archive-login and removed before the login starts.
+ARCHIVE_LOGIN_FILE = "archive-login"
 READ_LIMITS = {REQUEST_FILE: 256, REQUEST_ID_FILE: 256,
-               "backup-password": 4096, "restore-password": 4096}
+               "backup-password": 4096, "restore-password": 4096,
+               ARCHIVE_LOGIN_FILE: 4096}
 
 # Seconds between two runs of one action (issue #396): the last run's
 # time per action is kept in THROTTLE_FILE under the data dir, since on
@@ -86,7 +91,8 @@ READ_LIMITS = {REQUEST_FILE: 256, REQUEST_ID_FILE: 256,
 # daemon rewrites status.json after every handled action anyway.
 MIN_INTERVAL = {"start": 60, "restart": 60, "stop": 60,
                 "create-backup": 60, "restore-backup": 60, "import-key-file": 60,
-                "update": 60, "check-reachability": 30, "refresh-status": 0}
+                "update": 60, "check-reachability": 30, "refresh-status": 0,
+                "upload-analytics": 60, "archive-login": 30}
 THROTTLE_FILE = ".handle-action-times.json"
 
 # Each action's result file for the page (what its poll reads). Removed
@@ -99,7 +105,15 @@ RESULT_FILES = {
     "create-backup": "backup-result.json",
     "restore-backup": "restore-result.json",
     "update": "update-result.json",
+    "upload-analytics": "analytics-result.json",
+    "archive-login": "archive-login-result.json",
 }
+
+# What an action reads besides the request, removed with a request that
+# is not run (throttled), so no password waits in the volume for a run
+# that never comes.
+INPUT_FILES = {"create-backup": ("backup-password",),
+               "archive-login": (ARCHIVE_LOGIN_FILE,)}
 
 PENDING_DIR = "pending-action"
 PENDING_MAX_AGE = 10 * 60      # the dialog gives up after 5 minutes
@@ -397,6 +411,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
     host.remove_shared(*stale)
     wait = throttle(host, action)
     if wait:
+        host.remove_shared(*INPUT_FILES.get(action, ()))
         host.log(f"Settings page: {action} dropped: ran {MIN_INTERVAL[action] - wait} s ago, "
                  f"at most once per {MIN_INTERVAL[action]} s")
         if RESULT_FILES.get(action):
@@ -419,6 +434,8 @@ def handle(host, confirmed=frozenset(), cancel=False):
         "restore-backup": lambda: _restore_backup(host, confirmed),
         "refresh-status": lambda: _refresh_status(host),
         "update": lambda: _update(host),
+        "upload-analytics": lambda: _upload_analytics(host),
+        "archive-login": lambda: _archive_login(host),
     }
     fn = handlers[action]
     try:
@@ -539,6 +556,115 @@ def _stop(host):
         "success": r.returncode == 0, "action": "stop",
         "message": "OnionPress stopped" if r.returncode == 0 else "stop failed; see the OnionPress log",
         "completed_at": now_iso()})
+
+
+# The page's wording when sharing is off (the CLI's names the command).
+SHARING_OFF_PAGE_MSG = (
+    "Log sharing is off, so nothing is uploaded. Set \"Share diagnostic logs "
+    "with OnionHome\" to Enabled, save the settings, then Share Now.")
+
+
+def _upload_analytics(host):
+    """Share Now (issue #528): analytics_sharing.request_upload, what
+    `onionpress upload-analytics` runs, leaves the data dir's marker the
+    daemon takes within a cycle; nothing while sharing is off. Until
+    #528 the page touched a file in the volume that the daemon looked
+    for with a `docker exec` every cycle."""
+    import io
+    from . import analytics_sharing
+    if not analytics_sharing.sharing_enabled(host.paths.config_file):
+        host.log("Settings page: Share Now refused: log sharing is off")
+        host.write_result("analytics-result.json", {
+            "success": False, "error": SHARING_OFF_PAGE_MSG, "completed_at": now_iso()})
+        return
+    out = io.StringIO()
+    rc = analytics_sharing.request_upload(host.paths, host.os_name, out=out)
+    said = out.getvalue().strip()
+    host.log(f"Settings page: Share Now: {said}")
+    if rc == 0:
+        result = {"success": True, "completed_at": now_iso(),
+                  "message": "Upload queued: it runs within a minute, or as soon as "
+                             "the site is online."}
+    else:
+        result = {"success": False, "error": said or "the upload was not requested",
+                  "completed_at": now_iso()}
+    host.write_result("analytics-result.json", result)
+
+
+ARCHIVE_LOGIN_MISSING_MSG = "Enter an Archive.org account and password"
+ARCHIVE_LOGIN_FAILED_MSG = "Archive.org login failed"
+ARCHIVE_LOGIN_SAVED_MSG = "Archive.org credentials saved."
+ARCHIVE_KEYS_UNSAVED_MSG = "Logged in to Archive.org, but the keys could not be saved"
+
+
+def read_archive_login(text):
+    """(email, password) from the page's archive-login file, or None:
+    a JSON object with an email of at most 254 printable characters and
+    no spaces, and a password of 1 to 1024 characters with no NUL."""
+    try:
+        data = json.loads(text) if text else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    email, password = data.get("email"), data.get("password")
+    if not isinstance(email, str) or not isinstance(password, str):
+        return None
+    if not (0 < len(email) <= 254 and email.isprintable() and " " not in email):
+        return None
+    if not (0 < len(password) <= 1024) or "\0" in password:
+        return None
+    return email, password
+
+
+def _archive_login(host):
+    """The Settings page's archive.org login (issue #528): the host's one
+    login, multisite.fetch_archive_s3_keys (archive.org's onion, through
+    the onionheaven container's Tor; the form on curl's stdin), and the
+    keys saved where the Wayback sweep reads them. Until #528 the page
+    logged in itself, from WordPress.
+
+    The account and password come in ARCHIVE_LOGIN_FILE, read once and
+    removed before the login starts. Neither is logged or written into
+    the result: the result says saved, or why not, with any echo of the
+    password archive.org's answer might carry cut out."""
+    from . import multisite
+    raw = host.read_shared(ARCHIVE_LOGIN_FILE)
+    host.remove_shared(ARCHIVE_LOGIN_FILE)
+    login = read_archive_login(raw)
+    raw = None
+    if login is None:
+        host.log("Settings page: archive.org login refused: no account and password")
+        host.write_result("archive-login-result.json", {
+            "success": False, "error": ARCHIVE_LOGIN_MISSING_MSG, "completed_at": now_iso()})
+        return
+    email, password = login
+
+    def without_secrets(line):
+        line = line.replace(password, "[hidden]")
+        return line.replace(email, "[account]") if len(email) >= 4 else line
+
+    said = []
+    host.log("Settings page: logging in to archive.org...")
+    keys = multisite.fetch_archive_s3_keys(
+        email, password, docker=host.docker,
+        log_func=lambda line: said.append(without_secrets(line)))
+    for line in said:
+        host.log(f"Settings page: {line}")
+    if keys is None:
+        why = said[-1].removeprefix("WARNING: ") if said else ""
+        host.write_result("archive-login-result.json", {
+            "success": False, "completed_at": now_iso(),
+            "error": f"{ARCHIVE_LOGIN_FAILED_MSG}: {why}" if why else ARCHIVE_LOGIN_FAILED_MSG})
+        return
+    if not multisite.save_archive_s3_keys(keys, docker=host.docker):
+        host.log("Settings page: archive.org keys fetched but not saved")
+        host.write_result("archive-login-result.json", {
+            "success": False, "error": ARCHIVE_KEYS_UNSAVED_MSG, "completed_at": now_iso()})
+        return
+    host.log("Settings page: archive.org keys saved for the Wayback sweep")
+    host.write_result("archive-login-result.json", {
+        "success": True, "message": ARCHIVE_LOGIN_SAVED_MSG, "completed_at": now_iso()})
 
 
 def _refresh_status(host):
@@ -847,20 +973,26 @@ def _update(host):
     """Report only, on both platforms: anything running in WordPress can
     write requested-action, so this never installs anything. The page
     learns whether a release is newer than the installed one and how to
-    install it: `onionpress update --check --json` (cli.cmd_update, the
-    one updater of both platforms), its answer kept five minutes
-    (_cached_update_check) and written to update-result.json with the
+    install it (check_release), written to update-result.json with the
     request's id. Installing is the menubar's Check for Updates... on a
     Mac, which asks the person at the Mac, or `onionpress update` at a
     terminal on either platform. Through 2.5.6 the Mac ran `update --yes`
     here: an unattended download and install of the latest release on
     the page's say-so; through 2.6.1 Linux had a bash twin of this."""
     host.log("Settings page: update check requested")
+    host.write_result("update-result.json", check_release(host))
+
+
+def check_release(host):
+    """The release check's answer: `onionpress update --check --json`
+    (cli.cmd_update, the one updater of both platforms), kept five
+    minutes in UPDATE_CHECK_CACHE (_cached_update_check). That file is
+    also what the status writer shows the page as status.json's
+    "release" (issue #528: the page makes no GitHub request of its own)."""
     result = _cached_update_check(host)
     if result is not None:
         host.log("Settings page update check: answered with the one from the last 5 minutes")
-        host.write_result("update-result.json", result)
-        return
+        return result
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
     if r.returncode != 0 or ans.get("error") or "update_available" not in ans:
@@ -889,7 +1021,7 @@ def _update(host):
             "success": True, "update_available": available, "installable": installable,
             "message": message, "current": current, "latest": latest, "checked_at": now_iso()}
     _cache_update_check(host, result)
-    host.write_result("update-result.json", result)
+    return result
 
 
 # ---------------------------------------------------------------------------
