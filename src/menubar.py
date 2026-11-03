@@ -101,6 +101,8 @@ class _MacBackupUI(ui_client.BackupUI):
         user_field = AppKit.NSTextField.alloc().initWithFrame_(
             AppKit.NSMakeRect(85, 44, 210, 24))
         user_field.setStringValue_(default_user or "")
+        # Empty: the CLI finds the site's admin (backup.find_admin_username).
+        user_field.setPlaceholderString_("the site's administrator")
         container.addSubview_(user_field)
         pass_label = AppKit.NSTextField.labelWithString_("Password:")
         pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
@@ -118,9 +120,9 @@ class _MacBackupUI(ui_client.BackupUI):
             return None
         username = user_field.stringValue().strip()
         password = pass_field.stringValue()
-        if not username or not password:
+        if not password:
             rumps.alert(title="Missing Credentials",
-                        message="Both username and password are required.")
+                        message="The password is required.")
             return None
         return username, password
 
@@ -1562,6 +1564,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         """The backup dialog's default login: the onionname, else blank
         (`onionpress backup --check` finds the administrator itself)."""
         return self.read_config_value("ONIONNAME", "").strip()
+
     def _prompt_onionname_collision(self, current_name, suggestions):
         """Modal alert — returns chosen new name or None if canceled.
 

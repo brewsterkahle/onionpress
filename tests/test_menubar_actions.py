@@ -132,7 +132,10 @@ class TestImports(unittest.TestCase):
                      "_release_onionheaven_before_restore", "_prune_dangling_images",
                      "_write_result", "_run_launcher_json", "_launcher_failure",
                      "_ask_hub_recovery_key", "_ask_to_replace_address", "_short_onion",
-                     "run_command"):
+                     "run_command",
+                     # The onionname is `onionpress onionname set`'s, the
+                     # admin's login the CLI's (backup.find_admin_username).
+                     "_save_onionname", "_rename_wp_admin", "_read_onion_address"):
             with self.subTest(name=name):
                 self.assertNotIn(f"def {name}(", self.src)
         self.assertNotIn("create_backup(", self.src)
@@ -141,6 +144,9 @@ class TestImports(unittest.TestCase):
         self.assertNotIn("apply_settings_updates(", self.src)
         self.assertNotIn("/var/lib/onionpress/requested-action", self.src)
         self.assertNotIn("config-updates.json", self.src)
+        self.assertNotIn("UPDATE wp_users", self.src)
+        self.assertNotIn("Registrar(", self.src)
+        self.assertNotIn("validate_name", self.src)
 
     def test_every_action_is_a_launcher_subprocess(self):
         for argv in ACTIONS:

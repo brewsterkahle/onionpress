@@ -14,11 +14,7 @@ import subprocess
 from typing import Callable, Optional
 
 from onionpress import key_manager, onion_hostname, wp_files
-
-try:
-    from onionpress import onionnames_client as _onc
-except ImportError:
-    _onc = None
+from onionpress import onionnames_client as _onc
 
 # ─── Branded installs ────────────────────────────────────────────────────────
 
@@ -56,56 +52,22 @@ SETUP_LANGUAGES = ("en_US", "fr_FR", "es_ES", "de_DE", "nl_NL", "pt_BR", "ja", "
 
 def suggest_onionname(lang: str = "en_US") -> Optional[str]:
     """Return a random adjective-noun onionname suggestion, or None."""
-    if _onc is None:
-        return None
     try:
         return _onc.suggest_name_local(lang) or _onc.suggest_name_local("en_US")
     except Exception:
         return None
 
 
-# The onionname charset/length rule, kept here as well as in
-# onionnames_client so it holds even when that module is missing or raises.
-# The name becomes a wp-cli argument, a URL path and a line in
-# ~/.onionpress/config, so nothing outside this set may get through.
-_ONIONNAME_MIN_LEN = 5
-_ONIONNAME_MAX_LEN = 40
-_ONIONNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]")
-_ONIONNAME_ALL_NUMERIC_RE = re.compile(r"[0-9]+")
-
-
-def _local_onionname_rule(name) -> tuple[bool, str]:
-    if not isinstance(name, str) or not name:
-        return False, "empty"
-    if len(name) < _ONIONNAME_MIN_LEN:
-        return False, "too_short"
-    if len(name) > _ONIONNAME_MAX_LEN:
-        return False, "too_long"
-    if not _ONIONNAME_RE.fullmatch(name):
-        return False, "invalid_chars"
-    if _ONIONNAME_ALL_NUMERIC_RE.fullmatch(name):
-        return False, "all_numeric"
-    return True, ""
-
-
 def validate_onionname(name: str) -> tuple[bool, str]:
-    """Validate an onionname.
+    """Validate an onionname: onionnames_client.validate_name, the one
+    rule (charset, length, not all digits; the name becomes a wp-cli
+    argument, a URL path and a line in ~/.onionpress/config).
 
     Returns (ok, reason). reason is "" on success, or one of:
       "too_short", "too_long", "invalid_chars", "all_numeric", "empty"
-
-    Fails closed: the local charset/length rule always applies, and the
-    onionnames_client check runs on top of it when that module is present.
     """
-    ok, reason = _local_onionname_rule(name)
-    if not ok or _onc is None:
-        return ok, reason
-    try:
-        ok, reason = _onc.validate_name(name)
-        return ok, (reason or "")
-    except Exception:
-        # The local rule above already passed.
-        return True, ""
+    ok, reason = _onc.validate_name(name)
+    return ok, (reason or "")
 
 
 def onionname_error_message(reason: str) -> str:
@@ -117,8 +79,8 @@ def onionname_error_message(reason: str) -> str:
     """
     return {
         "empty": "Cannot be empty",
-        "too_short": f"Too short (min {_ONIONNAME_MIN_LEN} characters)",
-        "too_long": f"Too long (max {_ONIONNAME_MAX_LEN} characters)",
+        "too_short": f"Too short (min {_onc.MIN_NAME_LEN} characters)",
+        "too_long": f"Too long (max {_onc.MAX_NAME_LEN} characters)",
         "invalid_chars": "Letters, digits, '.', '_' or '-' only; "
                          "start and end with a letter or digit",
         "all_numeric": "Cannot be all numbers",
