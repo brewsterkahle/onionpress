@@ -459,6 +459,18 @@
   `RestoreUI`) and `update_outcome`; no `subprocess` argv in either names
   the launcher. The tray imports the package hard (the .deb installs it
   beside the tray): no degraded fallbacks. `tests/test_ui_client.py`.
+- **Both UIs paint `ui_client.status_view(state, now)`**: category,
+  title, icon and the actions it enables from daemon-state.json; a state
+  older than 90 s or from a dead pid is "reconnecting", never its last
+  word (the tray recomputes it every tick). The tray's log gets the
+  menubar's redaction (home as `~`, `redact.make_scrub_fn` on rolled
+  files). `TestStatusView` in `tests/test_ui_client.py`,
+  `tests/test_linux_tray_protocol.py`.
+- **The daemon's onionname retry is `onionpress onionname set`** (run
+  through `run_cli`, no registration of its own), and there is one name
+  rule, `onionnames_client.validate_name` (`setup_logic.validate_onionname`
+  and config's ONIONNAME check are it). `TestOnionnameRetry` in
+  `tests/test_mac_daemon_paths.py`, `tests/test_onionname_as_data.py`.
 - launchd agent `org.onionpress.daemon` (`KeepAlive` on failure only,
   `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
   The launcher's `stop` runs `daemon offline` before stopping containers;
