@@ -281,7 +281,8 @@ class TestQuietTick(_Case):
     def test_every_verb_is_known(self):
         self.assertEqual(ha.ACTIONS, ("start", "restart", "stop", "check-reachability",
                                       "import-key-file", "create-backup", "restore-backup",
-                                      "refresh-status", "update", "upload-analytics"))
+                                      "refresh-status", "update", "upload-analytics",
+                                      "archive-login"))
 
 
 class TestStartStop(_Case):
@@ -1056,6 +1057,101 @@ class TestUploadAnalytics(_Case):
     def test_throttled_like_the_others(self):
         self.assertEqual(ha.RESULT_FILES["upload-analytics"], "analytics-result.json")
         self.assertIn("upload-analytics", ha.MIN_INTERVAL)
+
+
+class TestArchiveLogin(_Case):
+    """The page's archive.org login is the host's (issue #528): the
+    account and password come in one request file, read once and removed
+    before the login, through multisite.fetch_archive_s3_keys; neither is
+    logged or echoed in the result."""
+
+    EMAIL = "owner@example.org"
+    PASSWORD = "s3cret-pass phrase"
+
+    def login_request(self, data=None):
+        self.docker.put(ha.ARCHIVE_LOGIN_FILE, json.dumps(
+            data if data is not None else {"email": self.EMAIL, "password": self.PASSWORD}))
+        self.docker.put("request-id", "AL1\n")
+        self.request("archive-login")
+
+    def run_login(self, keys=None, reason=None, saved=True):
+        seen = {}
+
+        def fetch(email, password, *, docker, log_func):
+            seen["at_fetch"] = self.docker.get(ha.ARCHIVE_LOGIN_FILE)
+            seen["login"] = (email, password)
+            if reason:
+                log_func(f"WARNING: archive.org login failed: {reason}")
+            return keys
+
+        with mock.patch("onionpress.multisite.fetch_archive_s3_keys", side_effect=fetch), \
+                mock.patch("onionpress.multisite.save_archive_s3_keys",
+                           return_value=saved) as save:
+            ha.handle(self.host("linux"))
+        return seen, save
+
+    def assert_never_said(self):
+        text = "\n".join(self.logs) + json.dumps(self.docker.result("archive-login-result.json"))
+        self.assertNotIn(self.PASSWORD, text)
+        self.assertNotIn(self.EMAIL, text)
+
+    def test_logged_in_keys_saved_file_gone_before_the_login(self):
+        self.login_request()
+        seen, save = self.run_login(keys={"access": "A", "secret": "S"})
+        self.assertEqual(seen["login"], (self.EMAIL, self.PASSWORD))
+        self.assertIsNone(seen["at_fetch"], "the request file is removed before the login")
+        save.assert_called_once_with({"access": "A", "secret": "S"}, docker=self.docker)
+        res = self.docker.result("archive-login-result.json")
+        self.assertEqual((res["success"], res["message"], res["request_id"]),
+                         (True, ha.ARCHIVE_LOGIN_SAVED_MSG, "AL1"))
+        self.assertIsNone(self.docker.get(ha.ARCHIVE_LOGIN_FILE))
+        self.assertEqual(self.argvs(), [])
+        self.assert_never_said()
+
+    def test_a_failure_says_why_without_the_password(self):
+        self.login_request()
+        self.run_login(reason=f"bad password {self.PASSWORD} for {self.EMAIL}")
+        res = self.docker.result("archive-login-result.json")
+        self.assertFalse(res["success"])
+        self.assertTrue(res["error"].startswith(ha.ARCHIVE_LOGIN_FAILED_MSG + ": "))
+        self.assertIn("[hidden]", res["error"])
+        self.assert_never_said()
+
+    def test_keys_not_saved_is_a_failure(self):
+        self.login_request()
+        self.run_login(keys={"access": "A", "secret": "S"}, saved=False)
+        res = self.docker.result("archive-login-result.json")
+        self.assertEqual((res["success"], res["error"]), (False, ha.ARCHIVE_KEYS_UNSAVED_MSG))
+
+    def test_a_bad_request_logs_in_nowhere(self):
+        for data in ({}, {"email": "a b@x", "password": "p"}, {"email": "x@y", "password": ""},
+                     {"email": "x@y", "password": "a\0b"}, ["x", "y"], {"email": 1, "password": "p"}):
+            with self.subTest(data=data):
+                self.login_request(data)
+                seen, _save = self.run_login(keys={"access": "A", "secret": "S"})
+                self.assertNotIn("login", seen)
+                res = self.docker.result("archive-login-result.json")
+                self.assertEqual((res["success"], res["error"]), (False, ha.ARCHIVE_LOGIN_MISSING_MSG))
+                self.assertIsNone(self.docker.get(ha.ARCHIVE_LOGIN_FILE))
+
+    def test_not_json_is_refused(self):
+        self.assertIsNone(ha.read_archive_login("email=x&password=y"))
+        self.assertIsNone(ha.read_archive_login(""))
+        self.assertEqual(ha.read_archive_login('{"email": "x@y", "password": "p"}'), ("x@y", "p"))
+
+    def test_a_throttled_login_removes_the_password(self):
+        with mock.patch.dict(ha.MIN_INTERVAL, REAL_INTERVALS):
+            self.login_request()
+            self.run_login(keys={"access": "A", "secret": "S"})
+            self.login_request()
+            seen, _save = self.run_login(keys={"access": "A", "secret": "S"})
+        self.assertNotIn("login", seen)
+        self.assertIsNone(self.docker.get(ha.ARCHIVE_LOGIN_FILE))
+        self.assertFalse(self.docker.result("archive-login-result.json")["success"])
+
+    def test_the_file_is_read_with_its_limit(self):
+        self.assertEqual(ha.READ_LIMITS[ha.ARCHIVE_LOGIN_FILE], 4096)
+        self.assertEqual(ha.INPUT_FILES["archive-login"], (ha.ARCHIVE_LOGIN_FILE,))
 
 
 class TestCheckRelease(_Case):

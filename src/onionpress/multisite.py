@@ -816,10 +816,12 @@ def fetch_archive_s3_keys(
     """Log in to archive.org and return its S3 keys as
     {"access": ..., "secret": ...}, or None (logged) on any failure.
 
-    The one archive.org login on the Mac: first-run setup (onion_proxy)
-    and the per-launch reconcile (ensure_archive_s3_keys) both come here,
-    so they cannot drift apart again (issue #322: setup went to clearnet
-    archive.org and could fail where the reconcile succeeded).
+    The one archive.org login: first-run setup (onion_proxy), the
+    per-launch reconcile (ensure_archive_s3_keys) and the Settings page's
+    login (handle_action's archive-login, issue #528; the page logged in
+    from WordPress until then) all come here, so they cannot drift apart
+    again (issue #322: setup went to clearnet archive.org and could fail
+    where the reconcile succeeded).
 
     POSTs to archive.org's onion (NOT clearnet), from inside the
     onionheaven container through its Tor SOCKS port: clearnet archive.org
@@ -923,14 +925,23 @@ def ensure_archive_s3_keys(
         log("WARNING: no archive.org S3 keys — set them manually in Settings if needed.")
         return False
 
-    # `wp option update <key>` with no value reads it from stdin, so the
-    # keys stay out of argv.
-    _wp("option", "update", "onionpress_archive_s3_access",
-        docker=docker, input=keys["access"])
-    _wp("option", "update", "onionpress_archive_s3_secret",
-        docker=docker, input=keys["secret"])
+    save_archive_s3_keys(keys, docker=docker)
     log("Archive.org S3 keys configured for Wayback archiving")
     return True
+
+
+def save_archive_s3_keys(keys: dict, *, docker) -> bool:
+    """Save *keys* ({"access", "secret"}) as the network's one pair, in
+    the main site's options (`wp option` without --url), where the Wayback
+    sweep reads them: the reconcile's pair and the one the Settings page's
+    archive.org login fetched (handle_action's archive-login, issue #528).
+    `wp option update <key>` with no value reads it from stdin, so the
+    keys stay out of argv. True when both were written."""
+    ok = True
+    for name, value in (("onionpress_archive_s3_access", keys["access"]),
+                        ("onionpress_archive_s3_secret", keys["secret"])):
+        ok = _wp("option", "update", name, docker=docker, input=value).returncode == 0 and ok
+    return ok
 
 
 def provision_post_install(

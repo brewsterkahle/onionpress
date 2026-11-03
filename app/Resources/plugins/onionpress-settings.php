@@ -17,96 +17,53 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Run a curl request through Tor SOCKS proxy to archive.org's .onion.
+ * Ask the host to log in to archive.org with the account the owner typed
+ * (issue #528): handle-action's archive-login, the host's one login
+ * (multisite.fetch_archive_s3_keys, archive.org's onion over Tor), which
+ * saves the S3 keys in the main site's options. The page logged in from
+ * WordPress itself until then.
  *
- * @param string $url     The .onion URL to request.
- * @param array  $opts    Extra curl options (CURLOPT_* => value).
- * @return array{body:string,code:int,error:string}
- */
-function onionpress_curl_tor( $url, $opts = array() ) {
-    $ch = curl_init( $url );
-    curl_setopt( $ch, CURLOPT_PROXY, 'socks5h://onionpress-tor:9050' );
-    curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
-    curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, true );
-    curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
-    curl_setopt( $ch, CURLOPT_USERAGENT, 'OnionPress (+https://github.com/brewsterkahle/onionpress)' );
-    foreach ( $opts as $k => $v ) {
-        curl_setopt( $ch, $k, $v );
-    }
-    $body  = curl_exec( $ch );
-    $code  = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    $error = curl_error( $ch );
-    curl_close( $ch );
-    return array( 'body' => $body, 'code' => $code, 'error' => $error );
-}
-
-/**
- * Request an archive.org path via Tor: .onion first, clearnet-via-Tor-exit fallback.
+ * The account and password cross the shared volume only in the request
+ * file `archive-login` (0600 from the first byte), which the host reads
+ * once and removes before it logs in, or removes with a throttled
+ * request; its result never carries either. Only to a host whose
+ * status.json lists the verb, so the file is never left for a host that
+ * would not take it.
  *
- * @param string $path  Path with query string (e.g. "/services/xauthn/?op=login").
- * @param array  $opts  Extra curl options.
- * @return array{body:string,code:int,error:string}
+ * @return array{request_id:string,requested_at:int}|string The request, or why it was not made.
  */
-function onionpress_ia_request( $path, $opts = array() ) {
-    $resp = onionpress_curl_tor(
-        'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion' . $path, $opts
-    );
-    if ( ! $resp['error'] && $resp['code'] > 0 ) {
-        return $resp;
+function onionpress_request_archive_login( $email, $password ) {
+    $dir        = '/var/lib/onionpress';
+    $status_raw = @file_get_contents( $dir . '/status.json' );
+    $status     = ( false !== $status_raw ) ? json_decode( $status_raw, true ) : null;
+    if ( ! is_array( $status ) || ! isset( $status['page_actions'] ) || ! is_array( $status['page_actions'] )
+            || ! in_array( 'archive-login', $status['page_actions'], true ) ) {
+        return 'This OnionPress cannot log in to Archive.org from this page yet: update OnionPress on the computer running it, then try again.';
     }
-    // Fallback: clearnet via Tor exit
-    return onionpress_curl_tor( 'https://archive.org' . $path, $opts );
-}
-
-/**
- * Convert Archive.org account + password into S3 API keys via xauthn.
- * .onion first, clearnet-via-Tor-exit fallback.
- *
- * @return array{'access':string,'secret':string}|string  Keys on success, error message on failure.
- */
-function onionpress_fetch_ia_s3_keys( $email, $password ) {
-    $resp = onionpress_ia_request(
-        '/services/xauthn/?op=login',
-        array(
-            CURLOPT_POST       => true,
-            CURLOPT_POSTFIELDS => http_build_query( array( 'email' => $email, 'password' => $password ) ),
-        )
-    );
-    if ( $resp['error'] ) {
-        return 'Request failed: ' . $resp['error'];
+    if ( file_exists( $dir . '/requested-action' ) ) {
+        return 'OnionPress is busy with another request. Try again in a minute.';
     }
-    $data = json_decode( $resp['body'], true );
-    if ( empty( $data['success'] ) ) {
-        return $data['values']['reason'] ?? 'Login failed';
+    @unlink( $dir . '/archive-login-result.json' );
+    @unlink( $dir . '/archive-login' );
+    $umask = umask( 077 );
+    $wrote = @file_put_contents( $dir . '/archive-login',
+        wp_json_encode( array( 'email' => $email, 'password' => $password ) ), LOCK_EX );
+    umask( $umask );
+    if ( false === $wrote ) {
+        @unlink( $dir . '/archive-login' );
+        return 'Could not hand the login to OnionPress. The shared volume may not be mounted.';
     }
-
-    $access = $data['values']['s3']['access'] ?? '';
-    $secret = $data['values']['s3']['secret'] ?? '';
-    if ( $access && $secret ) {
-        return array( 'access' => $access, 'secret' => $secret );
+    $request_id = wp_generate_password( 16, false, false );
+    @unlink( $dir . '/request-id' );
+    if ( @file_put_contents( $dir . '/request-id', $request_id ) === false ) {
+        $request_id = '';
     }
-
-    // Fallback: fetch S3 keys separately using returned cookies
-    $sig  = $data['values']['cookies']['logged-in-sig'] ?? '';
-    $user = $data['values']['cookies']['logged-in-user'] ?? '';
-    if ( $sig && $user ) {
-        $resp2 = onionpress_ia_request(
-            '/account/s3.php?output_json=1',
-            array(
-                CURLOPT_COOKIE => "logged-in-sig=$sig; logged-in-user=$user",
-            )
-        );
-        if ( ! $resp2['error'] ) {
-            $s3 = json_decode( $resp2['body'], true );
-            $access = $s3['key']['s3accesskey'] ?? '';
-            $secret = $s3['key']['s3secretkey'] ?? '';
-            if ( $access && $secret ) {
-                return array( 'access' => $access, 'secret' => $secret );
-            }
-        }
+    if ( @file_put_contents( $dir . '/requested-action', 'archive-login' ) === false ) {
+        @unlink( $dir . '/archive-login' );
+        @unlink( $dir . '/request-id' );
+        return 'Failed to write action request. The shared volume may not be mounted.';
     }
-
-    return 'Login succeeded but could not retrieve S3 keys';
+    return array( 'request_id' => $request_id, 'requested_at' => time() );
 }
 
 /**
@@ -443,6 +400,9 @@ add_action( 'admin_init', function () {
         'restore-backup'     => '/var/lib/onionpress/restore-result.json',
         'update'             => '/var/lib/onionpress/update-result.json',
         'upload-analytics'   => '/var/lib/onionpress/analytics-result.json',
+        // Asked by the save (onionpress_request_archive_login), listed
+        // here as handle_action.RESULT_FILES has it.
+        'archive-login'      => '/var/lib/onionpress/archive-login-result.json',
     );
     if ( isset( $result_files[ $cmd ] ) ) {
         @unlink( $result_files[ $cmd ] );
@@ -849,19 +809,24 @@ add_action( 'admin_init', function () {
         $updates['CLOUDFLARE_TUNNEL_TOKEN'] = '';
     }
 
-    // Handle Archive.org credentials — convert account/password to S3 keys via xauthn API
+    // Archive.org credentials: the host logs in and saves the S3 keys
+    // (onionpress_request_archive_login, issue #528); the page's notice
+    // polls for its answer.
     $ia_account  = isset( $_POST['op_ia_account'] )  ? sanitize_text_field( wp_unslash( $_POST['op_ia_account'] ) )  : '';
     $ia_password = isset( $_POST['op_ia_password'] ) ? wp_unslash( $_POST['op_ia_password'] ) : '';
     if ( $ia_account !== '' && $ia_password !== '' ) {
-        $s3_keys = onionpress_fetch_ia_s3_keys( $ia_account, $ia_password );
-        if ( is_array( $s3_keys ) ) {
-            onionpress_archive_keys_save( $s3_keys['access'], $s3_keys['secret'] );
-            add_action( 'admin_notices', function () {
-                echo '<div class="notice notice-success"><p>Archive.org credentials saved.</p></div>';
+        $ia_asked    = onionpress_request_archive_login( $ia_account, $ia_password );
+        $ia_password = '';
+        if ( is_array( $ia_asked ) ) {
+            add_action( 'admin_notices', function () use ( $ia_asked ) {
+                echo '<div class="notice notice-info op-action-notice" data-op-action="archive-login"'
+                    . ' data-op-request-id="' . esc_attr( $ia_asked['request_id'] ) . '"'
+                    . ' data-op-requested-at="' . esc_attr( (string) $ia_asked['requested_at'] ) . '">'
+                    . '<p>Logging in to Archive.org from OnionPress... This may take a minute.</p></div>';
             } );
         } else {
-            add_action( 'admin_notices', function () use ( $s3_keys ) {
-                echo '<div class="notice notice-error"><p>Archive.org login failed: ' . esc_html( $s3_keys ) . '</p></div>';
+            add_action( 'admin_notices', function () use ( $ia_asked ) {
+                echo '<div class="notice notice-error"><p>Archive.org credentials not saved: ' . esc_html( $ia_asked ) . '</p></div>';
             } );
         }
     } elseif ( $ia_account === '' && $ia_password === '' && ! empty( $_POST['op_ia_credentials_remove'] ) ) {
@@ -1051,6 +1016,7 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
         'restore-backup'     => '/var/lib/onionpress/restore-result.json',
         'update'             => '/var/lib/onionpress/update-result.json',
         'upload-analytics'   => '/var/lib/onionpress/analytics-result.json',
+        'archive-login'      => '/var/lib/onionpress/archive-login-result.json',
     );
 
     if ( isset( $result_files[ $action ] ) ) {
@@ -1432,7 +1398,7 @@ function onionpress_settings_page() {
                                    value="" class="regular-text" autocomplete="off">
                             <button type="button" class="op-eye-toggle" aria-label="Show password">&#128065;</button>
                         </span>
-                        <p class="description">Your Archive.org password. Used to retrieve API keys — not stored.</p>
+                        <p class="description">Your Archive.org password. OnionPress logs in with it once, over Tor, to fetch the API keys; it is not stored.</p>
                     </td>
                 </tr>
             </table>

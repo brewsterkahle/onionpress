@@ -391,7 +391,7 @@ class TestWrite(_Sandbox):
         mac_fields = {"state", "version", "onion_address", "onionname", "tor_impl", "uptime_seconds",
                       "bootstrap_pct", "onion_reachable", "onion_http_code", "containers",
                       "updated_at", "platform", "load_avg", "host_uptime_seconds", "onionheaven",
-                      "config", "release"}
+                      "config", "release", "page_actions"}
         linux_fields = {"wayback_queue_count", "wp_installed", "onboarded", "mkp224o_available",
                         "wp_admin_password_path", "vanity_in_progress", "serving_from_wayback",
                         "wp_port"}

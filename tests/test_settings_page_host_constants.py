@@ -207,5 +207,45 @@ class TestWhatThePageNoLongerDoes(unittest.TestCase):
         self.assertIn('rm -f "$OLD_REPORT"', audit)
 
 
+
+class TestArchiveLoginIsTheHosts(unittest.TestCase):
+    """Item 3 (issue #528, Ivar's decision): the page's archive.org login
+    is handle-action's archive-login, the host's one login over Tor."""
+
+    def setUp(self):
+        self.src = _read(SETTINGS)
+
+    def test_no_login_in_wordpress(self):
+        for gone in ("xauthn", "onionpress_fetch_ia_s3_keys", "onionpress_ia_request",
+                     "onionpress_curl_tor", "curl_init", "s3.php"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, self.src)
+
+    def test_the_request(self):
+        fn = _function(self.src, "onionpress_request_archive_login")
+        # Only to a host that takes the verb, so the file is never left.
+        self.assertIn("in_array( 'archive-login', $status['page_actions'], true )", fn)
+        self.assertLess(fn.index("page_actions"), fn.index("file_put_contents"))
+        # 0600 from the first byte, then the request.
+        write = fn.index("file_put_contents( $dir . '/" + handle_action.ARCHIVE_LOGIN_FILE + "',")
+        self.assertLess(fn.index("umask( 077 )"), write)
+        self.assertLess(write, fn.index("'/requested-action', 'archive-login'"))
+        self.assertIn("'/archive-login-result.json'", fn)
+        self.assertEqual(handle_action.RESULT_FILES["archive-login"], "archive-login-result.json")
+        self.assertIn("archive-login", status_writer.PAGE_ACTIONS)
+        self.assertIn("page_actions", redact.WORDPRESS_STATUS_KEYS)
+
+    def test_asked_from_the_owner_gated_save(self):
+        save = self.src[self.src.index("// Archive.org credentials: the host logs in"):]
+        save = save[:save.index("// Check if a restart is actually needed")]
+        self.assertIn("onionpress_request_archive_login( $ia_account, $ia_password )", save)
+        self.assertIn('data-op-action="archive-login"', save)
+        # The save handler is the owner's and checks its nonce first.
+        handler = self.src[:self.src.index("// Archive.org credentials: the host logs in")]
+        handler = handler[handler.rindex("add_action( 'admin_init'"):]
+        self.assertIn("onionpress_settings_owner_allowed()", handler)
+        self.assertIn("wp_verify_nonce", handler)
+
+
 if __name__ == "__main__":
     unittest.main()

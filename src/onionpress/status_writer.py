@@ -63,6 +63,7 @@ from . import onionheaven
 from . import redact
 from . import wp_files
 from .daemon_client import display_state_of, state_path
+from .handle_action import ACTIONS as PAGE_ACTIONS
 from .platform import OS, detect_os
 
 VOLUME_DIR = "/var/lib/onionpress"
@@ -379,6 +380,10 @@ def status_document(app, now=None):
         "serving_from_wayback": serving_from_wayback(state, oh["client_registered"]),
         "wp_port": app.wp_port,
         "release": release_status(app.app_support),
+        # The verbs this host's handle-action takes, so the page sends a
+        # request carrying a password (archive-login) only to a host that
+        # reads and removes it (issue #528).
+        "page_actions": list(PAGE_ACTIONS),
     }
 
 
