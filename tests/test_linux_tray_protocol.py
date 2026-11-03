@@ -141,14 +141,35 @@ class TestTrayReadsTheDaemonsState(unittest.TestCase):
                                  f"line {node.lineno}: the tray opens a status file itself")
 
     def test_the_states_it_shows(self):
-        # The writer's `state` is the daemon's display state: "stuck" and
-        # "offline" are shown as starting, not as stopped.
-        self.assertIn('STARTING_STATES = ("starting", "stuck", "offline")', self.tray)
-        for reader in ("_update_icon", "_update_status_line", "_maybe_announce", "_maybe_show_setup"):
+        # The view is ui_client.status_view's, the menubar's: "stuck",
+        # "stalled" and "offline" are the containers up, not stopped;
+        # "reconnecting" (a stale state) is neither.
+        self.assertIn('STARTING_STATES = ("starting", "stuck", "stalled", "offline")', self.tray)
+        for reader in ("_maybe_announce", "_maybe_show_setup"):
             with self.subTest(reader=reader):
                 body = self.tray[self.tray.index(f"    def {reader}("):]
                 body = body[:body.index("\n    def ", 10)]
                 self.assertIn("STARTING_STATES", body)
+                self.assertNotIn('"running"', body)
+
+    def test_the_view_is_the_shared_clients(self):
+        """Issue: the tray kept its own reading of the state (no freshness
+        check, a dead daemon left its last state on screen)."""
+        status = self.tray[self.tray.index("class Status:"):self.tray.index("# ─── 3.")]
+        self.assertIn("self.view = ui_client.status_view(self._doc, now, daemon_seen=self._daemon_seen)",
+                      status)
+        self.assertIn("daemon_client.state_is_fresh(self._doc, now)", status)
+        # The view is recomputed every tick, not only when the file changes.
+        poll = status[status.index("def _poll("):status.index("def _take(")]
+        self.assertLess(poll.index("if mtime != self._mtime:"), poll.index("ui_client.status_view("))
+        self.assertNotIn("return True\n        self._mtime", poll)
+        line = self.tray[self.tray.index("    def _update_status_line("):]
+        line = line[:line.index("\n    def ", 10)]
+        self.assertIn("self.menu_status.set_label(view.title)", line)
+        self.assertIn("item.set_sensitive(action in view.actions)", line)
+        icon = self.tray[self.tray.index("    def _update_icon("):]
+        icon = icon[:icon.index("\n    def ", 10)]
+        self.assertIn("ICONS.get(view.icon, ICON_STOPPED)", icon)
 
 
 class TestLinuxLauncherBackupCheck(unittest.TestCase):

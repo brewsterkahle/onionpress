@@ -898,15 +898,97 @@ def _launcher_argv_calls(rel, launcher_names):
     return found
 
 
+class TestStatusView(unittest.TestCase):
+    """ui_client.status_view: the one view both UIs show of the daemon's
+    state, the menubar's six categories and its freshness check."""
+
+    NOW = 1_000_000.0
+
+    def doc(self, **kw):
+        d = {"pid": os.getpid(), "updated_at": self.NOW - 5, "is_running": True,
+             "is_ready": True, "has_internet": True, "yellow_since": None,
+             "last_check_complete": self.NOW - 5, "bootstrap_pct": 100,
+             "onion_address": "a" * 56 + ".onion", "wp_installed": True,
+             "status": {"onionname": "", "serving_from_wayback": False}}
+        d.update(kw)
+        return d
+
+    def view(self, doc, **kw):
+        return ui_client.status_view(doc, self.NOW, **kw)
+
+    def test_available(self):
+        v = self.view(self.doc())
+        self.assertEqual(v.category, "available")
+        self.assertEqual(v.icon, "running")
+        self.assertEqual(v.title, f"Address: {ui_client.short_onion('a' * 56 + '.onion')}")
+        self.assertEqual(v.actions, frozenset({"stop", "restart", "backup", "restore",
+                                               "open_onion", "open_local"}))
+        self.assertTrue(v.actions <= set(ui_client.VIEW_ACTIONS))
+
+    def test_the_onionname_leads_the_title(self):
+        short = ui_client.short_onion("a" * 56 + ".onion")
+        self.assertEqual(self.view(self.doc(status={"onionname": "alice"})).title, f"alice@{short}")
+        self.assertEqual(self.view(self.doc(), onionname=" bob ").title, f"bob@{short}")
+
+    def test_no_state_or_a_stale_one_or_a_dead_pid_is_reconnecting(self):
+        for doc in (None, {}, self.doc(updated_at=self.NOW - 91), self.doc(pid=0),
+                    self.doc(pid=2 ** 22 + 12345), self.doc(updated_at="x")):
+            with self.subTest(doc=doc and {k: doc[k] for k in ("pid", "updated_at")}):
+                v = self.view(doc)
+                self.assertEqual(v.category, "reconnecting")
+                self.assertEqual(v.icon, "starting")
+                self.assertIn("Reconnecting", v.title)
+                self.assertIn("start", v.actions)
+                self.assertNotIn("restore", v.actions)
+        self.assertEqual(self.view(None, daemon_seen=False).title, "Status: Starting up, please wait...")
+        # A stale state that says "stopped" is not believed either.
+        self.assertEqual(self.view(self.doc(is_running=False, updated_at=self.NOW - 600)).category,
+                         "reconnecting")
+
+    def test_stopped(self):
+        v = self.view(self.doc(is_running=False))
+        self.assertEqual((v.category, v.icon, v.actions), ("stopped", "stopped", frozenset({"start"})))
+        self.assertTrue(v.title.startswith("Stopped — "))
+        self.assertEqual(self.view(self.doc(is_running=False), start_failed=True).title,
+                         "Status: Start failed — see View Logs")
+        self.assertEqual(self.view(self.doc(is_running=False, onion_address="")).title, "Status: Stopped")
+        wayback = self.doc(is_running=False, status={"serving_from_wayback": True})
+        self.assertEqual(self.view(wayback).title, "Status: Site offline — visitors see Wayback")
+
+    def test_the_states_between(self):
+        up = frozenset({"stop", "restart", "backup", "open_local"})
+        cases = {
+            "offline": (self.doc(is_ready=False, has_internet=False), "stopped", "Offline"),
+            "stalled": (self.doc(last_check_complete=self.NOW - 181), "starting", "stalled"),
+            "stuck": (self.doc(is_ready=False, yellow_since=self.NOW - 301), "starting", "Slow to connect"),
+            "starting": (self.doc(is_ready=False, bootstrap_pct=42), "starting", "Connecting to Tor (42%)"),
+        }
+        for category, (doc, icon, words) in cases.items():
+            with self.subTest(category=category):
+                v = self.view(doc)
+                self.assertEqual((v.category, v.icon, v.actions), (category, icon, up))
+                self.assertIn(words, v.title)
+
+    def test_starting_titles(self):
+        def title(**kw):
+            return self.view(self.doc(is_ready=False, **kw)).title
+        self.assertEqual(title(bootstrap_pct=0), "Status: Starting up, please wait...")
+        self.assertIn("Setup required", title(bootstrap_pct=100, wp_installed=False))
+        self.assertIn("Setup required", title(bootstrap_pct=0, wp_installed=False))
+        self.assertIn("Connecting to Tor (5%)", title(bootstrap_pct=5, wp_installed=False))
+        # Unknown (None) is not "not installed".
+        self.assertIn("onion service", title(bootstrap_pct=100, wp_installed=None))
+
+
 class TestModuleShape(unittest.TestCase):
 
     def test_imports_are_the_standard_library_confirm_and_launcher_ops(self):
         """So the menubar's docker-free import closure holds
-        (tests/test_mac_daemon.py); onionheaven only lazily, for a
-        restore's summary."""
+        (tests/test_mac_daemon.py; daemon_client is the standard library
+        only); onionheaven only lazily, for a restore's summary."""
         tree = ast.parse(_read("src/onionpress/ui_client.py"))
         top = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and n.level for a in n.names}
-        self.assertEqual(top, {"confirm", "launcher_ops"})
+        self.assertEqual(top, {"confirm", "daemon_client", "launcher_ops"})
         lazy = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.level
                 for a in n.names} - top
         self.assertEqual(lazy, {"onionheaven"})
@@ -955,7 +1037,7 @@ class TestModuleShape(unittest.TestCase):
         for call in ("ui_client.plan_backup(", "ui_client.run_backup(", "ui_client.plan_restore(",
                      "ui_client.run_restore(", "ui_client.restore_summary(", "ui_client.update_outcome(",
                      "ui_client.question_text(", "ui_client.about_comments(", "ui_client.site_url(",
-                     "ui_client.short_onion(", "ui_client.run_confirmed("):
+                     "ui_client.status_view(", "ui_client.run_confirmed("):
             with self.subTest(call=call):
                 self.assertIn(call, src)
         # The package is installed beside the tray: hard imports, no
