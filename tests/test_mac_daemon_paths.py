@@ -658,7 +658,9 @@ class TestOnionnameRetry(_PathsCase):
     def test_success_is_saved_through_config_set(self):
         from onionpress.onionnames_registrar import RegistrarResult
         R, reg = self.retry(RegistrarResult(status="ok"))
-        R.assert_called_once_with(self.docker, log=self.d.log)
+        from onionpress.onionnames_registrar import DEFAULT_ONIONHOME_ADDRESS
+        R.assert_called_once_with(self.docker, log=self.d.log,
+                                  onionhome_address=DEFAULT_ONIONHOME_ADDRESS)
         reg.register.assert_called_once_with("mysite", ADDR)
         self.assertEqual(self.config_sets(), [["ONIONNAME", "mysite"],
                                               ["ONIONNAME_ADDRESS", ADDR],
@@ -692,6 +694,33 @@ class TestOnionnameRetry(_PathsCase):
             f.write("ONIONNAME=\n")
         R, _ = self.retry()
         R.assert_not_called()
+
+    def test_no_onionhome_registers_nothing(self):
+        """ONIONHOME_ADDRESS empty (the e2e harness's baseline): the
+        daemon never registers the name, nor starts the retry."""
+        with open(os.path.join(self.dir, "config"), "a") as f:
+            f.write("ONIONHOME_ADDRESS=\n")
+        R, _ = self.retry()
+        R.assert_not_called()
+        d = self.d
+        d.is_ready = True
+        d.onion_address = ADDR
+        d._onionheaven_checked = True
+        d._analytics_sharing_started = True
+        d._onionname_retry_in_flight = False
+        d.hub_client = mock.Mock()
+        with mock.patch.object(op_daemon.threading, "Thread") as T:
+            Daemon._hub_loops(d)
+        self.assertFalse(any(c.kwargs.get("target") == d._retry_pending_onionname
+                             for c in T.call_args_list))
+
+    def test_a_configured_onionhome_is_the_one_asked(self):
+        from onionpress.onionnames_registrar import RegistrarResult
+        other = "b" * 52 + "qd2a.onion"
+        with open(os.path.join(self.dir, "config"), "a") as f:
+            f.write(f"ONIONHOME_ADDRESS={other}\n")
+        R, _ = self.retry(RegistrarResult(status="ok"))
+        self.assertEqual(R.call_args.kwargs["onionhome_address"], other)
 
     def test_hub_loops_start_the_retry_once(self):
         d = self.d

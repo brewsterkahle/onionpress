@@ -236,6 +236,9 @@ class SafetyTest(unittest.TestCase):
         self.assertIn("REGISTER_WITH_ONIONHEAVEN=no\n", text)
         self.assertIn("SHARE_ANALYTICS_WITH_ONIONHOME=no\n", text)
         self.assertIn("INSTALL_IA_PLUGIN=no\n", text)
+        # No OnionHome: setup records the onionname unregistered and the
+        # daemon never registers it (onionnames_registrar.configured_onionhome).
+        self.assertIn("ONIONHOME_ADDRESS=\n", text)
         # Every key is one the product reads (config template).
         with open(os.path.join(PROJECT_DIR, "app", "Resources", "config-template.txt"),
                   encoding="utf-8") as f:
