@@ -413,12 +413,14 @@ def register_onionname(name, paths, docker, os_name, log, *, registrar=None,
         return OnionnameOutcome("invalid", name, [], "",
                                 setup_logic.onionname_error_message(reason))
 
-    address = served_address(docker, paths.data_dir) if register else ""
+    from .onionnames_registrar import configured_onionhome
+    onionhome = configured_onionhome(paths.config_file, log) if register else ""
+    address = served_address(docker, paths.data_dir) if onionhome else ""
     result = None
     if address:
         if registrar is None:
             from .onionnames_registrar import Registrar
-            registrar = Registrar(docker, log=log)
+            registrar = Registrar(docker, log=log, onionhome_address=onionhome)
         try:
             result = registrar.register(name, address)
         except Exception as e:  # the registrar reports, never raises; belt and braces
@@ -437,6 +439,12 @@ def register_onionname(name, paths, docker, os_name, log, *, registrar=None,
     if registered:
         log(f"onionname: {name!r} registered for {address}")
         return OnionnameOutcome("registered", name, [], "", "")
+    if register and not onionhome:
+        # ONIONHOME_ADDRESS empty: no OnionHome, so no retry either.
+        log(f"onionname: {name!r} recorded; not registered: ONIONHOME_ADDRESS is empty")
+        return OnionnameOutcome("recorded", name, [],
+                                "Not registered: OnionHome is off on this install "
+                                "(ONIONHOME_ADDRESS is empty in the config).", "")
     if os_name == "macos":
         try:
             with open(os.path.join(paths.data_dir, ONIONNAME_RETRY_MARKER), "w") as f:

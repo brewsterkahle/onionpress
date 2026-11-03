@@ -32,8 +32,29 @@ DEFAULT_ONIONHOME_ADDRESS = (
     "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
 )
 DEFAULT_ONIONHOME_PORT = 8083
+# The config key naming OnionHome, as analytics sharing reads it: absent
+# is DEFAULT_ONIONHOME_ADDRESS, empty is no OnionHome.
+ONIONHOME_ADDRESS_KEY = "ONIONHOME_ADDRESS"
 DEFAULT_CONTAINER = "onionpress-tor"
 DEFAULT_TIMEOUT = 30
+
+
+def configured_onionhome(config_file, log=None):
+    """The OnionHome an onionname is registered with: the config's
+    ONIONHOME_ADDRESS (the key analytics sharing reads), the default when
+    the key is absent. Empty means no OnionHome, and so does a value that
+    is not one v3 address (logged): "" then, and nothing is registered
+    (setup records the name unregistered, the daemon does not retry it).
+    The e2e harness sets it empty so no test node registers its name."""
+    from . import config as op_config
+    addr = op_config.read_value(config_file, ONIONHOME_ADDRESS_KEY,
+                                DEFAULT_ONIONHOME_ADDRESS).strip()
+    if addr and not key_manager.is_valid_onion_address(addr):
+        if log:
+            log("onionname: ONIONHOME_ADDRESS in the config is not a valid onion "
+                "address; not registering")
+        return ""
+    return addr
 
 
 # ---------------------------------------------------------------------------

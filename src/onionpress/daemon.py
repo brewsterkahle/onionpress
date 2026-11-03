@@ -1191,7 +1191,9 @@ class Daemon(PortAttributes):
                 and not self._onionname_retry_in_flight and not self._onionname_retry_giveup):
             pending = self.read_config_value("ONIONNAME", "")
             registered = self.read_config_value("ONIONNAME_REGISTERED", "no") == "yes"
-            if pending and not registered:
+            # Not with no OnionHome (ONIONHOME_ADDRESS empty, as the e2e
+            # harness sets it): onionnames_registrar.configured_onionhome.
+            if pending and not registered and self._onionhome_address():
                 self._onionname_retry_in_flight = True
                 threading.Thread(target=self._retry_pending_onionname, daemon=True,
                                  name="onionname-retry").start()
@@ -1613,6 +1615,11 @@ class Daemon(PortAttributes):
         self.write_config_value("ONIONNAME_ADDRESS", onionaddress or "")
         self.write_config_value("ONIONNAME_REGISTERED", "yes" if registered else "no")
 
+    def _onionhome_address(self):
+        """The OnionHome onionnames are registered with, "" for none."""
+        from .onionnames_registrar import configured_onionhome
+        return configured_onionhome(self.config_file)
+
     def _retry_pending_onionname(self):
         """An onionname that did not register during setup: register it
         now that Tor is up. A collision is reported in the state
@@ -1630,7 +1637,10 @@ class Daemon(PortAttributes):
             except Exception as e:
                 self.log(f"onionname: retry cannot import registrar: {e}")
                 return
-            reg = Registrar(self._docker, log=self.log)
+            onionhome = self._onionhome_address()
+            if not onionhome:
+                return
+            reg = Registrar(self._docker, log=self.log, onionhome_address=onionhome)
             result = reg.register(name, onionaddress)
             if result.ok:
                 self._save_onionname(name, onionaddress, registered=True)

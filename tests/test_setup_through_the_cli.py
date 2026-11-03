@@ -111,6 +111,35 @@ class TestSetupOnionname(Base):
         self.assertEqual(reg.calls, [])
         self.assertEqual(self.config()["registered"], False)
 
+    def test_no_onionhome_asks_nobody_and_installs(self):
+        """ONIONHOME_ADDRESS empty (the e2e harness's baseline): the name
+        is recorded unregistered, OnionHome never asked, no retry marker."""
+        with open(self.config_file, "a") as f:
+            f.write("ONIONHOME_ADDRESS=\n")
+        reg = Registrar("ok")
+        got, report = self.name("alice", reg)
+        self.assertEqual(got, "alice")
+        self.assertEqual(reg.calls, [])
+        self.served.assert_not_called()
+        self.assertEqual((self.config()["name"], self.config()["registered"]), ("alice", False))
+        self.assertTrue(any("OnionHome is off" in s for s in self.said))
+        self.assertFalse(os.path.exists(os.path.join(self.data, app_commands.ONIONNAME_RETRY_MARKER)))
+
+    def test_the_configured_onionhome_is_the_registrars(self):
+        from onionpress import onionnames_registrar as onr
+        other = "b" * 52 + "qd2a.onion"
+        with open(self.config_file, "a") as f:
+            f.write(f"ONIONHOME_ADDRESS={other}\n")
+        made = []
+
+        def make(docker, log=None, onionhome_address=None):
+            made.append(onionhome_address)
+            return Registrar("ok")
+
+        with mock.patch.object(onr, "Registrar", side_effect=make):
+            got, _ = self.name("alice", None)
+        self.assertEqual((got, made), ("alice", [other]))
+
     def test_a_taken_name_without_a_terminal_stops_the_setup(self):
         got, report = self.name("alice", Registrar("collision"))
         self.assertEqual(got, "")
@@ -375,6 +404,41 @@ class TestArchiveKeysDetached(Base):
         detached.assert_called_once_with(["ensure-archive-s3-keys"], data_dir=self.data,
                                          log_file=os.path.join(self.data, "onionpress.log"))
         thread.assert_not_called()
+
+
+class TestConfiguredOnionHome(unittest.TestCase):
+    """onionnames_registrar.configured_onionhome: the config's
+    ONIONHOME_ADDRESS, the key analytics sharing reads."""
+
+    def answer(self, text):
+        from onionpress import onionnames_registrar as onr
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config")
+            with open(path, "w") as f:
+                f.write(text)
+            logs = []
+            return onr.configured_onionhome(path, logs.append), logs
+
+    def test_absent_is_the_default(self):
+        from onionpress import onionnames_registrar as onr
+        self.assertEqual(self.answer("ONIONNAME=alice\n"), (onr.DEFAULT_ONIONHOME_ADDRESS, []))
+
+    def test_empty_is_none(self):
+        self.assertEqual(self.answer("ONIONHOME_ADDRESS=\n"), ("", []))
+        self.assertEqual(self.answer("ONIONHOME_ADDRESS=  \n"), ("", []))
+
+    def test_another_address(self):
+        other = "b" * 52 + "qd2a.onion"
+        self.assertEqual(self.answer(f"ONIONHOME_ADDRESS={other}\n"), (other, []))
+
+    def test_not_an_onion_address_is_none_and_said(self):
+        addr, logs = self.answer("ONIONHOME_ADDRESS=example.com.onion\n")
+        self.assertEqual(addr, "")
+        self.assertTrue(logs and "not a valid onion address" in logs[0])
+
+    def test_the_key_is_analytics_sharings(self):
+        from onionpress import onionnames_registrar as onr
+        self.assertIn(f'"{onr.ONIONHOME_ADDRESS_KEY}"', _read("src/onionpress/analytics_sharing.py"))
 
 
 class TestTheUIsRunTheCli(unittest.TestCase):

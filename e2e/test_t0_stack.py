@@ -177,11 +177,17 @@ def test_restart_keeps_address(node, e2e):
 
 
 def test_no_public_service_contact(node):
-    """No registration with any hub, and OnionHeaven still off (the log
-    tripwire at teardown checks the rest)."""
+    """No registration with any hub or with OnionHome, and OnionHeaven
+    still off (the log tripwire at teardown checks the rest)."""
     assert node.config().get("REGISTER_WITH_ONIONHEAVEN") == "no"
     record = node.read_file(".onionpress/onionheaven-registration.json")
     if record.strip():
         data = json.loads(record)
         assert not data.get("registered"), f"registration record says registered: {data}"
+    # OnionHome is off (ONIONHOME_ADDRESS empty): the setup's onionname is
+    # recorded, never registered.
+    config = node.config()
+    assert config.get("ONIONHOME_ADDRESS") == ""
+    assert config.get("ONIONNAME_REGISTERED") != "yes", "the onionname was registered"
+    assert not config.get("ONIONNAME_ADDRESS"), "the onionname was registered"
 
