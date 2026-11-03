@@ -176,6 +176,30 @@ class TestImports(unittest.TestCase):
         self.assertIn('self.launcher.run_json("handle-action", "--json", *args)', self.src)
 
 
+class TestSettingsDialog(unittest.TestCase):
+    """The Mac settings dialog (settings_ui.py) runs the launcher through
+    the menubar's ui_client.Launcher and checks VM_MEMORY / VM_CPU with
+    config's own checks (what `config set` takes), no limits of its own."""
+
+    def setUp(self):
+        with open(os.path.join(os.path.dirname(MENUBAR), "onionpress", "settings_ui.py"),
+                  encoding="utf-8") as f:
+            self.src = f.read()
+
+    def test_the_hub_check_goes_through_the_client(self):
+        self.assertIn('launcher.run_json("validate-oh-address", oh_addr, timeout=90)', self.src)
+        self.assertNotIn("subprocess", self.src)
+        self.assertNotIn("json.loads", self.src)
+        self.assertIn("launcher=self.launcher,", _src())
+
+    def test_vm_limits_are_configs(self):
+        self.assertIn('for key, title in (("VM_MEMORY", "Invalid VM Memory"), ("VM_CPU", "Invalid VM CPUs")):',
+                      self.src)
+        self.assertIn("op_config.check_config_value(key, new_values[key])", self.src)
+        self.assertNotIn('int(new_values["VM_MEMORY"])', self.src)
+        self.assertNotIn('int(new_values["VM_CPU"])', self.src)
+
+
 class TestViewTickKeepsTheState(unittest.TestCase):
     """The view loop's tick copies a fresh daemon state into self.state:
     auto_start's wait for the runtime, its port-conflict gate and the

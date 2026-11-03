@@ -1946,7 +1946,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         show_settings_dialog(
             config_path=self.config_file,
             icon_path=icon_path,
-            launcher_script=self.launcher_script,
+            launcher=self.launcher,
             log_func=self.log,
             callbacks={'write_config': self.write_config_value},
         )
