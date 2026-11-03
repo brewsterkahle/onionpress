@@ -373,11 +373,6 @@ class TestLaunchersShareThePutScript(unittest.TestCase):
                 self.assertIsNotNone(m, body)
                 self.assertEqual(m.group(1), wp_files.PUT_FILE_SCRIPT)
 
-    def test_linux_wp_exec_is_www_data(self):
-        text = _read("linux/onionpress")
-        start = text.index("\nwp_exec() {\n")
-        self.assertIn('docker exec -u www-data onionpress-wordpress "$@"',
-                      text[start:text.index("\n}\n", start)])
 
 
 class TestNoRootWritesIntoWwwDataFolders(unittest.TestCase):

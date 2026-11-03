@@ -2,8 +2,8 @@
 """Onion addresses are checked whole, not by "ends in .onion".
 
 An address that ends up in a URL, a path, a command or a registry has to be
-a well-formed v3 address and nothing else (key_manager.is_valid_onion_address
-and the launchers' is_onion_address). `x.endswith(".onion")` and
+a well-formed v3 address and nothing else (key_manager.is_valid_onion_address,
+which start.vanity_key_dir uses too). `x.endswith(".onion")` and
 `".onion" in x` accept "evil.example/" + 39 characters + ".onion": as the
 hub address, that is a URL path on a clearnet host, and the heartbeat POSTs
 the site's onion private key to it through a Tor exit. Covered here:
@@ -736,11 +736,17 @@ class TestLaunchers(unittest.TestCase):
         text = _read(rel)
         return "".join(_bash_function(text, n) for n in names)
 
-    def test_vanity_key_dir_is_identical_in_both_launchers(self):
-        bodies = [_bash_function(_read(p), "vanity_key_dir") for p in LAUNCHERS]
-        self.assertEqual(bodies[0], bodies[1])
+    def test_no_bash_key_dir_reader_is_left(self):
+        # The launchers' vanity_key_dir / is_onion_address had no caller
+        # left once the start and the key steps moved to Python (#442,
+        # #524): start.vanity_key_dir is the one reader.
+        for rel in LAUNCHERS:
+            text = _read(rel)
+            for name in ("vanity_key_dir", "is_onion_address"):
+                self.assertNotIn(f"\n{name}() {{", text, rel)
 
     def test_vanity_key_dir_takes_only_a_whole_address(self):
+        from onionpress import start
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         keys = os.path.join(tmp, "shared", "vanity-keys")
@@ -749,30 +755,14 @@ class TestLaunchers(unittest.TestCase):
         os.makedirs(os.path.join(tmp, "elsewhere"))
         os.symlink(os.path.join(tmp, "elsewhere"),
                    os.path.join(keys, "b" * 56 + ".onion"))
-        for rel in LAUNCHERS:
-            fns = self._functions(rel, "is_onion_address", "vanity_key_dir")
-            r = _bash(fns + 'DATA_DIR="$1"; vanity_key_dir', tmp)
-            self.assertEqual((r.returncode, r.stdout), (1, ""), rel)
-            os.makedirs(os.path.join(keys, SITE), exist_ok=True)
-            r = _bash(fns + 'DATA_DIR="$1"; vanity_key_dir', tmp)
-            self.assertEqual((r.returncode, r.stdout.strip()),
-                             (0, os.path.join(keys, SITE)), rel)
-            shutil.rmtree(os.path.join(keys, SITE))
+        self.assertIsNone(start.vanity_key_dir(tmp))
+        os.makedirs(os.path.join(keys, SITE))
+        self.assertEqual(start.vanity_key_dir(tmp), os.path.join(keys, SITE))
 
     def test_no_launcher_picks_a_key_dir_by_suffix(self):
         for rel in LAUNCHERS:
             self.assertNotIn('find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion"',
                              _read(rel), rel)
-
-    def _with_fake_docker(self, rel, fn, content):
-        fns = self._functions(rel, "is_onion_address", fn)
-        script = ('docker() { printf "%s" "$FAKE_HOSTNAME"; }\n'
-                  'DOCKER_DIR="$1"; DATA_DIR="$1"\n' + fns + fn + "\n")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        r = _bash(script, tmp, env={"FAKE_HOSTNAME": content})
-        cache = os.path.join(tmp, "healthcheck-address")
-        return r, (open(cache).read() if os.path.exists(cache) else None)
 
     def test_no_bash_reader_of_the_site_address_is_left(self):
         # get_onion_address had no callers; the readers are Python's

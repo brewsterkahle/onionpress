@@ -336,13 +336,13 @@ class TestEveryPullIsGuarded(unittest.TestCase):
                 if not self._guarded(lines, i):
                     unguarded.append(f"{path}:{lineno}: {line.strip()}")
             with self.subTest(path=path):
-                # The Mac launcher's last pull of its own (the key helper
-                # image's) went with its unused ensure_key_helper_image on
-                # 2026-10-31: every Mac pull is the Python start's
-                # (containers.ensure_key_helper_image, start.start_core),
-                # held by tests/test_no_image_refresh.py and
-                # tests/test_image_pins.py. Linux's
-                # create_backup still pulls the key helper image itself.
+                # Neither launcher pulls the key helper image any more
+                # (each one's unused ensure_key_helper_image is gone, the
+                # Mac's on 2026-10-31, Linux's on 2026-11-02): those pulls
+                # are the Python start's (containers.ensure_tor_image,
+                # start.start_core), held by tests/test_no_image_refresh.py
+                # and tests/test_image_pins.py. Linux's update_finish still
+                # pulls the stack (`--policy missing`).
                 self.assertTrue(
                     found or path == "app/MacOS/onionpress",
                     f"No image pull found in {path} at all — have they been "

@@ -721,74 +721,18 @@ def _case_branch(text, label):
     return text[start:text.index("\n            ;;\n", start)]
 
 
-class TestReleaseFunctionInTheLaunchers(unittest.TestCase):
-    """onionheaven_release, run against stubs (one function, identical in
-    both launchers since #407): the CLI's answer decides whether the user
-    is asked, and a "no" stops the caller."""
+class TestNoReleaseFunctionInTheLaunchers(unittest.TestCase):
+    """Every path that ends a hub's hold on the key is Python's
+    (`uninstall.run`, `cmd_reset`, `scrub.phase_reset_in_place`,
+    `key_import.replace_key`; TestLauncherPathsReleaseFirst below), each
+    calling `release_onionheaven` and asking its own question. The
+    launchers' bash onionheaven_release had no caller left after #524 and
+    #529 and was removed: a second copy of the question would drift."""
 
-    def _run(self, rel, rc, answer="", yes=False, keep=""):
-        text = _read(rel)
-        tmp = tempfile.mkdtemp(prefix="oh-release-sh-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        calls = os.path.join(tmp, "calls")
-        funcs = [_shell_function(text, "onionheaven_release")]
-        script = (
-            "set -e\n"
-            "log() { :; }\n"
-            'systemctl() { echo "systemctl $*" >> "$CALLS"; }\n'
-            'sudo() { echo "sudo" >> "$CALLS"; "$@"; }\n'
-            'op_py() { echo "cli $*" >> "$CALLS"; return "$RC"; }\n'
-            'bundled_python() { echo "cli $*" >> "$CALLS"; return "$RC"; }\n'
-            + "\n".join(funcs) + "\n"
-            'if onionheaven_release reset "$KEEP"; then echo GO; else echo STOP; fi\n'
-            'echo "rc=$ONIONHEAVEN_RELEASE_RC"\n')
-        env = {**os.environ, "CALLS": calls, "RC": str(rc), "KEEP": keep,
-               "LOG_FILE": os.path.join(tmp, "log"),
-               "ONIONPRESS_YES": "true" if yes else ""}
-        out = subprocess.run(["bash", "-c", script], input=answer + "\n",
-                             capture_output=True, text=True, timeout=30, env=env)
-        self.assertEqual(out.returncode, 0, out.stderr)
-        with open(calls) as f:
-            return out.stdout, f.read().splitlines()
-
-    def test_both_launchers(self):
+    def test_neither_launcher_defines_it(self):
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
             with self.subTest(rel=rel):
-                out, calls = self._run(rel, 0)
-                self.assertIn("GO", out)
-                self.assertIn("rc=0", out)
-                cli_calls = [c for c in calls if c.startswith("cli ")]
-                self.assertEqual(cli_calls, [
-                    "cli -m onionpress.cli onionheaven-unregister --reason reset"
-                    if "MacOS" in rel else "cli onionheaven-unregister --reason reset"])
-                out, calls = self._run(rel, 0, keep=SITE)
-                self.assertTrue(calls[-1].endswith(f"--keep-address {SITE}"), calls)
-                # Nothing left the user can do something about: no question.
-                out, _ = self._run(rel, 3)
-                self.assertIn("GO", out)
-                self.assertNotIn("Continue anyway", out)
-                # Something left: asked, and "no" stops the caller.
-                out, calls = self._run(rel, 1, answer="n")
-                self.assertIn("Continue anyway", out)
-                self.assertIn("STOP", out)
-                out, _ = self._run(rel, 1, answer="y")
-                self.assertIn("GO", out)
-                out, _ = self._run(rel, 1, yes=True)
-                self.assertIn("GO", out)
-                self.assertNotIn("Continue anyway", out)
-                # The command itself failed (an older lib/ without it, a
-                # crash): a key may be left, so the user is asked too.
-                out, _ = self._run(rel, 2, answer="n")
-                self.assertIn("STOP", out)
-
-    def test_linux_touches_no_unit(self):
-        # The daemon's own beats stay off a released key (the record's
-        # "released" hold): nothing to stop around the request.
-        _, calls = self._run("linux/onionpress", 0)
-        self.assertFalse([c for c in calls if c.startswith("systemctl")], calls)
-        linux = _shell_function(_read("linux/onionpress"), "onionheaven_release")
-        mac = _shell_function(_read("app/MacOS/onionpress"), "onionheaven_release")
-        self.assertEqual(linux.replace("op_py ", "bundled_python -m onionpress.cli "), mac)
+                self.assertNotIn("\nonionheaven_release() {", _read(rel))
 
 
 class TestLauncherPathsReleaseFirst(unittest.TestCase):

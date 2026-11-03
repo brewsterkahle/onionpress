@@ -79,10 +79,9 @@ class TestIsOnionheavenHubCommand(unittest.TestCase):
 class TestBothPlatformsDecideByAddress(unittest.TestCase):
     def test_linux_launcher_delegates_to_the_cli(self):
         launcher = _read("linux/onionpress")
-        self.assertEqual(
-            _function(launcher, "is_onionheaven_hub"),
-            '\nis_onionheaven_hub() {\n'
-            '    op_py --data-dir "$DATA_DIR" is-onionheaven-hub "$1"\n}\n')
+        # `onionpress is-onionheaven-hub` is the rule; the launcher's bash
+        # wrapper had no caller left after #523 and was removed.
+        self.assertNotIn("\nis_onionheaven_hub() {", launcher)
         # The status is the writer's (#523): the rule by address there, and
         # never the old one (a running onionheaven container, which every
         # node has) in the launcher.

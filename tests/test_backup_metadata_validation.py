@@ -177,24 +177,13 @@ class TestOnionAddressRule(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertFalse(key_manager.is_valid_onion_address(value))
 
-    def test_bash_rule_is_identical_in_both_launchers(self):
-        bodies = [_bash_function(_read(p), "is_onion_address") for p in LAUNCHERS]
-        self.assertEqual(bodies[0], bodies[1],
-                         "is_onion_address() must be identical in both launchers")
-
-    def test_bash_rule_agrees_with_python(self):
-        values = [ADDR, OLD_ADDR] + CRAFTED_ADDRESSES + [""]
-        script = (_bash_function(_read("linux/onionpress"), "is_onion_address")
-                  + 'for v in "$@"; do if is_onion_address "$v"; then echo 1; '
-                    'else echo 0; fi; done\n')
-        r = subprocess.run(["bash", "-c", script, "bash", *values],
-                           capture_output=True, text=True, timeout=10,
-                           env={**os.environ, "LC_ALL": "en_US.UTF-8"})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        got = r.stdout.split()
-        want = ["1" if key_manager.is_valid_onion_address(v) else "0" for v in values]
-        self.assertEqual(got, want)
-        self.assertEqual(want[:2], ["1", "1"])
+    def test_no_bash_copy_of_the_rule_is_left(self):
+        # key_manager.is_valid_onion_address is the one rule. The launchers'
+        # is_onion_address had no caller left once vanity_key_dir moved to
+        # start.vanity_key_dir, and was removed with it (2026-11-02).
+        for p in LAUNCHERS:
+            with self.subTest(launcher=p):
+                self.assertNotIn("\nis_onion_address() {", _read(p))
 
 
 class TestKeyConsistency(unittest.TestCase):
