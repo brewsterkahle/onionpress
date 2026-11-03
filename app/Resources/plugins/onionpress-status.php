@@ -28,19 +28,11 @@ function onionpress_status_viewer_allowed() {
 }
 
 /**
- * JSON API endpoint for live status polling.
- * Append ?refresh=1 to also trigger a full status rewrite on the next watcher tick.
- *
- * The rewrite is asked for by writing requested-action, which is what the
- * Settings page's actions use too, so (issue #402) it is written only
- * with the status page's own nonce (a page the owner has open elsewhere
- * cannot make this GET write it) and never over a request already there.
- * The reply carries a fresh nonce for a page left open past the old one.
+ * JSON API endpoint for live status polling: reads only. The host's
+ * daemon rewrites status.json on every pass, on both platforms, so the
+ * page asks for nothing (issue #528: it used to write the Settings
+ * page's request file for a rewrite).
  */
-function onionpress_status_refresh_allowed() {
-    return isset( $_GET['_wpnonce'] ) && is_string( $_GET['_wpnonce'] )
-        && wp_verify_nonce( $_GET['_wpnonce'], 'onionpress_status_refresh' );
-}
 
 add_action( 'parse_request', function () {
     $path = trim( parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH ), '/' );
@@ -59,24 +51,13 @@ add_action( 'parse_request', function () {
         exit;
     }
 
-    // Request a status rewrite if data is stale (>30s) or explicitly requested
     $status_file = '/var/lib/onionpress/status.json';
-    $stale = true;
-    if ( file_exists( $status_file ) ) {
-        $age = time() - filemtime( $status_file );
-        $stale = ( $age > 30 );
-    }
-    if ( ( $stale || ! empty( $_GET['refresh'] ) ) && onionpress_status_refresh_allowed()
-         && ! file_exists( '/var/lib/onionpress/requested-action' ) ) {
-        @file_put_contents( '/var/lib/onionpress/requested-action', 'refresh-status' );
-    }
 
     header( 'Content-Type: application/json; charset=utf-8' );
     header( 'Cache-Control: no-cache, no-store, must-revalidate' );
     header( 'X-Robots-Tag: noindex' );
 
-    $result = array( 'status' => null, 'logs' => '',
-                     'refresh_nonce' => wp_create_nonce( 'onionpress_status_refresh' ) );
+    $result = array( 'status' => null, 'logs' => '' );
 
     if ( file_exists( $status_file ) ) {
         $raw = file_get_contents( $status_file );
@@ -520,23 +501,16 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
         return d>0?d+'d '+h+'h '+m+'m':h>0?h+'h '+m+'m':m+'m';
     }
     function esc(t){var e=document.createElement('span');e.textContent=t;return e.innerHTML;}
-    // The nonce that lets this page ask the host for a status rewrite
-    // (issue #402); every reply carries a fresh one.
-    var refreshNonce='<?php echo esc_js( wp_create_nonce( 'onionpress_status_refresh' ) ); ?>';
+    // The host's daemon rewrites status.json every pass: Refresh reads it now.
     window.opRefresh = function(btn){
         btn.disabled=true;btn.textContent='Refreshing...';
-        // Request full status rewrite, then re-poll after watcher picks it up
-        fetch('/onionpress-status-json?refresh=1&_wpnonce='+encodeURIComponent(refreshNonce))
-        .then(function(){
-            setTimeout(function(){ poll(); btn.disabled=false; btn.textContent='Refresh Now'; },12000);
-        })
-        .catch(function(){ btn.disabled=false; btn.textContent='Refresh Now'; });
+        poll();
+        setTimeout(function(){ btn.disabled=false; btn.textContent='Refresh Now'; },1500);
     };
     function poll(){
-        fetch('/onionpress-status-json?_wpnonce='+encodeURIComponent(refreshNonce))
+        fetch('/onionpress-status-json')
         .then(function(r){return r.json()})
         .then(function(d){
-            if(d.refresh_nonce)refreshNonce=d.refresh_nonce;
             var s=d.status;
             if(!s)return;
             var st=s.state||'unknown',col=stateColors[st]||'#6b7280';

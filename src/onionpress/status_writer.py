@@ -63,6 +63,7 @@ from . import onionheaven
 from . import redact
 from . import wp_files
 from .daemon_client import display_state_of, state_path
+from .handle_action import ACTIONS as PAGE_ACTIONS
 from .platform import OS, detect_os
 
 VOLUME_DIR = "/var/lib/onionpress"
@@ -306,6 +307,32 @@ def gather_fields(app, now=None):
     return fields
 
 
+# The release check's last answer (handle_action.check_release keeps it
+# in the data dir; a test keeps the name equal), shown to the Settings page
+# as status.json's "release" so the page asks GitHub nothing itself
+# (issue #528). These fields only, scrubbed: an error can name a path.
+RELEASE_CACHE = "update-check.json"
+RELEASE_FIELDS = ("success", "update_available", "installable", "message", "current",
+                  "latest", "checked_at", "error")
+
+
+def release_status(data_dir):
+    """The last release check's answer for the page, or None when there
+    has been none (or it is not a regular file holding a JSON object)."""
+    path = os.path.join(data_dir, RELEASE_CACHE)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8") as f:
+            data = json.loads(f.read(64 * 1024))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    release = {k: data[k] for k in RELEASE_FIELDS
+               if k in data and isinstance(data[k], (str, bool, type(None)))}
+    return redact.scrub_json_for_wordpress(release, data_dir)
+
+
 def state_of(app, now=None):
     """status.json's `state` for *app*: the daemon's display state, with
     "available" said as "running" and "stalled" as "starting"."""
@@ -352,6 +379,11 @@ def status_document(app, now=None):
         "vanity_in_progress": bool(f.get("vanity_in_progress")),
         "serving_from_wayback": serving_from_wayback(state, oh["client_registered"]),
         "wp_port": app.wp_port,
+        "release": release_status(app.app_support),
+        # The verbs this host's handle-action takes, so the page sends a
+        # request carrying a password (archive-login) only to a host that
+        # reads and removes it (issue #528).
+        "page_actions": list(PAGE_ACTIONS),
     }
 
 

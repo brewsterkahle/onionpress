@@ -501,7 +501,9 @@ class TestDockerExecUser(unittest.TestCase):
 class TestSecurityAuditReport(_Sandbox):
     """onionpress-security-audit.sh runs as root in the WordPress container
     at every start and wrote its report through whatever www-data had put
-    at /var/lib/onionpress/security-report.txt."""
+    at /var/lib/onionpress/security-report.txt. Since issue #528 it writes
+    no report at all (nothing read it): findings are its log lines, and an
+    old report is only removed (rm -f takes a link, never its target)."""
 
     SCRIPT = "app/Resources/docker/wordpress/onionpress-security-audit.sh"
 
@@ -509,12 +511,12 @@ class TestSecurityAuditReport(_Sandbox):
         super().setUp()
         self.text = _read(self.SCRIPT)
 
-    def test_nothing_writes_the_published_name_directly(self):
+    def test_nothing_writes_in_the_volume(self):
         code = "\n".join(line for _, line in _code_lines(self.text))
-        self.assertNotRegex(code, r'>>? *"\$REPORT"')
-        self.assertIn('rm -f "$REPORT"', code)
-        self.assertIn('dd if="$report_tmp" of="$REPORT" conv=excl', code)
-        self.assertIn("trap publish_report EXIT", code)
+        self.assertNotRegex(code, r'>>? *"?/var/lib/onionpress/')
+        self.assertNotIn("report_tmp", code)
+        self.assertNotIn("publish_report", code)
+        self.assertIn('rm -f "$OLD_REPORT"', code)
 
     def test_quarantine_is_out_of_www_data_reach(self):
         m = re.search(r"^QUARANTINE=(\S+)$", self.text, re.M)
@@ -525,40 +527,18 @@ class TestSecurityAuditReport(_Sandbox):
         self.assertIn('cd -P -- "$dir"', body)
         self.assertIn('[ "$(pwd -P)" = "$dir" ]', body)
 
-    def test_publish_replaces_a_planted_link(self):
-        """Run publish_report with a dd that has GNU's conv=excl (O_EXCL),
-        which this Mac's dd lacks."""
-        fn = self.text[self.text.index("\npublish_report() {"):]
-        fn = fn[:fn.index("\n}\n") + 3]
-        bin_dir = os.path.join(self.tmp, "bin")
-        os.makedirs(bin_dir)
-        with open(os.path.join(bin_dir, "dd"), "w") as f:
-            f.write(f"""#!{sys.executable}
-import os, sys
-a = dict(x.split("=", 1) for x in sys.argv[1:])
-assert a["conv"] == "excl"
-fd = os.open(a["of"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-with open(a["if"], "rb") as src:
-    os.write(fd, src.read())
-""")
-        os.chmod(os.path.join(bin_dir, "dd"), 0o755)
+    def test_an_old_report_link_is_removed_not_followed(self):
         target = self._file("outside/docker-entrypoint.sh", b"#!/bin/sh\n", 0o755)
         report = os.path.join(self.tmp, "volume", "security-report.txt")
         os.makedirs(os.path.dirname(report))
         os.symlink(target, report)
-        tmp_report = self._file("report-tmp", b"No indicators of compromise found.\n")
-        r = subprocess.run(
-            ["bash", "-c", "warn() { echo \"$*\" >&2; }\n" + fn + "publish_report\n"],
-            env=dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"],
-                     REPORT=report, report_tmp=tmp_report),
-            capture_output=True, text=True, timeout=30)
+        line = next(ln for ln in self.text.splitlines() if ln.startswith('rm -f "$OLD_REPORT"'))
+        r = subprocess.run(["bash", "-c", line], env=dict(os.environ, OLD_REPORT=report),
+                           capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(os.path.islink(report))
-        with open(report, "rb") as f:
-            self.assertEqual(f.read(), b"No indicators of compromise found.\n")
+        self.assertFalse(os.path.lexists(report))
         with open(target, "rb") as f:
             self.assertEqual(f.read(), b"#!/bin/sh\n")
-        self.assertFalse(os.path.exists(tmp_report))
 
 
 class TestWatchdogSharedAddress(_Sandbox):

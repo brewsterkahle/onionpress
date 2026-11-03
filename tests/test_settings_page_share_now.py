@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """Share Now (issue #351, #407).
 
-The Settings page's Share Now touches `/var/lib/onionpress/.upload-analytics`
-and answered "Upload queued" on both platforms, but only the Mac daemon
-read the file. Now the daemon takes it on Linux too (#407; until then
-Linux's heartbeat client did), as www-data, and the host marker
-`onionpress upload-analytics` leaves in the data directory, and starts
-the upload when sharing is on (tests/test_mac_daemon.py drives the
-daemon's take of the marker). Both launchers' `upload-analytics` is
-`analytics_sharing.request_upload`, which refuses while sharing is off or
+Since issue #528 the Settings page's Share Now is a handle-action
+request (`upload-analytics`), handled by `analytics_sharing.request_upload`
+as `onionpress upload-analytics` is: it refuses while sharing is off or
 no daemon is running to take the request (the pid file, on both
-platforms); the page says "off" instead of "queued" when the host's
-config says so.
+platforms), else leaves the data dir's marker the daemon takes within a
+cycle (tests/test_mac_daemon.py drives the take). Nothing is touched in
+the volume, and the daemon runs no `docker exec` per cycle to look.
 """
 import io
 import os
@@ -31,7 +27,6 @@ from onionpress import analytics_sharing, daemon  # noqa: E402
 from onionpress.platform import resolve_paths  # noqa: E402
 
 SETTINGS_PHP = os.path.join(PROJECT_DIR, "app", "Resources", "plugins", "onionpress-settings.php")
-VOLUME_PATH = analytics_sharing.UPLOAD_TRIGGER_VOLUME_PATH
 
 
 def _read(rel):
@@ -39,20 +34,16 @@ def _read(rel):
         return fh.read()
 
 
-class TestTriggerFilesAgree(unittest.TestCase):
-    """One marker name and one volume path, in every copy."""
+class TestOneTrigger(unittest.TestCase):
+    """One marker, in the data dir; none in the volume."""
 
-    def test_marker_and_path_are_the_same_everywhere(self):
+    def test_the_marker_is_the_data_dirs_only(self):
         self.assertEqual(daemon.UPLOAD_TRIGGER_MARKER, analytics_sharing.UPLOAD_TRIGGER_MARKER)
-        self.assertEqual(VOLUME_PATH, "/var/lib/onionpress/" + analytics_sharing.UPLOAD_TRIGGER_MARKER)
-        php = _read("app/Resources/plugins/onionpress-settings.php")
-        self.assertIn(f"$trigger = '{VOLUME_PATH}';", php)
+        self.assertFalse(hasattr(analytics_sharing, "UPLOAD_TRIGGER_VOLUME_PATH"))
         src = _read("src/onionpress/daemon.py")
-        self.assertIn(f'"test -f {VOLUME_PATH} && rm {VOLUME_PATH}"', src)
-        # Taken as www-data, the file's owner.
-        take = src[src.index("trigger_found = self._take_marker(UPLOAD_TRIGGER_MARKER)"):]
-        take = take[:take.index("if trigger_found:")]
-        self.assertIn("user=wp_files.WP_USER", take)
+        self.assertIn("if self._take_marker(UPLOAD_TRIGGER_MARKER):", src)
+        self.assertNotIn("/var/lib/onionpress/.upload-analytics", src)
+        self.assertNotIn(".upload-analytics", _read("app/Resources/plugins/onionpress-settings.php"))
 
 
 class TestRequestUpload(unittest.TestCase):
@@ -155,21 +146,15 @@ class TestLaunchersDelegate(unittest.TestCase):
         self.assertIn("upload-analytics", cli.launcher_help("macos")[cli.launcher_help("macos").index("Advanced / internal"):])
 
 
-class TestSettingsPageSaysOff(unittest.TestCase):
+class TestSettingsPageAsksTheHost(unittest.TestCase):
 
     def setUp(self):
         self.php = _read("app/Resources/plugins/onionpress-settings.php")
-        start = self.php.index("register_rest_route( 'onionpress/v1', '/upload-analytics'")
-        self.callback = self.php[start:self.php.index("\n} );", start)]
 
-    def test_off_is_said_before_the_file_is_touched(self):
-        off = self.callback.index("Log sharing is off")
-        self.assertLess(self.callback.index("config-current.json"), off)
-        self.assertLess(off, self.callback.index("touch( $trigger )"))
-        self.assertIn("SHARE_ANALYTICS_WITH_ONIONHOME", self.callback)
-        self.assertIn("=== 'yes' ? 'yes' : 'no'", self.callback)
-        self.assertIn("if ( $sharing === 'no' )", self.callback)
-        self.assertIn("Upload queued", self.callback)
+    def test_the_button_posts_the_action(self):
+        self.assertNotIn("register_rest_route( 'onionpress/v1', '/upload-analytics'", self.php)
+        self.assertIn("['onionpress_action', 'upload-analytics']", self.php)
+        self.assertIn("'upload-analytics' => 'upload-analytics'", self.php)
 
     def test_php_syntax(self):
         if shutil.which("php") is None:

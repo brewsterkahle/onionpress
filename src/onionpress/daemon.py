@@ -83,7 +83,6 @@ from . import ports
 from . import redact
 from . import status_writer
 from . import thumbnails
-from . import wp_files
 from .docker import Docker
 from .platform import OS, detect_os
 from .health import (
@@ -896,16 +895,9 @@ class Daemon(PortAttributes):
                 if self.runtime_ready:
                     self.log("Container runtime is ready")
 
-            # The Share Now button / `onionpress upload-analytics`
-            trigger_found = self._take_marker(UPLOAD_TRIGGER_MARKER)
-            if not trigger_found and self.is_running:
-                r = self._docker.exec(
-                    "onionpress-wordpress",
-                    ["sh", "-c", "test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics"],
-                    timeout=5, quiet=True, user=wp_files.WP_USER)
-                if r.ok:
-                    trigger_found = True
-            if trigger_found:
+            # The Share Now button (handle-action's upload-analytics, #528)
+            # and `onionpress upload-analytics`: the data dir's marker
+            if self._take_marker(UPLOAD_TRIGGER_MARKER):
                 self.log("Upload-analytics trigger detected")
                 threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
 

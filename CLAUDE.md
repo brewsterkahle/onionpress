@@ -338,8 +338,27 @@
   (`tests/test_settings_page_nonces.py`, a census).
 - Page Stop/Restart go through the launcher's cases (Linux asks the
   daemon for `/offline` first). `tests/test_linux_settings_page_stop.py`. Share Now is
-  taken by the long-running process and refused while sharing is off.
-  `tests/test_settings_page_share_now.py`.
+  handle-action's `upload-analytics` (`analytics_sharing.request_upload`'s
+  data-dir marker, refused while sharing is off; nothing in the volume, no
+  per-cycle `docker exec`). `tests/test_settings_page_share_now.py`.
+- **The page does none of the host's work** (#528): its release line is
+  `status.json`'s `release` (`status_writer.release_status`, the cache of
+  `handle_action.check_release`; its button is the `update` action), never
+  a request of its own; `config-current.json` has one writer, the status
+  writer (the form shows unapplied `config-updates.json` on top); the
+  status page writes no `requested-action`. Every PHP copy of a host
+  constant (fields, token pattern, restart keys, result files, actions,
+  request id, the onion shape) is held to its source.
+  `tests/test_settings_page_host_constants.py`.
+- **The page's archive.org login is the host's** (#528 item 3):
+  handle-action's `archive-login` over `multisite.fetch_archive_s3_keys`
+  (archive.org's onion over Tor) and `save_archive_s3_keys`; no login code
+  in WordPress. The account and password cross the volume only in the
+  `archive-login` request file (0600, written only when `status.json`'s
+  `page_actions` lists the verb), read once and removed before the login
+  or with a throttled request (`INPUT_FILES`); neither is logged or in the
+  result. `TestArchiveLogin` in `tests/test_handle_action.py`,
+  `TestArchiveLoginIsTheHosts` in `tests/test_settings_page_host_constants.py`.
 - **`onionpress config get|set|unset|list` is the apps' one writer of
   `~/.onionpress/config`** (`config.CLI_CONFIG_KEYS`). A new setting gets
   its `config set` entry first (check, `CONFIG_KEY_HELP`, `NEEDS_RESTART` /
@@ -1189,7 +1208,7 @@
 - archive.org keys live in the main site's options; lock and back-off are
   network options via `onionpress_wayback_net_*` only; only the main site's
   cron runs the sweep; one archive.org login
-  (`multisite.fetch_archive_s3_keys`, over Tor).
+  (`multisite.fetch_archive_s3_keys`, over Tor), the Settings page's too.
   `tests/test_wayback_network_state.py` (tests use the
   `onionpress_wayback_net_key` filter, never live keys).
 

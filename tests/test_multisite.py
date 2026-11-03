@@ -344,6 +344,23 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
         # Must NOT have hit archive.org if keys were already set.
         srun.assert_not_called()
 
+    def test_save_writes_both_keys_on_stdin_and_says_whether_it_did(self):
+        """save_archive_s3_keys: the page's login (handle_action's
+        archive-login, issue #528) and the reconcile save the same way."""
+        for rc, want in ((0, True), (1, False)):
+            calls = []
+
+            def fake_wp(*args, **kwargs):
+                calls.append((args, kwargs.get("input")))
+                return subprocess.CompletedProcess(args=[], returncode=rc, stdout="", stderr="")
+
+            with self.subTest(rc=rc), mock.patch.object(multisite, "_wp", side_effect=fake_wp):
+                self.assertIs(multisite.save_archive_s3_keys(
+                    {"access": "AK", "secret": "SK"}, docker=None), want)
+                self.assertEqual(calls, [
+                    (("option", "update", "onionpress_archive_s3_access"), "AK"),
+                    (("option", "update", "onionpress_archive_s3_secret"), "SK")])
+
     def test_writes_keys_on_successful_login(self):
         wp_updates = []
         def fake_wp(*args, **kwargs):

@@ -96,9 +96,14 @@ class _Check:
     """The check for one config key's value: callable (True when *value*
     is acceptable), with the words a refusal uses (`describe`)."""
 
-    def __init__(self, fn, describe):
+    def __init__(self, fn, describe, *, allowed=None, bounds=None):
         self._fn = fn
         self.describe = describe
+        # What the Settings page's own copy is held to (issue #528,
+        # tests/test_settings_page_host_constants.py): the values of a
+        # _one_of, the (low, high) of an _int_between.
+        self.allowed = allowed
+        self.bounds = bounds
 
     def __call__(self, value):
         return bool(self._fn(value))
@@ -106,13 +111,13 @@ class _Check:
 
 def _one_of(*allowed):
     words = " or ".join(repr(a) if a else "empty" for a in allowed)
-    return _Check(lambda v: v in allowed, words)
+    return _Check(lambda v: v in allowed, words, allowed=frozenset(allowed))
 
 
 def _int_between(low, high):
     return _Check(
         lambda v: bool(re.fullmatch(r"[0-9]{1,6}", v)) and low <= int(v) <= high,
-        f"a whole number from {low} to {high}")
+        f"a whole number from {low} to {high}", bounds=(low, high))
 
 
 # A Cloudflare Tunnel token is base64 (of a small JSON object). The page

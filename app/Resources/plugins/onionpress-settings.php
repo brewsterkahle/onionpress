@@ -17,96 +17,53 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Run a curl request through Tor SOCKS proxy to archive.org's .onion.
+ * Ask the host to log in to archive.org with the account the owner typed
+ * (issue #528): handle-action's archive-login, the host's one login
+ * (multisite.fetch_archive_s3_keys, archive.org's onion over Tor), which
+ * saves the S3 keys in the main site's options. The page logged in from
+ * WordPress itself until then.
  *
- * @param string $url     The .onion URL to request.
- * @param array  $opts    Extra curl options (CURLOPT_* => value).
- * @return array{body:string,code:int,error:string}
- */
-function onionpress_curl_tor( $url, $opts = array() ) {
-    $ch = curl_init( $url );
-    curl_setopt( $ch, CURLOPT_PROXY, 'socks5h://onionpress-tor:9050' );
-    curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
-    curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, true );
-    curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
-    curl_setopt( $ch, CURLOPT_USERAGENT, 'OnionPress (+https://github.com/brewsterkahle/onionpress)' );
-    foreach ( $opts as $k => $v ) {
-        curl_setopt( $ch, $k, $v );
-    }
-    $body  = curl_exec( $ch );
-    $code  = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    $error = curl_error( $ch );
-    curl_close( $ch );
-    return array( 'body' => $body, 'code' => $code, 'error' => $error );
-}
-
-/**
- * Request an archive.org path via Tor: .onion first, clearnet-via-Tor-exit fallback.
+ * The account and password cross the shared volume only in the request
+ * file `archive-login` (0600 from the first byte), which the host reads
+ * once and removes before it logs in, or removes with a throttled
+ * request; its result never carries either. Only to a host whose
+ * status.json lists the verb, so the file is never left for a host that
+ * would not take it.
  *
- * @param string $path  Path with query string (e.g. "/services/xauthn/?op=login").
- * @param array  $opts  Extra curl options.
- * @return array{body:string,code:int,error:string}
+ * @return array{request_id:string,requested_at:int}|string The request, or why it was not made.
  */
-function onionpress_ia_request( $path, $opts = array() ) {
-    $resp = onionpress_curl_tor(
-        'http://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion' . $path, $opts
-    );
-    if ( ! $resp['error'] && $resp['code'] > 0 ) {
-        return $resp;
+function onionpress_request_archive_login( $email, $password ) {
+    $dir        = '/var/lib/onionpress';
+    $status_raw = @file_get_contents( $dir . '/status.json' );
+    $status     = ( false !== $status_raw ) ? json_decode( $status_raw, true ) : null;
+    if ( ! is_array( $status ) || ! isset( $status['page_actions'] ) || ! is_array( $status['page_actions'] )
+            || ! in_array( 'archive-login', $status['page_actions'], true ) ) {
+        return 'This OnionPress cannot log in to Archive.org from this page yet: update OnionPress on the computer running it, then try again.';
     }
-    // Fallback: clearnet via Tor exit
-    return onionpress_curl_tor( 'https://archive.org' . $path, $opts );
-}
-
-/**
- * Convert Archive.org account + password into S3 API keys via xauthn.
- * .onion first, clearnet-via-Tor-exit fallback.
- *
- * @return array{'access':string,'secret':string}|string  Keys on success, error message on failure.
- */
-function onionpress_fetch_ia_s3_keys( $email, $password ) {
-    $resp = onionpress_ia_request(
-        '/services/xauthn/?op=login',
-        array(
-            CURLOPT_POST       => true,
-            CURLOPT_POSTFIELDS => http_build_query( array( 'email' => $email, 'password' => $password ) ),
-        )
-    );
-    if ( $resp['error'] ) {
-        return 'Request failed: ' . $resp['error'];
+    if ( file_exists( $dir . '/requested-action' ) ) {
+        return 'OnionPress is busy with another request. Try again in a minute.';
     }
-    $data = json_decode( $resp['body'], true );
-    if ( empty( $data['success'] ) ) {
-        return $data['values']['reason'] ?? 'Login failed';
+    @unlink( $dir . '/archive-login-result.json' );
+    @unlink( $dir . '/archive-login' );
+    $umask = umask( 077 );
+    $wrote = @file_put_contents( $dir . '/archive-login',
+        wp_json_encode( array( 'email' => $email, 'password' => $password ) ), LOCK_EX );
+    umask( $umask );
+    if ( false === $wrote ) {
+        @unlink( $dir . '/archive-login' );
+        return 'Could not hand the login to OnionPress. The shared volume may not be mounted.';
     }
-
-    $access = $data['values']['s3']['access'] ?? '';
-    $secret = $data['values']['s3']['secret'] ?? '';
-    if ( $access && $secret ) {
-        return array( 'access' => $access, 'secret' => $secret );
+    $request_id = wp_generate_password( 16, false, false );
+    @unlink( $dir . '/request-id' );
+    if ( @file_put_contents( $dir . '/request-id', $request_id ) === false ) {
+        $request_id = '';
     }
-
-    // Fallback: fetch S3 keys separately using returned cookies
-    $sig  = $data['values']['cookies']['logged-in-sig'] ?? '';
-    $user = $data['values']['cookies']['logged-in-user'] ?? '';
-    if ( $sig && $user ) {
-        $resp2 = onionpress_ia_request(
-            '/account/s3.php?output_json=1',
-            array(
-                CURLOPT_COOKIE => "logged-in-sig=$sig; logged-in-user=$user",
-            )
-        );
-        if ( ! $resp2['error'] ) {
-            $s3 = json_decode( $resp2['body'], true );
-            $access = $s3['key']['s3accesskey'] ?? '';
-            $secret = $s3['key']['s3secretkey'] ?? '';
-            if ( $access && $secret ) {
-                return array( 'access' => $access, 'secret' => $secret );
-            }
-        }
+    if ( @file_put_contents( $dir . '/requested-action', 'archive-login' ) === false ) {
+        @unlink( $dir . '/archive-login' );
+        @unlink( $dir . '/request-id' );
+        return 'Failed to write action request. The shared volume may not be mounted.';
     }
-
-    return 'Login succeeded but could not retrieve S3 keys';
+    return array( 'request_id' => $request_id, 'requested_at' => time() );
 }
 
 /**
@@ -254,47 +211,6 @@ add_action( 'network_admin_menu', function () {
     } );
 } );
 
-// REST endpoint: trigger analytics upload by touching the trigger file
-add_action( 'rest_api_init', function () {
-    register_rest_route( 'onionpress/v1', '/upload-analytics', array(
-        'methods'             => 'POST',
-        'permission_callback' => function () { return onionpress_settings_owner_allowed(); },
-        'callback'            => function () {
-            // Share Now. The host's long-running process (the Mac daemon's
-            // status loop, Linux's heartbeat client) takes the trigger
-            // file touched here within a cycle and uploads then, or as
-            // soon as it is online. Nothing is uploaded while sharing is
-            // off, so say that instead of "queued" when the host's view
-            // of the config (the config-current.json it writes to the
-            // shared volume; anything but yes is no, as the upload loops
-            // read it) says so (issue #351). No file to read: the host
-            // decides, as before.
-            $sharing     = null;
-            $config_file = '/var/lib/onionpress/config-current.json';
-            if ( file_exists( $config_file ) ) {
-                $raw = file_get_contents( $config_file );
-                $decoded = $raw === false ? null : json_decode( $raw, true );
-                if ( is_array( $decoded ) ) {
-                    $value   = $decoded['SHARE_ANALYTICS_WITH_ONIONHOME'] ?? 'no';
-                    $sharing = strtolower( trim( (string) $value ) ) === 'yes' ? 'yes' : 'no';
-                }
-            }
-            if ( $sharing === 'no' ) {
-                return new WP_REST_Response( array(
-                    'message' => 'Log sharing is off, so nothing is uploaded. Set "Share diagnostic logs with OnionHome" to Enabled, save the settings, then Share Now.',
-                ), 200 );
-            }
-            $trigger = '/var/lib/onionpress/.upload-analytics';
-            if ( touch( $trigger ) ) {
-                return new WP_REST_Response( array(
-                    'message' => 'Upload queued — will run as soon as the service is online.',
-                ), 200 );
-            }
-            return new WP_REST_Response( array( 'message' => 'Failed to create trigger file.' ), 500 );
-        },
-    ) );
-} );
-
 /**
  * RFC 4648 base32 with padding, what Python's base64.b32encode writes and
  * the host's key import decodes (issue #401: the image has no python3).
@@ -335,7 +251,7 @@ add_action( 'admin_init', function () {
         return;
     }
     $action = sanitize_text_field( $_POST['onionpress_action'] ?? '' );
-    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'import-key-file', 'create-backup', 'restore-backup', 'update' ), true ) ) {
+    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'import-key-file', 'create-backup', 'restore-backup', 'update', 'upload-analytics' ), true ) ) {
         return;
     }
 
@@ -464,7 +380,7 @@ add_action( 'admin_init', function () {
         'check-reachability' => 'check-reachability',
         'import-key-file' => 'import-key-file',
         'create-backup' => 'create-backup', 'restore-backup' => 'restore-backup',
-        'update' => 'update',
+        'update' => 'update', 'upload-analytics' => 'upload-analytics',
     );
     $cmd = $cmd_map[ $action ];
     // The page polls for the action's result file, and the last run's is
@@ -483,6 +399,10 @@ add_action( 'admin_init', function () {
         'create-backup'      => '/var/lib/onionpress/backup-result.json',
         'restore-backup'     => '/var/lib/onionpress/restore-result.json',
         'update'             => '/var/lib/onionpress/update-result.json',
+        'upload-analytics'   => '/var/lib/onionpress/analytics-result.json',
+        // Asked by the save (onionpress_request_archive_login), listed
+        // here as handle_action.RESULT_FILES has it.
+        'archive-login'      => '/var/lib/onionpress/archive-login-result.json',
     );
     if ( isset( $result_files[ $cmd ] ) ) {
         @unlink( $result_files[ $cmd ] );
@@ -501,27 +421,20 @@ add_action( 'admin_init', function () {
         return;
     }
 
-    // On Linux `update` only checks for a release: the host's handle-action
-    // never installs (`onionpress update`, run on the machine, does).
-    // status.json says the platform; WordPress can write it, so it picks
-    // the wording only, never what the host does.
-    $status_raw         = @file_get_contents( '/var/lib/onionpress/status.json' );
-    $status_now         = ( false !== $status_raw ) ? json_decode( $status_raw, true ) : null;
-    $update_checks_only = is_array( $status_now ) && isset( $status_now['platform'] )
-        && 'linux' === $status_now['platform'];
+    // `update` only checks for a release, on both platforms: the host's
+    // handle-action never installs (the menubar's Check for Updates... or
+    // `onionpress update`, run on the machine, does).
     $label_map = array(
         'stop' => 'Stopping', 'start' => 'Starting', 'restart' => 'Restarting', 'save-restart' => 'Restarting',
         'check-reachability' => 'Testing Tor reachability for',
         'import-key-file' => 'Importing key for',
         'create-backup' => 'Creating backup of',
         'restore-backup' => 'Restoring backup for',
-        'update' => $update_checks_only ? 'Checking for a new release of' : 'Updating',
+        'update' => 'Checking for a new release of',
+        'upload-analytics' => 'Asking for a log upload from',
     );
     $label = $label_map[ $action ] ?? 'Processing';
     $downtime_actions = array( 'restart', 'save-restart', 'stop', 'restore-backup' );
-    if ( ! $update_checks_only ) {
-        $downtime_actions[] = 'update';
-    }
     $causes_downtime = in_array( $action, $downtime_actions, true );
     $poll_action = $cmd_map[ $action ] ?? $action;
     add_action( 'admin_notices', function () use ( $label, $causes_downtime, $poll_action, $request_id, $requested_at ) {
@@ -896,19 +809,24 @@ add_action( 'admin_init', function () {
         $updates['CLOUDFLARE_TUNNEL_TOKEN'] = '';
     }
 
-    // Handle Archive.org credentials — convert account/password to S3 keys via xauthn API
+    // Archive.org credentials: the host logs in and saves the S3 keys
+    // (onionpress_request_archive_login, issue #528); the page's notice
+    // polls for its answer.
     $ia_account  = isset( $_POST['op_ia_account'] )  ? sanitize_text_field( wp_unslash( $_POST['op_ia_account'] ) )  : '';
     $ia_password = isset( $_POST['op_ia_password'] ) ? wp_unslash( $_POST['op_ia_password'] ) : '';
     if ( $ia_account !== '' && $ia_password !== '' ) {
-        $s3_keys = onionpress_fetch_ia_s3_keys( $ia_account, $ia_password );
-        if ( is_array( $s3_keys ) ) {
-            onionpress_archive_keys_save( $s3_keys['access'], $s3_keys['secret'] );
-            add_action( 'admin_notices', function () {
-                echo '<div class="notice notice-success"><p>Archive.org credentials saved.</p></div>';
+        $ia_asked    = onionpress_request_archive_login( $ia_account, $ia_password );
+        $ia_password = '';
+        if ( is_array( $ia_asked ) ) {
+            add_action( 'admin_notices', function () use ( $ia_asked ) {
+                echo '<div class="notice notice-info op-action-notice" data-op-action="archive-login"'
+                    . ' data-op-request-id="' . esc_attr( $ia_asked['request_id'] ) . '"'
+                    . ' data-op-requested-at="' . esc_attr( (string) $ia_asked['requested_at'] ) . '">'
+                    . '<p>Logging in to Archive.org from OnionPress... This may take a minute.</p></div>';
             } );
         } else {
-            add_action( 'admin_notices', function () use ( $s3_keys ) {
-                echo '<div class="notice notice-error"><p>Archive.org login failed: ' . esc_html( $s3_keys ) . '</p></div>';
+            add_action( 'admin_notices', function () use ( $ia_asked ) {
+                echo '<div class="notice notice-error"><p>Archive.org credentials not saved: ' . esc_html( $ia_asked ) . '</p></div>';
             } );
         }
     } elseif ( $ia_account === '' && $ia_password === '' && ! empty( $_POST['op_ia_credentials_remove'] ) ) {
@@ -926,26 +844,16 @@ add_action( 'admin_init', function () {
     // only when a token was pasted or the remove box ticked, and either takes
     // a restart to start or remove cloudflared.
     $needs_restart = isset( $updates['CLOUDFLARE_TUNNEL_TOKEN'] );
-    // The hub's takeover tunables are read by the containers at start
-    // (config.NEEDS_RESTART).
-    $restart_keys = array( 'ADDRESS_PREFIX', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS', 'ONIONHEAVEN_MAX_SERVICES', 'ONIONHEAVEN_PROPAGATION_DELAY' );
+    // The keys this page may change that take a restart: config.NEEDS_RESTART
+    // within SETTINGS_PAGE_KEYS, the token aside (tests/test_settings_page_
+    // host_constants.py holds the list to them).
+    $restart_keys = array( 'ONIONHEAVEN_MAX_SERVICES', 'ONIONHEAVEN_PROPAGATION_DELAY', 'VM_MEMORY' );
     if ( ! empty( $updates ) ) {
-        $onion_address = '';
-        $sf = '/var/lib/onionpress/status.json';
-        if ( file_exists( $sf ) ) {
-            $sd = json_decode( file_get_contents( $sf ), true );
-            if ( is_array( $sd ) ) {
-                $onion_address = $sd['onion_address'] ?? '';
-            }
-        }
         foreach ( $updates as $key => $val ) {
             if ( ! in_array( $key, $restart_keys, true ) ) {
                 continue;
             }
             if ( isset( $old_values[ $key ] ) && $old_values[ $key ] === $val ) {
-                continue;
-            }
-            if ( $key === 'ADDRESS_PREFIX' && $onion_address && strpos( $onion_address, $val ) === 0 ) {
                 continue;
             }
             $needs_restart = true;
@@ -960,12 +868,10 @@ add_action( 'admin_init', function () {
             } );
             return;
         }
-
-        // Update config-current.json so the form reflects the saved values
-        // immediately — never with the token, which that file must not hold
-        $current = array_merge( $old_values, $updates );
-        unset( $current['CLOUDFLARE_TUNNEL_TOKEN'] );
-        @file_put_contents( $config_file, json_encode( $current, JSON_PRETTY_PRINT ) );
+        // config-current.json is the host's alone (issue #528): it rewrites
+        // it once handle-action has applied this file, within a few
+        // seconds; until then the form shows these values from
+        // onionpress_settings_shown_config().
     }
 
     // Show success message
@@ -1109,6 +1015,8 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
         'create-backup'      => '/var/lib/onionpress/backup-result.json',
         'restore-backup'     => '/var/lib/onionpress/restore-result.json',
         'update'             => '/var/lib/onionpress/update-result.json',
+        'upload-analytics'   => '/var/lib/onionpress/analytics-result.json',
+        'archive-login'      => '/var/lib/onionpress/archive-login-result.json',
     );
 
     if ( isset( $result_files[ $action ] ) ) {
@@ -1143,45 +1051,54 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
 } );
 
 /**
- * AJAX handler for checking latest version (cached 10 min).
+ * AJAX handler for the release line: the host's last release check, as
+ * status.json's "release" says it (issue #528). The page asks GitHub
+ * nothing itself; its Check for Updates button asks the host (the
+ * `update` action), which never installs from here.
  */
 add_action( 'wp_ajax_onionpress_check_update', function () {
     if ( ! onionpress_settings_owner_allowed() ) {
         wp_send_json_error( 'Unauthorized', 403 );
     }
-    // A request through Tor and a transient write (issue #402): not on
-    // the say-so of another page the owner has open.
     check_ajax_referer( 'onionpress_check_update' );
 
     $current = trim( @file_get_contents( '/var/lib/onionpress/version' ) ?: 'unknown' );
-
-    // Check transient cache first
-    $cached = get_transient( 'onionpress_latest_release' );
-    if ( $cached !== false ) {
-        wp_send_json( array(
-            'current'   => $current,
-            'latest'    => $cached['tag'],
-            'update'    => version_compare( ltrim( $cached['tag'], 'v' ), ltrim( $current, 'v' ), '>' ),
-        ) );
+    $status_raw = @file_get_contents( '/var/lib/onionpress/status.json' );
+    $status     = ( false !== $status_raw ) ? json_decode( $status_raw, true ) : null;
+    $release    = ( is_array( $status ) && isset( $status['release'] ) && is_array( $status['release'] ) )
+        ? $status['release'] : null;
+    if ( null === $release || empty( $release['success'] ) ) {
+        wp_send_json( array( 'current' => $current, 'latest' => null, 'update' => false,
+                             'checked' => null !== $release ) );
     }
-
-    // Fetch from GitHub releases API (via Tor to avoid clearnet leak)
-    $resp = onionpress_curl_tor( 'https://api.github.com/repos/brewsterkahle/onionpress/releases/latest' );
-    if ( $resp['error'] || $resp['code'] !== 200 ) {
-        wp_send_json( array( 'current' => $current, 'latest' => null, 'update' => false, 'error' => 'Failed to check for updates' ) );
-    }
-
-    $data = json_decode( $resp['body'], true );
-    $tag  = $data['tag_name'] ?? '';
-
-    set_transient( 'onionpress_latest_release', array( 'tag' => $tag ), 600 ); // 10 min
-
     wp_send_json( array(
-        'current'   => $current,
-        'latest'    => $tag,
-        'update'    => version_compare( ltrim( $tag, 'v' ), ltrim( $current, 'v' ), '>' ),
+        'current'    => $current,
+        'latest'     => is_string( $release['latest'] ?? null ) ? $release['latest'] : null,
+        'update'     => ! empty( $release['update_available'] ),
+        'message'    => is_string( $release['message'] ?? null ) ? $release['message'] : '',
+        'checked_at' => is_string( $release['checked_at'] ?? null ) ? $release['checked_at'] : '',
+        'checked'    => true,
     ) );
 } );
+
+/**
+ * The config as the form shows it: the host's config-current.json (it is
+ * the one writer, issue #528), with the values this page saved and the
+ * host has not applied yet (config-updates.json, still there) on top, so
+ * a save shows its values at once. The token is in neither.
+ */
+function onionpress_settings_shown_config() {
+    $shown = array();
+    foreach ( array( '/var/lib/onionpress/config-current.json', '/var/lib/onionpress/config-updates.json' ) as $file ) {
+        $raw = file_exists( $file ) ? @file_get_contents( $file ) : false;
+        $decoded = ( false !== $raw ) ? json_decode( $raw, true ) : null;
+        if ( is_array( $decoded ) ) {
+            $shown = array_merge( $shown, $decoded );
+        }
+    }
+    unset( $shown['CLOUDFLARE_TUNNEL_TOKEN'] );
+    return $shown;
+}
 
 /**
  * Define the settings fields and their metadata.
@@ -1297,18 +1214,7 @@ function onionpress_settings_page() {
         return;
     }
 
-    // Read current config from the shared volume
-    $current = array();
-    $config_file = '/var/lib/onionpress/config-current.json';
-    if ( file_exists( $config_file ) ) {
-        $raw = file_get_contents( $config_file );
-        if ( $raw !== false ) {
-            $decoded = json_decode( $raw, true );
-            if ( is_array( $decoded ) ) {
-                $current = $decoded;
-            }
-        }
-    }
+    $current = onionpress_settings_shown_config();
 
     // Read Wayback S3 credentials: the network's, from the main site
     $s3_keys   = onionpress_archive_keys();
@@ -1442,22 +1348,24 @@ function onionpress_settings_page() {
                         <?php endif; ?>
                         <?php if ( $key === 'SHARE_ANALYTICS_WITH_ONIONHOME' ) : ?>
                             <button type="button" id="onionpress-share-now" class="button button-secondary" style="margin-left: 8px;">Share Now</button>
-                            <span id="onionpress-share-now-status" style="margin-left: 8px;"></span>
                             <script>
+                            /* Share Now is a request to the host (handle-action's
+                               upload-analytics, issue #528): it decides, from its
+                               own config, whether anything is uploaded. A form of
+                               its own: this button sits inside the settings form. */
                             document.getElementById('onionpress-share-now').addEventListener('click', function() {
-                                var btn = this;
-                                var status = document.getElementById('onionpress-share-now-status');
-                                btn.disabled = true;
-                                status.textContent = 'Triggering upload...';
-                                fetch('/wp-json/onionpress/v1/upload-analytics', { method: 'POST',
-                                    headers: { 'X-WP-Nonce': '<?php echo wp_create_nonce( 'wp_rest' ); ?>' }
-                                }).then(function(r) { return r.json(); }).then(function(data) {
-                                    status.textContent = data.message || 'Upload triggered!';
-                                    btn.disabled = false;
-                                }).catch(function(e) {
-                                    status.textContent = 'Error: ' + e.message;
-                                    btn.disabled = false;
+                                var form = document.createElement('form');
+                                form.method = 'post';
+                                [['onionpress_action_nonce', '<?php echo esc_js( wp_create_nonce( 'onionpress_action' ) ); ?>'],
+                                 ['onionpress_action', 'upload-analytics']].forEach(function(f) {
+                                    var input = document.createElement('input');
+                                    input.type = 'hidden';
+                                    input.name = f[0];
+                                    input.value = f[1];
+                                    form.appendChild(input);
                                 });
+                                document.body.appendChild(form);
+                                form.submit();
                             });
                             </script>
                         <?php endif; ?>
@@ -1490,7 +1398,7 @@ function onionpress_settings_page() {
                                    value="" class="regular-text" autocomplete="off">
                             <button type="button" class="op-eye-toggle" aria-label="Show password">&#128065;</button>
                         </span>
-                        <p class="description">Your Archive.org password. Used to retrieve API keys — not stored.</p>
+                        <p class="description">Your Archive.org password. OnionPress logs in with it once, over Tor, to fetch the API keys; it is not stored.</p>
                     </td>
                 </tr>
             </table>
@@ -1858,62 +1766,54 @@ function onionpress_settings_page() {
             }, 3000);
         })();
 
-        /* Check for updates (async, doesn't stall page) */
+        /* The release line: the host's last check (status.json), no request
+           to GitHub from here (issue #528). The button asks the host to
+           check; installing is done on the machine. */
         (function() {
             var el = document.getElementById('op-update-status');
             if (!el) return;
             var nonce = '<?php echo esc_js( wp_create_nonce( "onionpress_action" ) ); ?>';
             var checkNonce = '<?php echo esc_js( wp_create_nonce( 'onionpress_check_update' ) ); ?>';
-            /* On Linux the page cannot install an update: its button asks the
-               host to check the release, and `onionpress update` on the
-               machine installs it. */
-            var updateChecksOnly = <?php echo ( 'linux' === $current_platform ) ? 'true' : 'false'; ?>;
             function vTag(s) {
                 if (!s) return '';
                 return /^v/i.test(s) ? s : 'v' + s;
             }
-            function render() {
-                el.innerHTML = '<span class="description">version: <?php echo esc_js( $op_current_display ); ?>, checking for updates...</span>';
-                fetch(ajaxurl + '?action=onionpress_check_update&_wpnonce=' + encodeURIComponent(checkNonce))
-                    .then(function(r) { return r.json(); })
-                    .then(function(data) {
-                        var cur = vTag(data.current || '<?php echo esc_js( $op_current_display ); ?>');
-                        if (data.update && data.latest && updateChecksOnly) {
-                            el.innerHTML =
-                                '<span class="description">version: ' + cur + ', update available: ' + vTag(data.latest) +
-                                ' &mdash; install it by running <code>onionpress update</code> on this machine</span>' +
-                                ' <form method="post" style="display:inline;margin-left:8px;">' +
-                                '<input type="hidden" name="onionpress_action_nonce" value="' + nonce + '">' +
-                                '<input type="hidden" name="onionpress_action" value="update">' +
-                                '<button type="submit" class="button button-small">Check Release</button>' +
-                                '</form>';
-                        } else if (data.update && data.latest) {
-                            el.innerHTML =
-                                '<span class="description">version: ' + cur + ', update available: ' + vTag(data.latest) + '</span>' +
-                                ' <form method="post" style="display:inline;margin-left:8px;">' +
-                                '<input type="hidden" name="onionpress_action_nonce" value="' + nonce + '">' +
-                                '<input type="hidden" name="onionpress_action" value="update">' +
-                                '<button type="submit" class="button button-primary button-small">Update Now</button>' +
-                                '</form>';
-                        } else if (data.latest) {
-                            el.innerHTML = '<span class="description">version: ' + cur + ", you're on the latest</span>";
-                        } else {
-                            el.innerHTML =
-                                '<span class="description">version: ' + cur + ", couldn't check for updates</span>" +
-                                ' <button type="button" class="button button-small" id="op-update-retry" style="margin-left:8px;">Retry</button>';
-                            var btn = document.getElementById('op-update-retry');
-                            if (btn) btn.addEventListener('click', render);
-                        }
-                    })
-                    .catch(function() {
-                        el.innerHTML =
-                            '<span class="description">version: <?php echo esc_js( $op_current_display ); ?>, couldn\'t check for updates</span>' +
-                            ' <button type="button" class="button button-small" id="op-update-retry" style="margin-left:8px;">Retry</button>';
-                        var btn = document.getElementById('op-update-retry');
-                        if (btn) btn.addEventListener('click', render);
-                    });
+            function button(label) {
+                return ' <form method="post" style="display:inline;margin-left:8px;">' +
+                    '<input type="hidden" name="onionpress_action_nonce" value="' + nonce + '">' +
+                    '<input type="hidden" name="onionpress_action" value="update">' +
+                    '<button type="submit" class="button button-small">' + label + '</button>' +
+                    '</form>';
             }
-            render();
+            function text(s) {
+                var span = document.createElement('span');
+                span.textContent = s;
+                return span.innerHTML;
+            }
+            fetch(ajaxurl + '?action=onionpress_check_update&_wpnonce=' + encodeURIComponent(checkNonce))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var cur = vTag(data.current || '<?php echo esc_js( $op_current_display ); ?>');
+                    if (data.update && data.latest) {
+                        el.innerHTML = '<span class="description">version: ' + text(cur) +
+                            ', update available: ' + text(vTag(data.latest)) +
+                            (data.message ? ' &mdash; ' + text(data.message) : '') + '</span>' +
+                            button('Check Again');
+                    } else if (data.latest) {
+                        el.innerHTML = '<span class="description">version: ' + text(cur) +
+                            ", you're on the latest" +
+                            (data.checked_at ? ' (checked ' + text(data.checked_at) + ')' : '') +
+                            '</span>' + button('Check Again');
+                    } else {
+                        el.innerHTML = '<span class="description">version: ' + text(cur) +
+                            (data.checked ? ", the last check for updates failed" : '') + '</span>' +
+                            button('Check for Updates');
+                    }
+                })
+                .catch(function() {
+                    el.innerHTML = '<span class="description">version: <?php echo esc_js( $op_current_display ); ?></span>' +
+                        button('Check for Updates');
+                });
         })();
     </script>
     <?php
