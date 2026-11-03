@@ -1,6 +1,7 @@
 """T0 — stack smoke (docs/E2E-TESTING.md §6): one fresh install per
 platform, from install to a site served over Tor that keeps its address
-across a stop and start.
+across a stop and start and a restart, with the installer the owner's
+alone throughout.
 
 One scenario per node: the steps run in order, and after a failed step
 the rest are skipped on that platform (they would only fail for the same
@@ -64,6 +65,21 @@ def test_first_start(node, e2e):
     assert node.first_key_digest, "no served key in the tor container"
 
 
+INSTALLER_PAGES = ("/wp-admin/install.php", "/wp-admin/setup-config.php")
+
+
+def test_installer_owner_only(node):
+    """Before setup the installer answers only the owner (issue #464): the
+    published port gets it, a request from the tor container (where every
+    Tor visitor's arrives from) gets 403."""
+    node.wait_for_local_site()
+    resp = node.http_local("/wp-admin/install.php")
+    assert resp.status == 200, f"install.php answered the owner {resp.status}"
+    for page in INSTALLER_PAGES:
+        resp = node.http_from_tor(page)
+        assert resp.status == 403, f"{page} answered the tor container {resp.status}"
+
+
 def test_wordpress_setup(node):
     """Headless setup creates the admin, whose password logs in (and a wrong
     one does not)."""
@@ -111,6 +127,10 @@ def test_onion_reachable(node, e2e, record_property):
     record_property("visitor", visitor.name)
     resp = visitor.tor_fetch(node.address, "/", timeout=90)
     assert resp.status in (200, 301, 302), f"/ over Tor answered {resp.status}"
+    # The installer rule stays after setup (issue #464).
+    for page in INSTALLER_PAGES:
+        resp = visitor.tor_fetch(node.address, page, timeout=90)
+        assert resp.status == 403, f"{page} over Tor answered {resp.status}"
 
 
 def test_status_and_address_agree(node):
@@ -126,19 +146,34 @@ def test_status_and_address_agree(node):
     assert node.onion_address() == node.address
 
 
-def test_restart_keeps_address(node, e2e):
-    """Stop and start: same address, same key, nothing minted or replaced,
-    the site back locally and over Tor."""
+def _same_site_back(e2e, node, label):
+    """Same address, same key, nothing minted or replaced, the site back
+    locally and over Tor."""
+    assert node.wait_for_address() == node.address
+    assert node.served_key_digest() == node.first_key_digest, "the served key changed"
+    assert not node.exists(".onionpress/replaced-keys"), "a key was replaced"
+    node.wait_for_local_site()
+    _wait_reachable(e2e, node, label)
+
+
+def test_stop_start_keeps_address(node, e2e):
+    """`onionpress stop`, then `start`: the same site comes back."""
     node.stop()
     wait_until(lambda: node.container_states().get("onionpress-tor") != "running",
                timeout=300, every=5, label=f"{node.name}: tor stopped",
                timings=node.timings, log=node.log)
     node.start()
-    assert node.wait_for_address() == node.address
-    assert node.served_key_digest() == node.first_key_digest, "the served key changed"
-    assert not node.exists(".onionpress/replaced-keys"), "a key was replaced"
-    node.wait_for_local_site()
-    _wait_reachable(e2e, node, "after restart")
+    _same_site_back(e2e, node, "after stop and start")
+
+
+def test_restart_keeps_address(node, e2e):
+    """`onionpress restart` (the menubar's and tray's Restart): the same
+    site comes back."""
+    started = node.container_started_at("onionpress-tor")
+    r = node.launcher(["restart"], timeout=1800)
+    assert r.ok, r.describe()
+    assert node.container_started_at("onionpress-tor") != started, "tor was not restarted"
+    _same_site_back(e2e, node, "after restart")
 
 
 def test_no_public_service_contact(node):
