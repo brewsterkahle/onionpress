@@ -6,11 +6,10 @@ set ``SHARE_ANALYTICS_WITH_ONIONHOME=yes`` in their config.
 
 The loop is host-agnostic: it talks to an ``app`` object that supplies
 config, logging, the onion addresses, the log files and a way to reach
-``docker``.  On macOS that object is the daemon; on Linux it is the
-``AnalyticsHost`` adapter in ``linux/onionpress-heartbeat.py`` (the
-heartbeat daemon runs the same loop on the same daily cadence).  Before
+``docker``: the daemon, on both platforms (issue #407; until then Linux's
+heartbeat client ran the loop through an adapter of its own, and before
 that adapter existed no Linux install ever uploaded, whatever the opt-in
-said (issue #207).
+said, issue #207).
 """
 
 import base64
@@ -28,14 +27,12 @@ import time
 
 from onionpress import redact
 
-# Share Now (issue #351). The marker `onionpress upload-analytics` touches
-# in the data directory, and the file the Settings page's REST endpoint
-# touches in the onionpress-data volume (www-data's: the daemons take it
-# as www-data). Both are taken by the host's long-running process, the
-# Mac daemon's status loop (daemon.UPLOAD_TRIGGER_MARKER) and Linux's
-# heartbeat client, which then upload now; a test ties the copies.
+# Share Now (issue #351). The marker request_upload leaves in the data
+# directory (`onionpress upload-analytics`, and the Settings page's
+# button through handle-action since #528), taken by the daemon's status
+# loop (daemon.UPLOAD_TRIGGER_MARKER), which then uploads now; a test
+# ties the copies.
 UPLOAD_TRIGGER_MARKER = ".upload-analytics"
-UPLOAD_TRIGGER_VOLUME_PATH = "/var/lib/onionpress/.upload-analytics"
 SHARING_CONFIG_KEY = "SHARE_ANALYTICS_WITH_ONIONHOME"
 SHARING_OFF_MSG = (
     f"Log sharing is off ({SHARING_CONFIG_KEY} is not yes), so nothing is "
@@ -69,39 +66,29 @@ def sharing_enabled(config_file):
 
 
 def daemon_running(data_dir, os_name):
-    """Whether the process that takes a Share Now request is running: on
-    macOS the daemon (`daemon.pid` names a live process), on Linux the
-    heartbeat client (its user unit, else an old install's system unit,
-    active)."""
-    if os_name == "macos":
-        # daemon_client, not daemon: the daemon imports this module.
-        from onionpress.daemon_client import PID_FILENAME
-        try:
-            with open(os.path.join(data_dir, PID_FILENAME)) as fh:
-                pid = int(fh.read().strip())
-            os.kill(pid, 0)
-        except (OSError, ValueError):
-            return False
-        return True
-    for argv in (["systemctl", "--user", "is-active", "onionpress-heartbeat.service"],
-                 ["systemctl", "is-active", "onionpress-heartbeat.service"]):
-        try:
-            if subprocess.run(argv, capture_output=True, timeout=15).returncode == 0:
-                return True
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return False
+    """Whether the process that takes a Share Now request is running: the
+    daemon, on both platforms (`daemon.pid` names a live process; until
+    issue #407 Linux asked systemd for its heartbeat unit)."""
+    # daemon_client, not daemon: the daemon imports this module.
+    from onionpress.daemon_client import PID_FILENAME
+    try:
+        with open(os.path.join(data_dir, PID_FILENAME)) as fh:
+            pid = int(fh.read().strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def request_upload(paths, os_name, out=sys.stdout):
     """`onionpress upload-analytics` (both launchers delegate here): ask
     the running daemon to upload the diagnostic logs to OnionHome now.
 
-    Refuses, exit 1, while sharing is off (the daemons upload nothing
+    Refuses, exit 1, while sharing is off (the daemon uploads nothing
     then; the Settings page says the same) and when no daemon would take
     the request. Otherwise leaves ``UPLOAD_TRIGGER_MARKER`` in the data
-    directory, which the Mac daemon's status loop and Linux's heartbeat
-    client take within a cycle, and exits 0.
+    directory, which the daemon's status loop takes within a cycle, and
+    exits 0.
     """
     if not sharing_enabled(paths.config_file):
         print(SHARING_OFF_MSG, file=out)
@@ -455,7 +442,7 @@ def _do_upload_cycle(app, include_active=False):
     try:
         from onionpress import onion_auth
 
-        secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        secret_key_bytes, public_key_raw = key_manager.extract_keys(app.docker)
         timestamp = onion_auth.make_timestamp()
         signature = onion_auth.sign_payload(
             secret_key_bytes, public_key_raw,
@@ -576,67 +563,36 @@ def _os_version():
     return f"{platform.system()} {platform.release()}".strip() or "unknown"
 
 
-def _docker_command(app):
-    """Return ``(docker_bin, env)`` for reaching the onionpress-tor container.
-
-    A host that knows how to reach its own Docker (the Linux heartbeat
-    daemon, where ``docker`` is on PATH and the rootless socket comes
-    from the ambient environment) exposes ``docker_command()``.  The
-    menubar app has no such method, so it gets the Colima socket from
-    onionheaven's helpers, as before.
-    """
-    hook = getattr(app, "docker_command", None)
-    if callable(hook):
-        return hook()
-    from onionpress import onionheaven
-    return onionheaven._docker_bin(app), onionheaven._docker_env(app)
-
-
 def _post_json(app, url, payload_dict):
-    """POST JSON to *url* via docker exec curl through Tor SOCKS.
+    """POST JSON to *url* via docker exec curl through Tor SOCKS, through
+    *app*.docker (the daemon's onionpress.docker.Docker, the one runner).
 
     Uses stdin piping to avoid ARG_MAX limits on large payloads.
     Returns parsed JSON response or None on failure.
     """
-    docker_bin, docker_env = _docker_command(app)
-
     payload_json = json.dumps(payload_dict)
-
-    cmd = [
-        docker_bin, "exec", "-i", "onionpress-tor",
-        "curl", "-s", "-X", "POST",
-        "--socks5-hostname", "127.0.0.1:9050",
-        "-H", "Content-Type: application/json",
-        "-d", "@-",  # read payload from stdin
-        "--max-time", "120",
-        url,
-    ]
-
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace",
-            env=docker_env,
-        )
-        stdout, stderr = proc.communicate(input=payload_json, timeout=150)
-    except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        app.log("Analytics sharing: curl timed out")
-        return None
+        result = app.docker.run(
+            ["exec", "-i", "onionpress-tor",
+             "curl", "-s", "-X", "POST",
+             "--socks5-hostname", "127.0.0.1:9050",
+             "-H", "Content-Type: application/json",
+             "-d", "@-",  # read payload from stdin
+             "--max-time", "120",
+             url],
+            input=payload_json, timeout=150, quiet=True)
     except Exception as e:
         app.log(f"Analytics sharing: curl error: {e}")
         return None
-
-    if proc.returncode != 0:
-        app.log(f"Analytics sharing: curl failed rc={proc.returncode}")
+    if result.timed_out:
+        app.log("Analytics sharing: curl timed out")
+        return None
+    if result.returncode != 0:
+        app.log(f"Analytics sharing: curl failed rc={result.returncode}")
         return None
 
     try:
-        return json.loads(stdout)
+        return json.loads(result.stdout)
     except (json.JSONDecodeError, ValueError):
         app.log(f"Analytics sharing: bad JSON response: {stdout[:200]}")
         return None

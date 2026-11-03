@@ -28,8 +28,9 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 from onionpress import daemon as op_daemon  # noqa: E402
 from onionpress import daemon_client as op_daemon_client  # noqa: E402
 from onionpress import config as op_config  # noqa: E402
+from onionpress import status_writer  # noqa: E402
 from onionpress.docker import DockerResult  # noqa: E402
-from onionpress.platform import resolve_paths  # noqa: E402
+from onionpress.platform import OS, resolve_paths  # noqa: E402
 
 ADDR = "a" * 56 + ".onion"
 HC = "h" * 56 + ".onion"
@@ -165,15 +166,29 @@ class FakeDocker:
                 return DockerResult(returncode=rc, stdout=text, stderr="")
         return DockerResult(returncode=1, stdout="", stderr="no such answer")
 
-    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False):
+    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
+            binary=False):
         self.calls.append((list(str(a) for a in args), input))
         return self._answer(args)
+
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """A real subprocess.Popen on this fake's binary and environment:
+        the log capture tests patch subprocess.Popen and read its argv."""
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
 
     def exec(self, container, command, timeout=30, check=False, input=None,
              quiet=False, user=None, extra_env=None):
         args = ["exec", container, *(command if isinstance(command, list) else [command])]
         self.calls.append((args, input))
         return self._answer(args)
+
+    def wp(self, *args, timeout=30, check=False, quiet=False, **kw):
+        """wp-cli as www-data (status_writer.wp_installed asks `wp core
+        is-installed`): answered under the "wp ..." prefix."""
+        argv = ["wp", *args]
+        self.calls.append((argv, None))
+        return self._answer(argv)
 
 
 class FakeHealth:
@@ -210,6 +225,9 @@ class FakeHealth:
 
 
 class _DaemonCase(unittest.TestCase):
+    # The platform under test (the daemon's os_name seam, issue #407):
+    # tests/test_linux_daemon.py runs the same harness as Linux.
+    OS_NAME = OS.MACOS
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-daemon-")
@@ -238,8 +256,16 @@ class _DaemonCase(unittest.TestCase):
         self.health = FakeHealth()
         self.launcher_calls = []
         self.launcher_answers = {}
+        # The platform under test, wherever the tests run: the daemon's
+        # os_name and the status writer's platform seam (#523).
+        patcher = mock.patch.object(status_writer, "detect_os", return_value=self.OS_NAME)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        status_writer._BOOT_TIME.clear()
+        self.addCleanup(status_writer._BOOT_TIME.clear)
         self.d = op_daemon.Daemon(self.paths, version="9.9", launcher_script="/x/onionpress",
-                                  docker=self.docker, health_checker=self.health)
+                                  docker=self.docker, health_checker=self.health,
+                                  os_name=self.OS_NAME)
         # Nothing that forks, binds or sleeps for real.
         self.d.caffeine = mock.Mock()
         self.d.start_onion_proxy = lambda: None
@@ -310,6 +336,20 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(doc["state"], "running")
         self.assertEqual(doc["onion_address"], ADDR)
         self.assertEqual(doc["platform"], "macos")
+        self.assertLessEqual(set(doc), op_daemon.redact.WORDPRESS_STATUS_KEYS)
+        # One writer for both platforms (#523): the fields Linux's tray
+        # reads are gathered here too, and the state file carries the
+        # whole status document.
+        full = self.d._last_status_payload
+        for key in ("wp_installed", "onboarded", "mkp224o_available", "wayback_queue_count",
+                    "vanity_in_progress", "serving_from_wayback", "wp_admin_password_path", "wp_port"):
+            self.assertIn(key, full)
+        self.assertEqual(full["wp_port"], self.d.wp_port)
+        self.assertEqual(full["containers"], {"onionpress-tor": "running", "onionpress-wordpress": "running",
+                                              "onionpress-db": "running", "onionheaven": "running"})
+        self.assertEqual(self.state()["status"], full)
+        with open(os.path.join(self.dir, "status.json")) as f:
+            self.assertEqual(json.load(f), full)
 
     def test_the_tick_runs_handle_action_once_at_a_time(self):
         self.launcher_answers["handle-action"] = (0, '{"handled": null}\n')
@@ -351,6 +391,9 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(s["display_state"], "stopped")
         self.assertEqual(s["healthcheck_address"], "")
         self.assertEqual(s["onion_address"], ADDR)       # the cached address stays visible
+        self.assertEqual(s["status"]["state"], "stopped")  # the status document too (#523)
+        self.assertEqual(s["status"]["containers"], {"onionpress-tor": "exited",
+                                                     "onionpress-wordpress": "running"})
         self.d.caffeine.stop.assert_called()
         self.assertIn("Service stopped", "".join(self._log_text()))
         self.assertTrue(self.proxy_stopped)
@@ -400,6 +443,60 @@ class TestStatusPass(_DaemonCase):
             self.tick()
         req.assert_not_called()
         self.assertIn("log-only", "".join(self._log_text()))
+
+    def test_daemon_offline_holds_the_probe_until_the_stack_is_down(self):
+        """`daemon offline` (the launcher's stop) holds the probe: the
+        containers going down fail every probe, which is no evidence
+        about the onion service, so no failure path runs and nothing
+        counts towards a republish. The first pass that sees the stack
+        down lifts the hold."""
+        self.tick()
+        self.assertTrue(self.d.is_ready)
+        self.d._offline_now()
+        self.health.external = (False, "000:rc=137")
+        self.health.check_external_reachability = mock.Mock(return_value=(False, "000:rc=137"))
+        self.d._recovery.trigger.reset = mock.Mock()
+        self.tick()
+        self.tick()
+        self.health.check_external_reachability.assert_not_called()
+        self.d._recovery.trigger.reset.assert_called()
+        self.assertIsNone(self.d._recovery.trigger.failing_since)
+        self.assertTrue(self.d.is_ready, "a stop is not a failing probe")
+        self.docker.answers["ps -a --filter label=com.docker.compose.project"] = \
+            "onionpress-tor\texited\tdocker\nonionpress-wordpress\texited\tdocker\n"
+        self.tick()
+        self.assertFalse(self.d._stopping)
+        self.docker.answers["ps -a --filter label=com.docker.compose.project"] = \
+            "onionpress-tor\trunning\tdocker\nonionpress-wordpress\trunning\tdocker\n"
+        self.tick()                                   # the next start probes again
+        self.health.check_external_reachability.assert_called()
+
+    def test_a_probe_running_when_the_stop_begins_counts_for_nothing(self):
+        self.tick()
+
+        def _stop_lands_mid_probe(address):
+            self.d._offline_now()
+            return (False, "000:rc=137")
+        self.health.check_external_reachability = _stop_lands_mid_probe
+        self.tick()
+        self.tick()
+        self.assertIsNone(self.d._recovery.trigger.failing_since)
+        self.assertTrue(self.d.is_ready)
+
+    def test_the_stop_hold_ends_after_its_cap(self):
+        """A stop that never took the stack down (it failed, or a restart
+        came back between two passes) holds the probe no longer than
+        STOP_HOLD_SECONDS; a wake lifts it too."""
+        self.tick()
+        self.d._offline_now()
+        self.assertTrue(self.d._stop_hold())
+        self.d._stopping_since -= op_daemon.STOP_HOLD_SECONDS + 1
+        self.assertFalse(self.d._stop_hold())
+        self.assertFalse(self.d._stopping)
+        self.d._offline_now()
+        with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True):
+            self.d.handle_wake()
+        self.assertFalse(self.d._stop_hold())
 
     def test_no_internet_is_offline_and_resets_the_window(self):
         self.tick()
@@ -592,6 +689,39 @@ class TestSleepWake(_DaemonCase):
             self.assertEqual(f.read().strip(), str(self.d.port_offset))
 
 
+class TestCliOnlySubcommands(_DaemonCase):
+    """A subcommand with no launcher case (ensure-archive-s3-keys) is run
+    as the CLI's own, in this interpreter and isolated from the current
+    directory (derivatives.isolated_cli_argv), never through the launcher:
+    through the launcher it reached the Mac launcher's default case, which
+    answered usage and exit 1 on every run until 2026-10-31 (the launchers'
+    default case now delegates too, but the daemon does not depend on it)."""
+
+    def setUp(self):
+        super().setUp()
+        self.logged = []
+        self.d._log_func = self.logged.append
+
+    def test_the_archive_keys_reconcile_runs_the_cli(self):
+        from onionpress import derivatives
+        with mock.patch.object(op_daemon.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="archive.org keys: present\n")
+            self.d._reconcile_archive_s3_keys()
+        self.assertEqual(run.call_args.args[0],
+                         derivatives.isolated_cli_argv("--data-dir", self.dir, "ensure-archive-s3-keys"))
+        self.assertEqual(run.call_args.kwargs["cwd"], self.dir)
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(self.launcher_calls, [])
+        self.assertIn("archive.org keys: archive.org keys: present", "\n".join(self.logged))
+
+    def test_a_failed_reconcile_is_a_log_line(self):
+        with mock.patch.object(op_daemon.subprocess, "run", side_effect=OSError("no interpreter")):
+            self.d._reconcile_archive_s3_keys()
+        self.assertEqual(self.launcher_calls, [])
+        self.assertIn("Error running onionpress ensure-archive-s3-keys: no interpreter",
+                      "\n".join(self.logged))
+
+
 class TestStateFile(unittest.TestCase):
 
     def setUp(self):
@@ -652,6 +782,11 @@ class TestLaunchdAgent(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-daemon-agent-")
         self.addCleanup(shutil.rmtree, self.dir, True)
+        # The launchd side, wherever the tests run (the systemd side is
+        # tests/test_linux_daemon.py's).
+        patcher = mock.patch.object(op_daemon_client, "_on_linux", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         # This temp dir plays the account's own ~/.onionpress: the default
         # label (another dir's is derived: TestLabelPerDataDir).
         patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.dir)
@@ -804,6 +939,9 @@ class TestLabelPerDataDir(unittest.TestCase):
         self.other = tempfile.mkdtemp(prefix="op-other-")
         for d in (self.default, self.other):
             self.addCleanup(shutil.rmtree, d, True)
+        patcher = mock.patch.object(op_daemon_client, "_on_linux", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.default)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -928,17 +1066,15 @@ class TestUpdateOrder(unittest.TestCase):
 
 class TestMenubarIsAView(unittest.TestCase):
     """src/menubar.py holds no loop that talks to docker, the hub or Tor:
-    its one background loop reads the daemon's state file; every docker
-    call left is an action's (the first-run setup's wp-cli, the login
-    token), never a thread or timer's."""
+    its one background loop reads the daemon's state file. Since issue
+    #527 it runs docker nowhere: the first-run setup, the onionname and
+    the login token are `onionpress setup`, `onionname set` and `open`."""
 
-    LOOP_MODULES = ("health", "docker", "onion_proxy", "thumbnails", "power",
+    LOOP_MODULES = ("health", "onion_proxy", "thumbnails", "power",
                     "analytics_sharing", "reachability_stats", "system_metrics",
                     "reachability", "mac_power")
-    # Methods that may name docker: one-shot actions of the first-run setup
-    # and the login token (not loops), as before this phase.
-    DOCKER_ALLOWED = {"_generate_login_url", "_read_onion_address", "_get_admin_username",
-                      "_register_onionname_during_setup", "_rename_wp_admin", "_wp_core_install"}
+    # Methods that may name docker: none since issue #527.
+    DOCKER_ALLOWED = set()
 
     def setUp(self):
         self.src = _read("src/menubar.py")
@@ -955,7 +1091,7 @@ class TestMenubarIsAView(unittest.TestCase):
         for name in self.LOOP_MODULES:
             with self.subTest(module=name):
                 self.assertNotIn(name, imported)
-        for name in ("HealthChecker", "RepublishTrigger", "CaffeineManager", "Docker(",
+        for name in ("HealthChecker", "RepublishTrigger", "CaffeineManager",
                      "onion_proxy.", "thumbnails.", "analytics_sharing.", "_health_checker",
                      "_docker.", "check_tor_reachability", "write_status_to_volume",
                      "healthcheck-messages", "start_registration_thread",
@@ -977,10 +1113,14 @@ class TestMenubarIsAView(unittest.TestCase):
             with self.subTest(module=name):
                 self.assertNotIn(f"onionpress.{name}", loaded)
 
-    def test_docker_is_not_imported_transitively(self):
+    def test_containers_is_not_imported_transitively(self):
         """Issue #475: the menubar asks image_overrides, not containers
-        (which imports docker), whether the images are local builds."""
-        self.assertNotIn("onionpress.docker", ui_import_closure())
+        (which runs the stack), whether the images are local builds. The
+        runner itself (onionpress.docker, issue #477) is in the closure,
+        a wrapper with no loop, through the modules the welcome screen
+        takes its name and title helpers from; nothing in the menubar
+        runs it (issue #527)."""
+        self.assertIn("onionpress.docker", ui_import_closure())
         self.assertNotIn("onionpress.containers", ui_import_closure())
         tree = ast.parse(_read("src/onionpress/image_overrides.py"))
         self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
@@ -1015,13 +1155,13 @@ class TestMenubarIsAView(unittest.TestCase):
             if "while " not in body:
                 continue
             with self.subTest(method=name):
-                self.assertNotRegex(body, r'\["docker"|_docker\.|docker_bin|onionheaven\.(?!is_onionheaven_instance|describe_remaining)[a-z_]+\(|wp_cli_args|run_command\(')
+                self.assertNotRegex(body, r'\["docker"|_docker\.|self\.docker\.|docker_bin|onionheaven\.(?!is_onionheaven_instance|describe_remaining)[a-z_]+\(|wp_cli_args|run_command\(')
                 self.assertNotIn('"status"', body)
                 self.assertNotIn('"address"', body)
 
     def test_docker_only_in_one_shot_actions(self):
         for name, body in self.methods.items():
-            if re.search(r'\["docker"|wp_cli_args|docker_bin|_docker\.', body):
+            if re.search(r'\["docker"|wp_cli_args|docker_bin|_docker\.|self\.docker\.', body):
                 with self.subTest(method=name):
                     self.assertIn(name, self.DOCKER_ALLOWED)
                     self.assertNotIn("while ", body)
@@ -1105,7 +1245,8 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertNotIn('daemon.pid', self.cases["upload-analytics"])
 
     def test_help_names_the_daemon(self):
-        self.assertIn("  daemon        ", self.src)
+        from onionpress import cli
+        self.assertIn("  daemon        ", cli.launcher_help("macos"))
 
     def test_setup_py_bundles_the_module(self):
         self.assertIn("'onionpress.daemon'", _read("setup.py"))

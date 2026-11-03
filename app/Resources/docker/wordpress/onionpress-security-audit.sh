@@ -32,18 +32,18 @@
 #   - report-only      heuristics (code patterns, suspicious dirs) and
 #                      anything involving user accounts — never delete a
 #                      user's own content or logins unattended
-# Anything report-only is written to the report file and logged loudly for
+# Anything report-only is logged loudly (the container's log) for
 # the human to action.
 
 set -uo pipefail   # NOT -e: an audit failure must never block startup
 
-# The report goes where the host can read it: /var/lib/onionpress, a folder
-# www-data owns. This script runs as root, so nothing here may write through
-# a name www-data could have put there: a link at security-report.txt made
-# root rewrite the file it pointed to (docker-entrypoint.sh, say) with lines
-# that carry file names and logins of the planter's choosing. The report is
-# built in a file of root's own and published at exit (publish_report).
-REPORT=/var/lib/onionpress/security-report.txt
+# Findings are this script's output, which the entrypoint sends to the
+# container's log (the host's onionpress.log has it). Through 2.6 they were
+# also published as /var/lib/onionpress/security-report.txt, which nothing
+# read (issue #528): an old one is removed below. This script runs as root,
+# so nothing here writes through a name www-data could have put in that
+# folder (rm -f removes a link, never its target).
+OLD_REPORT=/var/lib/onionpress/security-report.txt
 # Quarantined files go somewhere www-data cannot reach at all: root's own
 # folder in the container. In /var/lib/onionpress www-data could take them
 # back, or swap the folder for a link to send root's mv anywhere.
@@ -54,7 +54,7 @@ WPROOT=/var/www/html
 # plugin bug became root here at every start. What it prints is therefore
 # www-data's to choose; root only reads it, and acts on nothing it names
 # but the downloaded core zip, checked by name first. The audit's own root
-# work (the hash scan, quarantine, the report) is file operations only.
+# work (the hash scan, quarantine) is file operations only.
 WP="onionpress-wp --path=$WPROOT"
 # The WordPress branch this image was built and tested on (WORDPRESS_BRANCH
 # in the Dockerfile). The patch step moves a site on an older branch up to
@@ -101,25 +101,11 @@ wait_for_socks() {
 }
 
 findings=0
-report_tmp=$(mktemp) || report_tmp=/dev/null
 record() {
     findings=$((findings + 1))
     warn "$1"
-    printf '%s\n' "$1" >> "$report_tmp"
 }
-
-# Replace the published report with ours. rm -f removes whatever is at the
-# name (a link included, never its target); dd's conv=excl then creates the
-# file with O_EXCL, which refuses any name that exists again by then, a
-# link included, so a link planted in between is not followed either.
-publish_report() {
-    [ "$report_tmp" = /dev/null ] && return 0
-    rm -f "$REPORT" 2>/dev/null
-    dd if="$report_tmp" of="$REPORT" conv=excl status=none 2>/dev/null \
-        || warn "could not write $REPORT (something else is at that name)"
-    rm -f "$report_tmp"
-}
-trap publish_report EXIT
+rm -f "$OLD_REPORT" 2>/dev/null
 
 # Move a known-bad file into quarantine. $1 = its path as find printed it
 # (under $WPROOT), $2 = its sha1. cd -P and the pwd check pin the folder
@@ -136,7 +122,6 @@ quarantine() {
 }
 
 mkdir -p -m 700 "$QUARANTINE" 2>/dev/null || true
-printf 'OnionPress security audit — %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$report_tmp" 2>/dev/null || true
 
 # Nothing to do if WordPress isn't installed yet; multisite-init exits the
 # same way on first boot and we'll be re-run on the next start.
@@ -246,12 +231,10 @@ verify_status=$(field "$verify_out" status)
 if [ "$verify_status" = "ok" ]; then
     if [ "$(field "$verify_out" bad)" != "0" ]; then
         record "CORE FILE INTEGRITY FAILED ($current):"
-        # Detail lines go straight to the report/log rather than through
-        # record(): a pipeline's while-loop is a subshell, so the finding
-        # counter would not survive it. The line above already counted this.
+        # Detail lines are warned rather than record()ed: the line above
+        # already counted this finding.
         while IFS='=' read -r kind path; do
             warn "  $kind: $path"
-            printf '  %s: %s\n' "$kind" "$path" >> "$report_tmp" 2>/dev/null || true
         done < <(printf '%s\n' "$verify_out" | grep -E '^(mismatch|missing)=')
     else
         log "core file integrity verified against WordPress.org checksums"
@@ -319,15 +302,14 @@ fi
 # ---------------------------------------------------------------- REPORT
 if [ "$findings" -eq 0 ]; then
     log "no indicators of compromise found"
-    printf 'No indicators of compromise found.\n' >> "$report_tmp" 2>/dev/null || true
 else
     warn "=================================================="
-    warn "$findings SECURITY FINDING(S) — review $REPORT"
+    warn "$findings SECURITY FINDING(S) — review the [security-audit] lines above"
     warn "Full guidance: https://github.com/brewsterkahle/onionpress/security"
     warn "=================================================="
-    printf '\n%s finding(s). If any webshell or rogue admin is listed, treat the\n' "$findings" >> "$report_tmp" 2>/dev/null || true
-    printf 'site as compromised: rotate wp-config salts, change all passwords,\n'   >> "$report_tmp" 2>/dev/null || true
-    printf 'and restore content from a backup predating the compromise.\n'          >> "$report_tmp" 2>/dev/null || true
+    warn "If any webshell or rogue admin is listed, treat the site as compromised:"
+    warn "rotate wp-config salts, change all passwords, and restore content from a"
+    warn "backup predating the compromise."
 fi
 
 exit 0

@@ -1037,8 +1037,9 @@ esac
     def _backup(self):
         from onionpress import backup
         out = os.path.join(self.tmp, "backup.zip")
+        from fake_docker import on_path
         backup.create_backup(self.bsl.mv.ADDR, "admin", self.bsl.PW, out, "2.5.2",
-                             self.logs.append, data_dir=self.data_dir)
+                             self.logs.append, docker=on_path(), data_dir=self.data_dir)
         return self.bsl._inner_names_and_bytes(out, self.bsl.PW)
 
     def test_a_hub_backup_holds_its_registry_and_keys_and_nothing_else(self):
@@ -1070,32 +1071,11 @@ esac
 
     def test_asking_never_makes_a_registry(self):
         from onionpress import backup
-        self.assertEqual(backup.hub_data_state(), "none")
+        from fake_docker import on_path
+        self.assertEqual(backup.hub_data_state(on_path()), "none")
         self.assertFalse(os.path.exists(os.path.join(self.hub, "registry.db")))
         self._write(f"keys/{A}/{KEY}", "KEY-A")
-        self.assertEqual(backup.hub_data_state(), "hub")
-
-    def test_the_linux_backup_helper_says_what_it_did(self):
-        """linux/onionpress create_backup runs `onionpress.cli
-        stage-hub-data`: 0 copied, 3 not a hub, 4 no answer, 1 failed."""
-        from onionpress.cli import OnionPressCLI
-        dest = os.path.join(self.tmp, "staged")
-        with mock.patch("onionpress.cli._make_log_func", return_value=self.logs.append):
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest), 3)
-            self.assertFalse(os.path.exists(dest))
-            self._write(f"keys/{A}/{KEY}", "KEY-A")
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest), 0)
-            with open(os.path.join(dest, "keys", A, KEY)) as f:
-                self.assertEqual(f.read(), "KEY-A")
-            with mock.patch("onionpress.backup.hub_data_state", return_value=None):
-                self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest + "2"), 4)
-            with mock.patch("onionpress.backup.stage_hub_data", side_effect=OSError("x")):
-                self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest + "3"), 1)
-        body = _bash_function(hd._read("linux/onionpress"), "create_backup")
-        # Through stage-hub-backup now, which stages this way only without
-        # a recovery key (tests/test_hub_backup_sealed.py).
-        self.assertIn('op_py --data-dir "$DATA_DIR" stage-hub-backup --staging "$staging"', body)
-        self.assertNotIn("docker cp onionheaven:", body)
+        self.assertEqual(backup.hub_data_state(on_path()), "hub")
 
     def test_restore_goes_through_sqlite_and_takes_only_registry_and_keys(self):
         import io
@@ -1130,9 +1110,9 @@ esac
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
                 stderr="" if kwargs.get("text") else b"")
 
-        with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, {}, lambda msg: None,
-                                               data_dir=self.tmp)
+        from fake_docker import FakeDocker
+        backup.restore_container_artifacts(staging, {}, lambda msg: None,
+                                           docker=FakeDocker(run), data_dir=self.tmp)
         hub_calls = [(c, i) for c, i in calls if any("onionheaven" in a for a in c)]
         self.assertEqual([c for c, _ in hub_calls], [
             ["docker", "exec", "onionheaven", "mkdir", "-p", "/var/lib/onionheaven/keys"],

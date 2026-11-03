@@ -54,8 +54,19 @@ the harness is about something else.
 | 5 | `migrate_key_volume` | done, 487a3e06 |
 | 6 | `db_import` | done, 14d3ff94 |
 | 7 | `block_wordpress_egress` | done, 7c22e46a |
+| 8 | Linux `update_*` (the release client; the apt-get and checkout leaves stay bash) | done, 2026-10-31 (`cli.cmd_update` + `updater.py` on both platforms) |
 
 Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
+
+Later slices in the same shape, outside Phase 4's table: `write_status`
+(issue #523, consolidation stage 2): `onionpress write-status` is a fast
+path over `onionpress.status_writer` (the daemon's status pass as one
+run, `OneShotStatus`, until the daemon runs on Linux, #407); the bash
+body (347 lines, `write_recent_logs` and `linux_status.py` with it) is
+the delegation plus its `apply_config_updates` guard; its three bash
+harnesses (`test_wordpress_host_data`, `test_linux_safe_config`,
+`test_linux_hub_mode`) became tests of the writer against a fake docker
+(`tests/test_status_writer.py` has the field-by-field ones).
 
 ## Invariants each moved function must keep (CLAUDE.md has the sections)
 
@@ -573,3 +584,170 @@ older versions go, while the same digest under the old name is the pinned
 image itself and stays. The launchers' conflicting hunks were #502's new
 pins in `update_images`, which this branch removed.
 
+
+## Slice 8 (2026-10-31): Linux's backup and restore (issue #406, #203 item 3)
+
+`linux/onionpress`'s `create_backup` (299 lines), `key_volume_cat`,
+`restore_backup` (252 lines), `db_client` and `db_import` went; the
+`backup`, `settings-page-backup` and `settings-page-restore` cases are the
+Mac's delegations (`op_py --data-dir "$DATA_DIR" <verb> ...`), the
+`restore` case keeps its argv parse and loses its heartbeat calls, and the
+uninstall runs `op_py ... backup -o`. One Python path for both platforms:
+`cmd_backup` → `backup.create_backup`, `cmd_restore`,
+`cmd_settings_page_backup`, `cmd_settings_page_restore`. Drift resolved in
+the Python: the key is read by `key_manager.extract_keys` on both (PEM,
+else C Tor's files; `_stage_onion_key`), and #519's keyless-backup rule
+applies to both (WARNING, `excludes_onion_key` + `onion_key_unreadable`,
+a note with the result); the page's backup is keyless on Linux too; the
+address prefix rule is `match_config_to_restored_address`'s (no bash
+copy); the refusal strings are the Python constants alone (Linux's
+address-change refusal raised in `cmd_settings_page_restore`). The seam:
+`heartbeat_unit` (new module, in setup.py's includes) stops and starts the
+Linux heartbeat unit around `cmd_restore` (`paused`) and the page
+restore's key change. `restore_from_backup` now leaves a backup's
+healthcheck key out and removes one an older restore staged
+(`leave_healthcheck_key_out`), what the bash restore did. The 16 helper
+subcommands the bash spine called (`extract-backup`, `backup-address`,
+`settings-page-*-check`, `stage-wp-content`, `pack-backup`, `db-import`,
+`backup-metadata`, `wordpress-safe-config`, `stage-hub-backup`,
+`stage-hub-data`, `restore-config`, `restore-hub-data`,
+`prune-image-derivatives`, `scrub-staging`) and `key_manager.py
+ctor-to-arti` have no caller left; `put-wp-tree` (bundled_plugins) and
+`verify-admin-password` (uninstall) stay. `KEY_HELPER_IMAGE` /
+`ensure_key_helper_image` are now dead in both launchers (test-pinned;
+not removed here). Not live-tested on Linux: the page restore writes the
+key the Mac's way (`write_private_key`: docker cp into the live tor
+container and a tor restart) instead of `.import-key-pending`.
+
+
+## Slice 9 (2026-10-31): `onionpress daemon` on Linux (issue #407, #530 §2)
+
+`linux/onionpress-heartbeat.py` (2,107 lines), `linux/onionpress-sleep-hook`,
+the `onionpress-watcher.service`/`.timer` pair and the launcher's
+`_status_poll_loop`, `start_container_log_capture`, `write_status`,
+`stop/start_heartbeat_client`, the heartbeat hold
+(`hold_heartbeat_client_until_installed` and friends) and the
+`sleep-pre|sleep-post` case went; `src/onionpress/heartbeat_unit.py` (slice
+8's seam) with them. `onionpress daemon` (`daemon.py`) runs on Linux as the
+`onionpress-daemon.service` user unit (`Before=onionpress.service`;
+`onionpress.service` is now `Type=oneshot` + `RemainAfterExit`, its `start`
+returning after `daemon start`). The seams, each a branch on
+`Daemon.os_name`: `power.LogindPowerHandler` (the heartbeat's
+`SleepInhibitor`, behind `MacPowerHandler`'s interface: `register`,
+`run_loop_once`, `stop`, `OFFLINE_MAX_TIME`; the daemon's `handle_sleep` /
+`handle_wake` are the one policy, the `/offline` held to the handler's
+budget), `SystemdInhibitor` for `PREVENT_SLEEP`, `_setup_environment`
+(the #503 socket rule), `_runtime_ready`, `health.linux_has_default_route`
+behind `check_internet_connectivity`, `status_writer`'s `os_name`,
+`hub_registration_allowed` (the daemon-side #464 gate, replacing the
+runtime mask), `_watch_rootless_netns` (the bash loop's egress re-apply),
+and Mac-only skips (thumbnails, the clearnet capture, the proxy, the
+`start-tor` after setup). `daemon_client` gained its systemd half
+(`systemd_unit`, `unit_loaded_pid`, `_start_unit`; stop/status/remove
+branch on `os.uname`, so the module stays stdlib-only). Retired with the
+heartbeat: `status_writer.OneShotStatus`/`run_once`/`heartbeat_verdict`
+and `onionpress write-status` (handle_action runs no `write-status` after
+an action: the daemon's pass writes it), `reachability.ReachabilityLoop`
+and `reachability.json`, `analytics_sharing.daemon_running`'s systemctl
+branch (the pid file on both platforms), `config`'s START_ON_BOOT units
+(`onionpress-daemon.service`). The `HubConnection` (a persistent SOCKS
+socket for a ~5 ms `/offline`) was dropped: a docker-exec curl at ~1.7 s
+fits logind's 5 s default delay (`OFFLINE_MAX_TIME = 3` leaves room for the
+two watchdog signals). Packaging: `install-tree.sh`, `build-linux.sh`
+(Depends gains `python3-dbus`; the postinst's upgrade stops the old units,
+lifts the heartbeat's runtime mask, `try-restart`s the site and `restart`s
+the daemon; no `lift_heartbeat_holds`), `check-deb.sh`, `install.sh`
+(removes an earlier hook and the old user units). The 25 Linux start
+traces lost only the hold's five lines (`OP_UPDATE_START_TRACES=1`).
+Not live-tested on Linux: suspend/resume under logind, the hub
+registration from the daemon, the Settings page's requests at the
+daemon's 30 s cadence (the watcher's was 10 s), the .deb upgrade from a
+pre-#407 install.
+
+
+## Slice 10 (2026-11-01): ports and paths resolved in Python only (issue #405, #530 §4)
+
+The port offset had six implementations in three languages (`ports.py`'s
+three functions, the Mac launcher's bash `detect_port_offset` probing 8080
+only, the Linux launcher's probing all three ports plus a bash copy of the
+daemon's `.previous-port-offset` wait that read `status.json`'s `wp_port`,
+`daemon._resolve_ports_at_start`, `OnionPressCLI`'s probe). Now one:
+`ports.resolve_at_start(data_dir, preset=, docker=, log=)`: a preset
+`ONIONPRESS_PORT_OFFSET` (digits) as it is, with no wait and no probe
+(#507); else `wait_for_previous_port` (the sentinel, now a constant,
+`PREVIOUS_OFFSET_SENTINEL`), then the running stack's published port
+(`get_running_wp_port`, through a `docker.Docker` when given, so the
+question reaches this install's daemon), else `detect_port_offset`, which
+logs each bump in the Mac launcher's words. The daemon runs it with no
+preset (it is the resolver the others take their preset from) and its
+own Docker; `OnionPressCLI` with the environment's. `onionpress
+launcher-env` is the launchers' fast path (no `OnionPressCLI`): the rule
+with the environment's preset, then `cli.launcher_environment` (the four
+port variables, `DOCKER_DIR` from `resolve_paths`; on Linux `DOCKER_HOST`
+by the daemon's #503 rule, a preset kept, and `DOCKER_SOCK` for the
+compose file's socket mounts), `KEY=VALUE` per line on stdout, log lines
+on stderr (the launcher appends them to its log), an ERROR and exit 1 on
+any failure. Each launcher's `main()` now opens with
+`launcher_environment`: one call, an allowlisted `case` on the keys,
+numbers held to digits, `DOCKER_DIR` only when it is a folder; no answer
+keeps the preset or 0 with an ERROR in the log file only (stdout is the
+menubar's and the tray's), so `stop` still works on a broken Python. The
+Mac's Colima environment (`COLIMA_HOME`, `DOCKER_HOST`, `DOCKER_CONFIG`)
+stays its own, as does the Colima bootstrap (#405's other half, left
+open). The move into `main()` (rather than the top level, where the
+block was) is what lets the harnesses intercept it: `launcher_harness`'s
+CLI stub answers `launcher-env` from `$STUB_LAUNCHER_ENV` (offset 0's
+ports by default, `FAIL` for no answer) and `calls()`/`py_calls()` leave
+the call out unless `env=True`; the trace harness runs
+`launcher_environment` before `start_containers` (as `main` would) with
+`launcher-env` in the runner's `REAL` set, and the 61 fixtures did not
+change (a preset offset probes and logs nothing). Retired:
+`test_the_port_probe_imports_the_real_socket` (no `python3 -c` probe is
+left in the Linux launcher) and the Mac census's "one `-P -c` exists";
+`TestPortOffsetSticky`'s Linux read test now points at the Python. Not
+live-tested: a Mac with the app (the menubar's preset through the
+daemon), a Linux install (the rootless `DOCKER_HOST`/`DOCKER_SOCK` from
+the Python; the `/tmp/opqa` recipe). `updater.detect_active_offsets` (the
+other instances' offsets, for the update dialog) is a different question
+and stays.
+
+
+## Slice 11 (2026-11-01): the rest of the launchers' shared bash (issue #529, #530 §4)
+
+Eight slices, each a commit in the phase 4 shape, on top of #405's branch
+(#539). (1) `wait_for_services` ×2 (drifted) → `start.wait_for_services`
+behind `onionpress wait-for-services [--errors-file]` (Linux's
+not-installed address write and write order on both; a timeout names
+`wait-for-services` in the Mac's START SUMMARY, new); with it
+`get_healthcheck_address`, `write_shared_onion_address` and `get_status`
+went (`status` is `onionpress status`; the "Onion address:" line reads
+`onionpress address`). (2) `_validate_oh_address` ×2 →
+`onionheaven.validate_hub_address` + `validate-oh-address` (compact JSON,
+exit 1 for invalid_format/self, as the bash). (3) the Mac `scrub` case →
+`scrub.run_scrub(os_name="macos", launcher=, data_dir=)`: backup → reset in
+place → restore → verify, no sudo; the backup kept unless --clean and a
+y/N opener, as Linux's cycle (deltas); `scrub._confirm` honours
+`ONIONPRESS_YES=true`; `run_scrub()` without an os_name stays Linux's
+cycle. (4) the Mac `start-tor` case → `onionpress start-tor` (migration
+then `ContainerManager.start_tor`, `--no-deps`; the daemon still runs the
+launcher verb). (5) `setup_db_passwords` ×2 → `onionpress ensure-secrets`
+(the Mac's truncated-file guard on both); bash keeps `source` + export.
+(6) Linux `reset` → `cmd_reset`'s Linux tail (the launcher's start,
+`onionheaven.reset_hub_state`); Linux `uninstall` → `uninstall.run`'s
+Linux branch behind the protocol, the backup offer in `cmd_uninstall`
+(`offer_backup_before_uninstall`), `-y` as `ONIONPRESS_CONFIRMED`; the
+tray's Uninstall on `run_confirmed` + the terminal with the flags.
+`reset_onionheaven_in_container` stays in bash for `reset-onionheaven`
+alone. (7) the two restore parses → the CLI's argparse (pass-through;
+the bash "Done!"/"Restore failed" lines go; `read_backup_password` stays
+for `setup --from-backup`). (8) help/usage → `cli.launcher_help(os_name)`
++ `launcher-help`. (9) the sleep verbs were already gone (#538).
+Harness: the CLI stub answers `ensure-secrets` by writing a stub secrets
+file (`STUB_RC_ENSURE_SECRETS`). The start traces did not change (the
+wait and the secrets are outside what the trace harness runs; the
+harness's own `setup_db_passwords` runs the stub). Left in bash:
+`wp_is_installed` (the two provision-post-install cases, #527's),
+`reset_onionheaven_in_container` (one verb), and the "stays bash" list.
+Not live-tested: a Mac with the app (the scrub cycle, start-tor from the
+daemon, the help), a Linux install (uninstall with sudo in the tray's
+terminal, the reset's restart, the backup offer; the `/tmp/opqa` recipe).

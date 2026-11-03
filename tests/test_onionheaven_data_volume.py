@@ -238,8 +238,10 @@ class TestPaths(unittest.TestCase):
                 checked += 1
                 with self.subTest(file=rel, at=m.start()):
                     self.assertNotEqual(found[-1], "onionpress-wordpress")
-        # Ten since #504 (the Linux activation watcher's two reads went).
-        self.assertGreaterEqual(checked, 10)
+        # Ten since #504 (the Linux activation watcher's two reads went);
+        # nine since #523 (the Linux launcher's own registry query went:
+        # the status asks through onionheaven.overview).
+        self.assertGreaterEqual(checked, 9)
 
     def test_wordpress_side_code_does_not_know_it(self):
         for top in ("app/Resources/plugins", "app/Resources/themes",
@@ -256,15 +258,16 @@ class TestPaths(unittest.TestCase):
         self.assertEqual(backup_module.ONIONHEAVEN_DATA_DIR, HUB_DIR)
         # The hub data's staging and restore moved into hub_backup (#484).
         backup = _read("src/onionpress/backup.py") + _read("src/onionpress/hub_backup.py")
-        self.assertEqual(backup.count("['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]"), 2)
-        self.assertIn("['docker', 'cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/']", backup)
-        self.assertIn("['docker', 'exec', '-i', 'onionheaven', 'sh', '-c',\n"
-                      "                            REGISTRY_RESTORE_SH]", backup)
+        # Through the one runner (docker.Docker, issue #477): the arguments
+        # after the binary.
+        self.assertEqual(backup.count("['exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]"), 2)
+        self.assertIn("['cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/']", backup)
+        self.assertIn("['exec', '-i', 'onionheaven', 'sh', '-c', REGISTRY_RESTORE_SH]", backup)
         self.assertNotRegex(backup, r"www-data[^\n]*onionheaven")
-        # The Mac launcher's `restore` is onionpress.cli restore (backup.py).
-        self.assertIn("restore_hub_data(onionheaven_dir, log_func)", backup)
-        self.assertIn('restore-hub-data --src "$staging/onionheaven"', _read("linux/onionpress"))
-        self.assertIn('stage-hub-backup --staging "$staging"', _read("linux/onionpress"))
+        # Both launchers' backup and restore are onionpress.cli's (backup.py).
+        self.assertIn("restore_hub_data(onionheaven_dir, log_func, docker=docker)", backup)
+        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
+            self.assertNotIn("onionheaven:", _read(rel), rel)
 
 
 # ---------------------------------------------------------------------------

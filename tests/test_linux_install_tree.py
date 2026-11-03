@@ -83,11 +83,10 @@ class TestTheList(unittest.TestCase):
         dests = {e[2]: e for e in _manifest()}
         for dest in ("onionpress", "onionpress-tray", "docker", "plugins", "themes",
                      "lib/onionpress", "assets", "scripts/onion_auth.py",
-                     "scripts/key_manager.py", "scripts/onionpress-heartbeat.py",
+                     "scripts/key_manager.py",
                      "onionpress-wordpress-egress", "VERSION",
                      # install.sh copies these on to the user's systemd folder
-                     "onionpress.service", "onionpress-heartbeat.service",
-                     "onionpress-watcher.service", "onionpress-watcher.timer",
+                     "onionpress.service", "onionpress-daemon.service",
                      "app-icon.png",
                      # the postinst's last resort for rootless Docker (#486)
                      "docker-rootless/dockerd-rootless.sh",
@@ -406,10 +405,11 @@ class TestUpdateSource(unittest.TestCase):
         self.assertLess(branch.index("update_source_checkout"), branch.index("install-tree.sh"))
 
 
-class TestHeartbeatClientBothScopes(unittest.TestCase):
-    """stop, restart and update stopped and started the heartbeat client at
-    system scope only (sudo systemctl), while installs run it as a user
-    unit: it kept beating with the site down."""
+class TestTheDaemonAroundStopRestartUpdate(unittest.TestCase):
+    """stop, restart and update ask the daemon for /offline before the
+    containers go down and (restart, update) start the daemon after the
+    stack is up: the heartbeat client unit they stopped and started until
+    #407 is gone, and no systemctl of their own is left."""
 
     def test_stop_restart_update(self):
         text = _read(LINUX)
@@ -420,10 +420,10 @@ class TestHeartbeatClientBothScopes(unittest.TestCase):
                           else _case_branch(text, label))
                 code = "\n".join(l for l in branch.splitlines() if not l.lstrip().startswith("#"))
                 self.assertNotIn("systemctl", code)
-                self.assertLess(code.index("stop_heartbeat_client"), code.index("stop_containers"))
+                self.assertNotIn("heartbeat", code)
+                self.assertLess(code.index("daemon_offline"), code.index("stop_containers"))
                 if label != "stop":
-                    self.assertLess(code.index("start_containers"),
-                                    code.index("start_heartbeat_client"))
+                    self.assertLess(code.index("start_containers"), code.index("start_daemon"))
 
 
 if __name__ == "__main__":

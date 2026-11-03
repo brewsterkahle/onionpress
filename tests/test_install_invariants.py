@@ -9,6 +9,7 @@ below has a comment pointing at the incident it's guarding against.
 """
 
 import ast
+import inspect
 import os
 import re
 import subprocess
@@ -18,6 +19,7 @@ import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def _read(rel_path):
@@ -25,59 +27,21 @@ def _read(rel_path):
         return f.read()
 
 
-class TestMacOSBuildBundlesKeyManager(unittest.TestCase):
-    """The macOS shell launcher invokes $SCRIPTS_DIR/key_manager.py directly
-    (app/MacOS/onionpress:504,638,702). If that file isn't bundled, vanity
-    generation silently falls back to a random address AND OnionHeaven
-    registration hits "sign_failed" forever — both observed on an install
-    test where build-dmg-simple.sh copied menubar.py but not key_manager.py.
-    """
+class TestMacOSBuildNeedsNoKeyManagerScript(unittest.TestCase):
+    """The key import is `onionpress import-key` (issue #524), run by the
+    bundle's package like every other subcommand: the Mac launcher no longer
+    invokes a $SCRIPTS_DIR/key_manager.py copy, so the DMG build neither
+    copies nor requires one (and nothing in the launcher may name it)."""
 
-    def test_build_script_copies_key_manager_into_scripts_dir(self):
+    def test_build_script_has_no_key_manager_script_copy(self):
         script = _read("build/build-dmg-simple.sh")
-        self.assertRegex(
-            script,
-            r'cp\s+"\$PROJECT_DIR/src/onionpress/key_manager\.py"\s+'
-            r'"\$APP_PATH/Contents/Resources/scripts/"',
-            "build-dmg-simple.sh must copy src/onionpress/key_manager.py "
-            "into Contents/Resources/scripts/ — the macOS shell launcher "
-            "invokes it from there.",
-        )
+        self.assertNotIn("scripts/key_manager.py", script)
+        self.assertNotIn("key_manager.py", script)
 
-    def test_build_script_verifies_file_not_substring(self):
-        """The old check was `grep -rq "key_manager" MenubarApp` — that
-        passes even when the actual file the shell launcher needs is
-        missing, because the string appears in py2app's bundled bytecode.
-        The real check has to be `test -f` against the launcher's path
-        and must exit non-zero on failure.
-        """
-        script = _read("build/build-dmg-simple.sh")
-        self.assertNotRegex(
-            script,
-            r'grep\s+-rq\s+"key_manager"',
-            "Substring grep can pass when the file is missing. Use "
-            "`test -f` against Contents/Resources/scripts/key_manager.py.",
-        )
-        self.assertRegex(
-            script,
-            r'\[\s*-f\s+"\$APP_PATH/Contents/Resources/scripts/key_manager\.py"\s*\]',
-            "Need a `test -f` check for the bundled key_manager.py.",
-        )
-        # The verification must fail the build, not just log a warning.
-        # Look for an `exit 1` inside the key_manager check's else-branch.
-        km_block = re.search(
-            r'if\s+\[\s*-f\s+"\$APP_PATH/Contents/Resources/scripts/key_manager\.py"\s*\];\s*then'
-            r'(.*?)fi',
-            script,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(km_block, "Could not find key_manager.py test -f block")
-        self.assertIn(
-            "exit 1",
-            km_block.group(1),
-            "The key_manager.py check must `exit 1` on miss, not just warn — "
-            "otherwise broken bundles ship.",
-        )
+    def test_mac_launcher_runs_no_key_manager_script(self):
+        launcher = _read("app/MacOS/onionpress")
+        self.assertNotIn("key_manager.py", launcher)
+        self.assertIn('import-key "$@"', launcher)
 
 
 class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
@@ -642,112 +606,25 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
             )
 
 
-class TestLinuxSleepHookWiring(unittest.TestCase):
-    """Guard the suspend/resume → OnionHeaven notification path.
+class TestLinuxSleepIsTheDaemons(unittest.TestCase):
+    """Suspend and resume reach the hub and the watchdogs from the daemon's
+    logind delay inhibitor (onionpress.power.LogindPowerHandler, issue
+    #407; tests/test_linux_daemon.py drives it). The system-sleep hook of
+    before (a no-op since 2.4.99) and the launcher's sleep-pre|sleep-post
+    case are gone, and install.sh removes an earlier install's hook."""
 
-    Without this wiring, a laptop close-lid leaves a stale onion descriptor
-    on the DHT for minutes (until the hub's missed-heartbeat timeout fires)
-    and resume takes a full 60s heartbeat tick before the hub stops fronting
-    our site via Wayback fallback. Mac fires `notify_onionheaven_offline()`
-    in `handle_sleep`; Linux mirrors that via a systemd system-sleep hook.
-    """
-
-    def test_sleep_hook_script_exists(self):
-        hook = _read("linux/onionpress-sleep-hook")
-        self.assertRegex(
-            hook, r'#!/bin/bash', "Hook must be a bash script.")
-        # Hook must call the launcher with sleep-pre and sleep-post.
-        self.assertRegex(
-            hook, r'sleep-\$ACTION',
-            "Hook must invoke /opt/onionpress/onionpress sleep-$ACTION so "
-            "pre and post both reach the launcher subcommand.",
-        )
-        # Bound to systemd's pre/post + sleep/hibernate contract.
-        self.assertIn(
-            "suspend|hibernate|hybrid-sleep|suspend-then-hibernate", hook,
-            "Hook must cover every sleep type systemd-logind dispatches.",
-        )
-        # Per-user timeout so a stuck Docker can't hold up suspend.
-        self.assertRegex(
-            hook, r'timeout\s+\d+',
-            "Hook must wrap the per-user launcher invocation in `timeout` "
-            "so a hung Docker can't block the suspend.",
-        )
-
-    def test_install_sh_installs_sleep_hook(self):
-        script = _read("linux/install.sh")
-        # The install command can wrap across lines via `\` continuation,
-        # so match with DOTALL and `.` allowed to span newlines.
-        self.assertRegex(
-            script,
-            r'install\s+(?:-D\s+)?-m\s+0755[\s\S]*?onionpress-sleep-hook[\s\S]*?'
-            r'/usr/lib/systemd/system-sleep/onionpress',
-            "install.sh must drop linux/onionpress-sleep-hook into "
-            "/usr/lib/systemd/system-sleep/onionpress (mode 0755).",
-        )
-
-    def test_install_sh_creates_system_sleep_dir(self):
-        """Issue #264: /usr/lib/systemd/system-sleep/ does not exist on a
-        fresh Debian 13, so a plain `install -m 0755 … system-sleep/onionpress`
-        aborted the whole curl|bash install with "No such file or directory".
-        `install -D` creates the missing parent directories."""
-        script = _read("linux/install.sh")
-        self.assertRegex(
-            script,
-            r'install\s+-D\s+-m\s+0755\s+[^\n]*onionpress-sleep-hook',
-            "install.sh must use `install -D` for the sleep hook so the "
-            "system-sleep directory is created when it is missing.",
-        )
-
-    def test_deb_packages_sleep_hook(self):
-        script = _read("build/build-linux.sh")
-        self.assertIn(
-            "/usr/lib/systemd/system-sleep", script,
-            "build-linux.sh must stage the sleep hook into the .deb's "
-            "/usr/lib/systemd/system-sleep/ directory.",
-        )
-        self.assertRegex(
-            script, r'onionpress-sleep-hook',
-            "build-linux.sh must reference linux/onionpress-sleep-hook.",
-        )
-
-    def test_launcher_has_sleep_pre_and_post_subcommands(self):
-        script = _read("linux/onionpress")
-        self.assertRegex(
-            script, r'sleep-pre\|sleep-post\)',
-            "linux/onionpress must dispatch a sleep-pre|sleep-post case so "
-            "the system-sleep hook has something to call.",
-        )
-        # Both signals must reach the heartbeat client (USR1 = /offline,
-        # USR2 = immediate /online).
-        self.assertIn(
-            "onionpress-heartbeat", script,
-            "Sleep subcommand must kill -s SIGUSR{1,2} the heartbeat unit.",
-        )
-
-    def test_heartbeat_handles_usr1_and_usr2(self):
-        src = _read("linux/onionpress-heartbeat.py")
-        self.assertRegex(
-            src, r'signal\.signal\(signal\.SIGUSR1',
-            "Heartbeat client must register a SIGUSR1 handler — sleep-pre "
-            "uses it to flush /offline before suspend.",
-        )
-        self.assertRegex(
-            src, r'signal\.signal\(signal\.SIGUSR2',
-            "Heartbeat client must register a SIGUSR2 handler — sleep-post "
-            "uses it to send an immediate /online after resume.",
-        )
-        # The flag-based pattern: handler sets a global, main loop reacts.
-        # Direct send_offline() inside a signal handler would be unsafe.
-        self.assertRegex(
-            src, r'_pending_offline\s*=\s*True',
-            "USR1 handler should flip a flag and let the main loop send "
-            "/offline — network I/O inside a signal handler is unsafe.",
-        )
-        self.assertRegex(
-            src, r'_pending_online\s*=\s*True',
-            "USR2 handler should flip a flag for the same reason.",
-        )
+    def test_no_hook_no_case(self):
+        self.assertFalse(os.path.exists(os.path.join(PROJECT_ROOT, "linux", "onionpress-sleep-hook")))
+        self.assertNotIn("sleep-pre", _read("linux/onionpress"))
+        self.assertNotIn("onionpress-sleep-hook", _read("build/build-linux.sh"))
+        install = _read("linux/install.sh")
+        self.assertNotIn("onionpress-sleep-hook", install)
+        self.assertIn("$SUDO rm -f /usr/lib/systemd/system-sleep/onionpress", install)
+        daemon = _read("src/onionpress/daemon.py")
+        self.assertIn("from .power import LogindPowerHandler", daemon)
+        power = _read("src/onionpress/power.py")
+        self.assertIn('signal_name="PrepareForSleep"', power)
+        self.assertIn('manager.Inhibit("sleep", "OnionPress",', power)
 
 
 class TestLinuxInstallRefusesPlainRoot(unittest.TestCase):
@@ -835,23 +712,15 @@ class TestLinuxWaitThenOpenUsesWrapper(unittest.TestCase):
     """
 
     def test_wait_then_open_prefers_start_tor_browser_wrapper(self):
-        src = _read("linux/onionpress-tray")
-        # Carve the _wait_then_open function body so we don't accidentally
-        # match an unrelated `firefox.real` reference elsewhere in the file.
-        m = re.search(
-            r'def\s+_wait_then_open\(\)[^\n]*:(.*?)(?=\n\s{0,8}def\s+\w|\Z)',
-            src, re.DOTALL)
-        self.assertIsNotNone(
-            m, "_wait_then_open helper must exist in linux/onionpress-tray")
-        body = m.group(1)
-        # Wrapper path must be referenced.
-        self.assertRegex(
-            body, r'start-tor-browser',
-            "_wait_then_open must launch the URL via the start-tor-browser "
-            "wrapper. Spawning firefox.real with -new-tab directly hits "
-            "the profile lock and pops Tor Browser's native 'already "
-            "running' dialog instead of opening the URL in a new tab.",
-        )
+        # The cold launch's wait is launcher_ops.open_onion's since issue
+        # #527 (`onionpress open onion`, the tray's and the menubar's).
+        import inspect
+        from onionpress import launcher_ops
+        body = inspect.getsource(launcher_ops._new_tab_argv)
+        self.assertIn('"start-tor-browser"', body)
+        self.assertLess(body.index("[wrapper,"), body.index("[firefox_real,"))
+        self.assertIn("_new_tab_argv(running,", inspect.getsource(launcher_ops._open_onion_linux))
+        self.assertNotIn("_wait_then_open", _read("linux/onionpress-tray"))
 
 
 class TestLinuxOnionAddressSharedToWp(unittest.TestCase):
@@ -868,13 +737,16 @@ class TestLinuxOnionAddressSharedToWp(unittest.TestCase):
     header showed "ubuntupress" without "@op2…onion".
     """
 
-    def test_launcher_defines_write_shared_onion_address(self):
-        script = _read("linux/onionpress")
-        self.assertRegex(
-            script, r'write_shared_onion_address\(\)\s*\{',
-            "linux/onionpress must define a write_shared_onion_address "
-            "helper that copies hostname into the shared volume.",
-        )
+    def test_no_launcher_writes_the_shared_address_in_bash(self):
+        # The write is start.write_shared_onion_address, run by
+        # start.wait_for_services (`onionpress wait-for-services`, #529) on
+        # both platforms, the not-installed early return included.
+        from onionpress import start
+        import inspect
+        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
+            self.assertNotIn("write_shared_onion_address() {", _read(rel), rel)
+        self.assertIn("write_shared_onion_address(docker, log)",
+                      inspect.getsource(start.wait_for_services))
 
     def test_provision_post_install_writes_shared_address(self):
         # provision-post-install delegates to multisite.provision_post_install
@@ -948,11 +820,11 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # for the equivalent assertion at the Python level. What stays bash:
     # the delegations to the WordPress.org plugin steps
     # (onionpress.bundled_plugins, #442.3; tests/test_bundled_plugins.py
-    # holds their shape) and detect_port_offset (needs to run before the
-    # Python lib path is set up).
+    # holds their shape) and launcher_environment, main's first call
+    # (issue #405: the ports and paths come from `onionpress launcher-env`).
     REQUIRED_ON_BOTH = {
         "setup_bundled_plugins",
-        "detect_port_offset",
+        "launcher_environment",
     }
     # `fetch_archive_s3_keys` exists only on Linux: it's a helper used by
     # the SSH/CLI `onionpress setup` interactive path, which on Mac is
@@ -1108,41 +980,20 @@ class TestUninstallPathsKillTray(unittest.TestCase):
         )
 
 
-class TestStopContainersWritesStoppedStatus(unittest.TestCase):
-    """When the launcher stops containers, it must write a final
-    status.json with state="stopped" so the tray (which polls the file
-    every 2s) flips its icon to gray within one cycle. Without this,
-    the tray holds the previous "running" snapshot indefinitely.
+class TestStopContainersLeavesTheStatusToTheDaemon(unittest.TestCase):
+    """The daemon's next pass (within 10 s of a stop) writes the stopped
+    status the tray reads (issue #407); the launcher's stop_containers
+    writes nothing itself (until #407 it ran a one-shot write-status so
+    the tray flipped to gray within its 2 s poll)."""
 
-    The launcher's write_status() already maps an empty `docker compose ps`
-    to state="stopped" — stop_containers just has to call it.
-    """
-
-    def test_stop_containers_writes_status(self):
+    def test_stop_containers_writes_no_status(self):
         script = _read("linux/onionpress")
-        m = re.search(
-            r'stop_containers\(\)\s*\{(.*?)^\}', script,
-            re.DOTALL | re.MULTILINE)
+        m = re.search(r'stop_containers\(\)\s*\{(.*?)^\}', script, re.DOTALL | re.MULTILINE)
         self.assertIsNotNone(m, "stop_containers() must exist")
         body = m.group(1)
-        # write_status must be called after the compose down — order matters:
-        # the call needs to see the post-down `docker compose ps` (empty).
-        down = re.search(r'docker\s+compose\s+(?:"\$\{COMPOSE_WITH_CF\[@\]\}"\s+)?down', body)
-        ws = re.search(r'\bwrite_status\b', body)
-        self.assertIsNotNone(down, "stop_containers must run `docker compose down`")
-        self.assertIsNotNone(
-            ws,
-            "stop_containers must call write_status so the tray flips its "
-            "icon to gray. Linux tray is a separate process from the "
-            "launcher (file-based IPC via status.json); without this, the "
-            "icon stays purple/yellow indefinitely after the service stops.",
-        )
-        self.assertLess(
-            down.start(), ws.start(),
-            "write_status must come AFTER `docker compose down` — write_status "
-            "calls `docker compose ps` to derive state; calling it before "
-            "down would still report the running containers.",
-        )
+        self.assertIsNotNone(re.search(r'docker\s+compose\s+(?:"\$\{COMPOSE_WITH_CF\[@\]\}"\s+)?down', body))
+        self.assertNotIn("write_status", body)
+        self.assertNotIn("write-status", script)
 
 
 class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
@@ -1267,16 +1118,20 @@ class TestPortOffsetSticky(unittest.TestCase):
             "so the next start can wait for the prior ports to free.",
         )
 
-    def test_linux_reads_previous_offset_on_start(self):
-        src = _read("linux/onionpress")
-        # Detection block must read the sentinel and wait for the
-        # desired port to come back.
-        self.assertRegex(
-            src, r'_prev_sentinel.*\.previous-port-offset',
-            "linux/onionpress port-offset detection must read "
-            "$DATA_DIR/.previous-port-offset at startup so a quick "
-            "restart reuses the same offset instead of bumping.",
-        )
+    def test_the_start_waits_for_the_previous_offset_in_python(self):
+        # Issue #405: the wait is ports.wait_for_previous_port, run by
+        # ports.resolve_at_start, which both launchers' main() reach
+        # through `onionpress launcher-env` (and the daemon directly); no
+        # bash reads the sentinel any more.
+        from onionpress import ports
+        self.assertEqual(ports.PREVIOUS_OFFSET_SENTINEL, ".previous-port-offset")
+        self.assertIn("wait_for_previous_port(data_dir, log=log, sleep=sleep)",
+                      inspect.getsource(ports.resolve_at_start))
+        for launcher in ("linux/onionpress", "app/MacOS/onionpress"):
+            src = _read(launcher)
+            self.assertNotIn("_prev_sentinel", src)
+            self.assertIn(" launcher-env 2>>\"$LOG_FILE\")", src)
+            self.assertRegex(src, r"(?m)^main\(\) \{\n    launcher_environment\n")
 
 
 class TestScrubBashDelegatesToPython(unittest.TestCase):
@@ -1298,7 +1153,7 @@ class TestScrubBashDelegatesToPython(unittest.TestCase):
         body = m.group(1)
         # Must invoke the Python CLI's scrub subcommand.
         self.assertRegex(
-            body, r'op_py\s+scrub',
+            body, r'op_py( --data-dir "\$DATA_DIR")?\s+scrub',
             "scrub) must delegate to `op_py scrub` — the phase orchestration "
             "+ verify checks live in src/onionpress/scrub.py now.",
         )
@@ -1389,25 +1244,18 @@ class TestKeyVolumeMigration(unittest.TestCase):
         end = text.index("\n}\n", start)
         return text[start:end]
 
-    def test_launchers_delegate_the_migration(self):
-        """Phase 4 (#120): the migration is ContainerManager.migrate_key_volume
-        (`onionpress migrate-key-volume`; TestKeyVolumeMigrationInPython);
-        each launcher's function is the delegation, its log lines through
-        tee as log's are, and the Python's exit status handed through
-        (PIPESTATUS, not tee's): the callers' `if ! migrate_key_volume`
-        must still stop the start."""
-        for f, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
-                          ("linux/onionpress", "op_py")):
+    def test_no_launcher_carries_the_migration(self):
+        """The migration is ContainerManager.migrate_key_volume, run by the
+        start (`start.start_containers`; TestKeyVolumeMigrationInPython,
+        tests/test_start_sequence.py) and by `onionpress migrate-key-volume`.
+        The launchers' bash delegations had no caller left once the start
+        moved to Python (#442) and were removed: no launcher may define one
+        again, nor `docker_volume_state`, the bash check it ran on."""
+        for f in self.LAUNCHERS:
+            text = _read(f)
             with self.subTest(launcher=f):
-                body = self._function_body(_read(f), "migrate_key_volume")
-                code = [l.strip() for l in body.splitlines()
-                        if l.strip() and not l.strip().startswith("#")]
-                self.assertEqual(code, [
-                    "migrate_key_volume() {",
-                    f'{runner} --data-dir "$DATA_DIR" migrate-key-volume 2>&1 | tee -a "$LOG_FILE"',
-                    'return "${PIPESTATUS[0]}"'])
-                # Nothing of the copy stays in bash.
-                self.assertNotIn("docker", body)
+                for name in ("migrate_key_volume", "docker_volume_state"):
+                    self.assertNotIn(f"\n{name}() {{", text)
 
     def test_migration_runs_before_first_run_detection(self):
         for f in self.LAUNCHERS:
@@ -1433,8 +1281,7 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     )
 
     def test_launchers_carry_the_same_docker_helpers(self):
-        for name in ("docker_volume_state", "wait_for_docker",
-                     "ensure_key_helper_image"):
+        for name in ("wait_for_docker",):
             bodies = [self._function_body(_read(f), name) for f in self.LAUNCHERS]
             with self.subTest(function=name):
                 self.assertEqual(
@@ -1542,12 +1389,19 @@ class TestKeyVolumeMigration(unittest.TestCase):
     def test_wipes_remove_both_names(self):
         """A replaced identity (key import, restore) must delete the old-name
         volume too, or the next start would migrate it back over the new key.
+        Every wipe is Python's now: the launchers name neither volume.
         """
-        for f in self.LAUNCHERS + ["src/onionpress/cli.py", "src/onionpress/backup.py"]:
+        for f in ["src/onionpress/cli.py", "src/onionpress/backup.py"]:
             text = _read(f)
             with self.subTest(file=f):
                 self.assertIn("onionpress-onion-keys", text)
                 self.assertIn("onionpress-arti-state", text)
+        for f in self.LAUNCHERS:
+            text = _read(f)
+            with self.subTest(file=f):
+                self.assertNotIn("onionpress-arti-state", text,
+                                 "a key volume wipe in bash is a second copy "
+                                 "of the Python's wipe lists")
 
     def test_compose_mounts_the_new_volume(self):
         compose = "\n".join(
@@ -1938,13 +1792,19 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
             self.assertIn(f'"{name}"', start, name)
 
     def test_wait_for_services_reports_without_failing_the_start(self):
-        # Linux already returns 0 here; under set -e a return 1 ended
-        # `onionpress start` before the summary and the running lines.
+        # Under set -e a return 1 ended `onionpress start` before the
+        # summary and the running lines; the wait is Python's now (#529,
+        # start.wait_for_services, always 0, the WARNING its report) and
+        # each bash delegation ends in `return 0`.
+        from onionpress import start
+        import inspect
+        src = inspect.getsource(start.wait_for_services)
+        self.assertIn("WARNING: Services not fully ready", src)
+        self.assertNotIn("return 1", src)
         for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
             body = TestKeyVolumeMigration._function_body(_read(launcher), "wait_for_services")
             with self.subTest(launcher=launcher):
-                self.assertNotRegex(body, r"\n\s+return 1\s*$")
-                self.assertIn("WARNING: Services not fully ready", body)
+                self.assertTrue(body.rstrip().endswith("return 0"))
 
     def test_menubar_reads_the_launchers_exit_status(self):
         text = _read(self.MENUBAR)
@@ -1968,9 +1828,9 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
     """
 
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
-    FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
+    FUNCTIONS = ("wait_for_docker",
                  "config_value",
-                 "using_local_images", "ensure_key_helper_image",
+                 "using_local_images",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
     # Without a limactl on PATH they report the VM as not Running, so the
@@ -2069,59 +1929,6 @@ exit 0
                         state["log"] = f.read()
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout, docker_calls, marker_left
-
-    def _state_of(self, launcher, name, **kw):
-        out, _, _ = self._run(
-            launcher, f"s=0; docker_volume_state {name} || s=$?; echo $s", **kw)
-        return int(out.strip())
-
-    def test_volume_state_tells_absent_from_unanswered(self):
-        for f in self.LAUNCHERS:
-            with self.subTest(launcher=f):
-                up = {"volumes": "onionpress-arti-state onionpress-onion-keys-old"}
-                self.assertEqual(self._state_of(f, "onionpress-arti-state", **up), 0)
-                self.assertEqual(self._state_of(f, "onionpress-onion-keys", **up), 1,
-                                 "only an exact name may match")
-                self.assertEqual(self._state_of(f, "onionpress-onion-keys", mode="down"), 2)
-
-    def test_migration_refuses_when_docker_does_not_answer(self):
-        """End to end through the delegation (Phase 4, #120): the Python's
-        exit status is the bash function's, and its lines reach the log."""
-        for f in self.LAUNCHERS:
-            with self.subTest(launcher=f):
-                state = {}
-                out, calls, _ = self._run(
-                    f, "rc=0; migrate_key_volume || rc=$?; echo $rc", mode="down",
-                    state=state)
-                # The tee'd lines come first (the launcher's log() tees too).
-                self.assertEqual(out.strip().splitlines()[-1], "1")
-                self.assertIn("ERROR: Docker did not say", out)
-                self.assertFalse([c for c in calls if not c.startswith("volume ls")],
-                                 f"nothing but the question may run: {calls}")
-                self.assertIn("ERROR: Docker did not say whether onionpress-onion-keys exists",
-                              state["log"])
-
-    def test_migration_copies_only_when_just_the_old_volume_exists(self):
-        cases = {
-            "onionpress-arti-state": True,                          # upgrade
-            "onionpress-onion-keys onionpress-arti-state": False,   # already migrated
-            "": False,                                              # fresh install
-        }
-        for f in self.LAUNCHERS:
-            for volumes, copies in cases.items():
-                with self.subTest(launcher=f, volumes=volumes):
-                    state = {}
-                    out, calls, _ = self._run(
-                        f, "rc=0; migrate_key_volume || rc=$?; echo $rc",
-                        volumes=volumes, state=state)
-                    self.assertEqual(out.strip().splitlines()[-1], "0")
-                    self.assertEqual(
-                        "volume create onionpress-onion-keys" in calls, copies, calls)
-                    self.assertEqual("Key volume migrated" in state["log"], copies)
-                    for c in calls:
-                        self.assertNotRegex(c, r"^volume rm .*onionpress-arti-state",
-                                            "the migration never removes the old volume")
-                    self.assertFalse(state["migration_marker"])
 
     def test_start_stops_before_any_volume_check_when_docker_never_answers(self):
         for f in self.LAUNCHERS:
@@ -2462,7 +2269,7 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         so the gate and the sweep cannot disagree about a marker; no
         launcher keeps a bash copy."""
         text = _read("src/onionpress/start.py")
-        self.assertIn("derivatives.regeneration_pending(paths.data_dir, docker.docker_bin)", text)
+        self.assertIn("derivatives.regeneration_pending(paths.data_dir, docker)", text)
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
                 self.assertNotIn("\nregenerate_derivatives_pending() {", _read(f))
@@ -2479,35 +2286,25 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
                         "[ \"$1 $2 $3 $4\" = \"exec onionpress-wordpress test -f\" ] "
                         "&& [ -e \"$0.marker\" ]\n")
             os.chmod(stub, 0o755)
-            self.assertFalse(derivatives.regeneration_pending(tmp, stub))
+            from fake_docker import over_binary
+            docker = over_binary(stub)
+            self.assertFalse(derivatives.regeneration_pending(tmp, docker))
             open(stub + ".marker", "w").close()
-            self.assertTrue(derivatives.regeneration_pending(tmp, stub))
+            self.assertTrue(derivatives.regeneration_pending(tmp, docker))
             with open(stub + ".calls") as f:
                 self.assertEqual(set(f.read().splitlines()),
                                  {f"exec onionpress-wordpress test -f {self.CONTAINER_MARKER}"})
             os.remove(stub + ".calls")
             open(os.path.join(tmp, self.HOST_MARKER), "w").close()
-            self.assertTrue(derivatives.regeneration_pending(tmp, stub))
+            self.assertTrue(derivatives.regeneration_pending(tmp, docker))
             self.assertFalse(os.path.exists(stub + ".calls"), "the host marker needs no docker")
             self.assertFalse(derivatives.regeneration_pending(
-                os.path.join(tmp, "elsewhere"), os.path.join(tmp, "no-such-docker")))
+                os.path.join(tmp, "elsewhere"), over_binary(os.path.join(tmp, "no-such-docker"))))
 
     def test_python_marker_paths_are_the_documented_ones(self):
         from onionpress import derivatives
         self.assertEqual(derivatives.HOST_MARKER, self.HOST_MARKER)
         self.assertEqual(derivatives.CONTAINER_MARKER, self.CONTAINER_MARKER)
-
-    def test_linux_bash_backup_and_restore_carry_the_feature(self):
-        """linux/onionpress still has its own inline create_backup and
-        restore_backup (issue #203); they must prune via the shared Python
-        classification and leave the marker like the Python paths do."""
-        text = _read("linux/onionpress")
-        create = self._function_body(text, "create_backup")
-        self.assertIn("prune-image-derivatives", create)
-        self.assertIn("uploads/.onionpress-regenerate-derivatives", create)
-        self.assertIn("--excludes-image-derivatives", create)
-        restore = self._function_body(text, "restore_backup")
-        self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', restore)
 
     def test_fallback_mu_plugin_is_shipped(self):
         from onionpress import multisite
@@ -2646,8 +2443,10 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
         self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
 
     def test_both_launchers_list_get_in_usage(self):
-        self.assertRegex(_read("app/MacOS/onionpress"), r"(?m)^  get\s+Fetch a URL over Tor")
-        self.assertIn("|get|", _read("linux/onionpress"))
+        # The help is one text for both platforms (cli.launcher_help, #529).
+        from onionpress import cli
+        for os_name in ("macos", "linux"):
+            self.assertRegex(cli.launcher_help(os_name), r"(?m)^  get\s+Fetch a URL over Tor")
 
 
 class TestMigrationScriptLocally(unittest.TestCase):

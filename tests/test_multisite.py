@@ -9,14 +9,19 @@ orchestration glue: right wp-cli calls in the right order, right
 docker cp invocations, right error handling.
 """
 
+import os
 import pathlib
 import re
 import subprocess
+import sys
 import unittest
 from unittest import mock
 from urllib.parse import quote_plus
 
-from onionpress import multisite
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from onionpress import multisite  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 from onionpress.onionnames_client import _NAME_ALLOWED_RE
 
 
@@ -53,7 +58,7 @@ class TestProvisionPostInstallOrdering(unittest.TestCase):
              mock.patch.object(multisite, "fix_wordpress_uploads_permissions", fake("fix_wordpress_uploads_permissions")), \
              mock.patch.object(multisite, "write_shared_onion_address", fake("write_shared_onion_address")):
             multisite.provision_post_install(
-                themes_dir="/x/themes", plugins_dir="/x/plugins")
+                themes_dir="/x/themes", plugins_dir="/x/plugins", docker=FakeDocker())
 
         # ensure_multisite comes BEFORE install_multisite_domain_map —
         # the entire reason this module exists.
@@ -78,14 +83,14 @@ class TestEnsureMultisite(unittest.TestCase):
     def test_skips_when_wp_not_installed(self):
         logs = []
         with mock.patch.object(multisite, "wp_is_installed", return_value=False):
-            multisite.ensure_multisite(log_func=logs.append)
+            multisite.ensure_multisite(docker=FakeDocker(), log_func=logs.append)
         self.assertTrue(any("not installed" in s for s in logs))
 
     def test_skips_when_already_multisite(self):
         logs = []
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_wp", return_value=_ok()) as wp:
-            multisite.ensure_multisite(log_func=logs.append)
+            multisite.ensure_multisite(docker=FakeDocker(), log_func=logs.append)
         # The is-installed --network check returned 0, so we skipped convert.
         # Only the `core is-installed --network` call should have happened.
         self.assertTrue(any("already active" in s for s in logs))
@@ -106,7 +111,7 @@ class TestEnsureMultisite(unittest.TestCase):
 
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_wp", side_effect=fake_wp):
-            multisite.ensure_multisite(log_func=lambda _msg: None)
+            multisite.ensure_multisite(docker=FakeDocker(), log_func=lambda _msg: None)
 
         # multisite-convert must have been called.
         self.assertTrue(any("multisite-convert" in a for a in calls),
@@ -125,7 +130,7 @@ class TestInstallOnionpressTheme(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=False), \
              mock.patch.object(multisite, "_put_tree") as put:
             multisite.install_onionpress_theme(
-                themes_dir="/x", plugins_dir="/y",
+                themes_dir="/x", plugins_dir="/y", docker=FakeDocker(),
                 log_func=lambda _: None)
         put.assert_not_called()
 
@@ -153,7 +158,7 @@ class TestInstallOnionpressTheme(unittest.TestCase):
              mock.patch.object(multisite, "_wp", return_value=_ok()), \
              mock.patch("os.path.isdir", return_value=True):
             multisite.install_onionpress_theme(
-                themes_dir="/x/themes", plugins_dir="/x/plugins",
+                themes_dir="/x/themes", plugins_dir="/x/plugins", docker=FakeDocker(),
                 log_func=lambda _: None)
 
         self.assertEqual(put_calls, [
@@ -185,7 +190,7 @@ class TestInstallOnionpressTheme(unittest.TestCase):
              mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
              mock.patch("os.path.isdir", return_value=True):
             multisite.install_onionpress_theme(
-                themes_dir="/x", plugins_dir="/y",
+                themes_dir="/x", plugins_dir="/y", docker=FakeDocker(),
                 log_func=lambda _: None)
 
         activate_calls = [a for a in wp_calls
@@ -260,7 +265,7 @@ class TestConfigureIaPlugin(unittest.TestCase):
     def test_skips_when_wp_not_installed(self):
         with mock.patch.object(multisite, "wp_is_installed", return_value=False), \
              mock.patch.object(multisite, "_wp") as wp:
-            multisite.configure_ia_plugin(log_func=lambda _: None)
+            multisite.configure_ia_plugin(docker=FakeDocker(), log_func=lambda _: None)
         wp.assert_not_called()
 
     def test_skips_when_already_configured(self):
@@ -284,7 +289,7 @@ class TestConfigureIaPlugin(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_www_data", return_value=_ok()), \
              mock.patch.object(multisite, "_wp", side_effect=tracker):
-            self.assertTrue(multisite.configure_ia_plugin(log_func=lambda _: None))
+            self.assertTrue(multisite.configure_ia_plugin(docker=FakeDocker(), log_func=lambda _: None))
         self.assertEqual(
             update_calls, [],
             "must NOT re-write IA plugin options when already configured",
@@ -301,7 +306,7 @@ class TestDeactivateWpStatistics(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_sh", return_value=_err()), \
              mock.patch.object(multisite, "_wp", side_effect=tracker):
-            multisite.deactivate_wp_statistics(log_func=lambda _: None)
+            multisite.deactivate_wp_statistics(docker=FakeDocker(), log_func=lambda _: None)
         self.assertEqual(
             wp_calls, [],
             "must not deactivate/delete a plugin that isn't installed",
@@ -315,7 +320,7 @@ class TestDeactivateWpStatistics(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_sh", return_value=_ok()), \
              mock.patch.object(multisite, "_wp", side_effect=tracker):
-            multisite.deactivate_wp_statistics(log_func=lambda _: None)
+            multisite.deactivate_wp_statistics(docker=FakeDocker(), log_func=lambda _: None)
         # Must have deactivated AND deleted the plugin.
         deactivates = [a for a in wp_calls
                        if "deactivate" in a and "wp-statistics" in a]
@@ -335,9 +340,26 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
              mock.patch("subprocess.run") as srun:
-            multisite.ensure_archive_s3_keys(log_func=lambda _: None)
+            multisite.ensure_archive_s3_keys(docker=FakeDocker(srun), log_func=lambda _: None)
         # Must NOT have hit archive.org if keys were already set.
         srun.assert_not_called()
+
+    def test_save_writes_both_keys_on_stdin_and_says_whether_it_did(self):
+        """save_archive_s3_keys: the page's login (handle_action's
+        archive-login, issue #528) and the reconcile save the same way."""
+        for rc, want in ((0, True), (1, False)):
+            calls = []
+
+            def fake_wp(*args, **kwargs):
+                calls.append((args, kwargs.get("input")))
+                return subprocess.CompletedProcess(args=[], returncode=rc, stdout="", stderr="")
+
+            with self.subTest(rc=rc), mock.patch.object(multisite, "_wp", side_effect=fake_wp):
+                self.assertIs(multisite.save_archive_s3_keys(
+                    {"access": "AK", "secret": "SK"}, docker=None), want)
+                self.assertEqual(calls, [
+                    (("option", "update", "onionpress_archive_s3_access"), "AK"),
+                    (("option", "update", "onionpress_archive_s3_secret"), "SK")])
 
     def test_writes_keys_on_successful_login(self):
         wp_updates = []
@@ -353,7 +375,8 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
              mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
              mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
                  args=[], returncode=0, stdout=login_response, stderr="")) as srun:
-            result = multisite.ensure_archive_s3_keys(log_func=lambda _: None)
+            result = multisite.ensure_archive_s3_keys(docker=FakeDocker(srun),
+                                                     log_func=lambda _: None)
         self.assertTrue(result)
         # The keys reach `wp option update` on stdin, not in argv.
         access = [a for a, i in wp_updates
@@ -380,17 +403,16 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_wp", return_value=_ok()), \
              mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
-                 ["docker", "exec", "-i", "onionheaven", "curl"], 75)):
-            result = multisite.ensure_archive_s3_keys(log_func=logs.append)
+                 ["docker", "exec", "-i", "onionheaven", "curl"], 75)) as srun:
+            result = multisite.ensure_archive_s3_keys(docker=FakeDocker(srun), log_func=logs.append)
         self.assertFalse(result)
         self.assertTrue(any("timed out" in s for s in logs), logs)
 
     def test_wp_helper_adds_dash_i_only_with_input(self):
-        with mock.patch.object(multisite.subprocess, "run",
-                               return_value=_ok()) as srun:
-            multisite._wp("option", "get", "x")
-            multisite._wp("option", "update", "x", input="v")
-        plain, piped = (c.args[0] for c in srun.call_args_list)
+        docker = FakeDocker()
+        multisite._wp("option", "get", "x", docker=docker)
+        multisite._wp("option", "update", "x", input="v", docker=docker)
+        plain, piped = docker.calls
         # As www-data, never root, and never --allow-root; and with no
         # outbound request from the WordPress it loads (issue #373).
         self.assertEqual(plain, ["docker", "exec", "-u", "www-data", "-e",
@@ -403,15 +425,15 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
                                      "-e", "ONIONPRESS_WP_OFFLINE=1",
                                      "onionpress-wordpress", "wp", "option",
                                      "update", "x"])
-        self.assertEqual(srun.call_args_list[1].kwargs["input"], "v")
+        self.assertEqual(docker.inputs[1], "v")
 
     def test_handles_tor_login_failure_gracefully(self):
         logs = []
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_wp", return_value=_ok()), \
              mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
-                 args=[], returncode=0, stdout="", stderr="")):
-            result = multisite.ensure_archive_s3_keys(log_func=logs.append)
+                 args=[], returncode=0, stdout="", stderr="")) as srun:
+            result = multisite.ensure_archive_s3_keys(docker=FakeDocker(srun), log_func=logs.append)
         self.assertFalse(result)
         self.assertTrue(any("Could not reach archive.org" in s for s in logs))
 

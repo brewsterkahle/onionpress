@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
-    derivatives, docker_versions, handle_action, launcher_ops, linux_status, multisite, onionheaven,
-    redact, scrub, setup_logic, start, wordpress_egress,
+    derivatives, docker_versions, handle_action, key_import, launcher_ops, multisite, onionheaven,
+    ports, redact, scrub, secrets_file, setup_logic, start, status_writer, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -150,11 +150,18 @@ ROWS = [
     Row("check-docker", ["check-docker", "--json"], "docker_versions.check_command",
         mock.call(ANY, json_output=True, out=ANY), rc=1, returns=1, setup_cli=False),
     Row("open", ["open", "onion"], "app_commands.open_command",
-        mock.call("onion", ANY, ANY, out=ANY), rc=0, returns=0),
+        mock.call("onion", ANY, ANY, json_output=False, out=ANY), rc=0, returns=0),
+    Row("open", ["open", "onion", "--json"], "app_commands.open_command",
+        mock.call("onion", ANY, ANY, json_output=True, out=ANY), rc=1, returns=1),
     Row("onionname show", ["onionname", "show", "--json"], "app_commands.onionname_show",
         mock.call(ANY, json_output=True, out=ANY), rc=0, returns=0),
+    Row("onionname set", ["onionname", "set", "new-name", "--rename-admin", "--json"],
+        "app_commands.onionname_set",
+        mock.call("new-name", ANY, ANY, "linux", ANY, json_output=True, out=ANY,
+                  rename_admin=True), rc=0, returns=0),
     Row("onionname set", ["onionname", "set", "my-name"], "app_commands.onionname_set",
-        mock.call("my-name", ANY, ANY, "linux", ANY, json_output=False, out=ANY),
+        mock.call("my-name", ANY, ANY, "linux", ANY, json_output=False, out=ANY,
+                  rename_admin=False),
         rc=2, returns=2,
         check=lambda t, m: cli._hub_context.assert_called_once()),
     Row("get", ["get", "-i", "--max-time", "5", f"http://{ONION}/x"],
@@ -181,12 +188,16 @@ ROWS = [
     Row("restore", ["restore", "/b.zip", "--check", "--json"], "CLI().cmd_restore_check",
         mock.call("pw", "/b.zip", "", frozenset({"reset"}), True),
         env={cli.BACKUP_PASSWORD_ENV: "pw", confirm.CONFIRMED_ENV: "reset"}),
+    # The platform and this install's launcher (#529: Linux's tail restarts
+    # the stack through it).
     Row("reset", ["reset", "--yes"], "CLI().cmd_reset",
-        mock.call(yes=True, check=False, json_output=False, confirmed=frozenset())),
+        mock.call(yes=True, check=False, json_output=False, confirmed=frozenset(),
+                  os_name="linux", launcher="/stub/launcher")),
     Row("reset", ["reset", "--check", "--json", "--confirmed", "reset",
                   "--confirmed", "hub-holds-key"], "CLI().cmd_reset",
         mock.call(yes=False, check=True, json_output=True,
-                  confirmed=frozenset({"reset", "hub-holds-key"}))),
+                  confirmed=frozenset({"reset", "hub-holds-key"}),
+                  os_name="macos", launcher="/stub/launcher"), os_name="macos"),
     Row("smoke-test-wayback", ["smoke-test-wayback"], "CLI().cmd_smoke_test_wayback", mock.call()),
     Row("check-for-update", ["check-for-update", "--json", "--current", "1.2.3"],
         "CLI().cmd_check_for_update", mock.call(json_output=True, current="1.2.3")),
@@ -196,26 +207,31 @@ ROWS = [
         "CLI().cmd_import_backup_artifacts", mock.call("/st")),
     Row("regenerate-derivatives", ["regenerate-derivatives"],
         "CLI().cmd_regenerate_derivatives", mock.call()),
-    Row("prune-image-derivatives", ["prune-image-derivatives", "--uploads-dir", "/st/uploads"],
-        "CLI().cmd_prune_image_derivatives", mock.call("/st/uploads")),
-    Row("pack-backup", ["pack-backup", "--staging", "/st", "--output", "/b.zip"],
-        "CLI().cmd_pack_backup", mock.call("/st", "/b.zip", "pw"), stdin="pw\n"),
-    Row("backup-metadata", ["backup-metadata", "--version", "1"],
-        "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
-        excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
-        with_host_secrets=True, secrets_left_out=[], excludes_onion_key=False),
-        rc=0, returns={"a": 1}),
-    Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
-        "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 
     # ---- the Mac bundle's own: no OnionPressCLI setup ----
     Row("update", ["update", "--check", "--yes", "--json"], "cli.cmd_update",
-        mock.call(ANY, ANY, check=True, yes=True, json_output=True), os_name="macos"),
+        mock.call(ANY, ANY, check=True, yes=True, json_output=True, version=None, pre=False,
+                  force=False, from_checkout=False, launcher=None), os_name="macos"),
+    # One updater on both platforms: Linux's launcher delegates to the same
+    # subcommand (with --launcher for its apt-get and checkout leaves).
+    Row("update", ["update", "--version", "2.6.0", "--pre", "--force", "--launcher", "/opt/l"],
+        "cli.cmd_update",
+        mock.call(ANY, ANY, check=False, yes=False, json_output=False, version="2.6.0",
+                  pre=True, force=True, from_checkout=False, launcher="/opt/l")),
+    Row("update", ["update", "--from-checkout"], "cli.cmd_update",
+        mock.call(ANY, ANY, check=False, yes=False, json_output=False, version=None,
+                  pre=False, force=False, from_checkout=True, launcher=None)),
     Row("uninstall", ["uninstall", "--check", "--json", "--confirmed", "uninstall"],
         "cli.cmd_uninstall",
         mock.call(ANY, ANY, ANY, "/stub/launcher", check=True, json_output=True,
-                  confirmed=frozenset({"uninstall"})),
+                  confirmed=frozenset({"uninstall"}), os_name="macos"),
         os_name="macos", check=positional_launcher),
+    # #529: Linux's uninstall is the CLI's too (onionpress.uninstall's
+    # Linux branch; the launcher's -y confirms through the environment).
+    Row("uninstall", ["uninstall"], "cli.cmd_uninstall",
+        mock.call(ANY, ANY, ANY, "/stub/launcher", check=False, json_output=False,
+                  confirmed=frozenset({"hub-holds-key", "uninstall"}), os_name="linux"),
+        env={confirm.CONFIRMED_ENV: "hub-holds-key uninstall"}),
 
     # ---- the Settings page's requests (issue #366) ----
     Row("handle-action", ["handle-action", "--json", "--confirmed", "address-change"],
@@ -271,6 +287,20 @@ ROWS = [
         mock.call("disable", ANY, json_output=True)),
     Row("onionheaven", ["onionheaven", "overview", "--json"], "onionheaven.run_onionheaven_command",
         mock.call("overview", ANY, json_output=True)),
+    Row("import-key", ["import-key", "--check", "--json", "--confirmed", "address-change", "-"],
+        "key_import.run", mock.call(ANY, paths=ANY, docker=ANY, containers=ANY, log=ANY,
+                                    release=ANY, linux=True),
+        setup_cli=False,
+        check=lambda t, m: (
+            t.assertEqual(m.call_args.args[0].key, "-"),
+            t.assertTrue(m.call_args.args[0].check),
+            t.assertTrue(m.call_args.args[0].json),
+            t.assertEqual(confirm.given(m.call_args.args[0]), frozenset({"address-change"})))),
+    Row("import-key", ["import-key", "--file", "/k/hs_ed25519_secret_key"],
+        "key_import.run", mock.call(ANY, paths=ANY, docker=ANY, containers=ANY, log=ANY,
+                                    release=ANY, linux=False),
+        os_name="macos", setup_cli=False,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].file, "/k/hs_ed25519_secret_key")),
     Row("onionheaven-unregister", ["onionheaven-unregister", "--reason", "reset",
                                    "--keep-address", ONION], "cli.release_onionheaven",
         mock.call("reset", keep_address=ONION, data_dir=D("")), rc=0, returns=[]),
@@ -292,34 +322,12 @@ ROWS = [
         "CLI.cmd_hub_recovery_key_check", mock.call(D(""), "hubkey"),
         env={cli.RECOVERY_KEY_ENV: "hubkey"}),
     Row("hub-recovery-key restore", ["hub-recovery-key", "restore", "/b.zip"],
-        "CLI.cmd_hub_recovery_key_restore", mock.call("/b.zip", "pw", "hubkey"),
+        "CLI.cmd_hub_recovery_key_restore", mock.call("/b.zip", "pw", "hubkey", docker=ANY),
         env={cli.RECOVERY_KEY_ENV: "hubkey", cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- the launchers' backup and restore helpers ----
-    Row("backup-address", ["backup-address", "--staging", "/st"],
-        "CLI.cmd_backup_address", mock.call("/st")),
-    Row("restore-config", ["restore-config", "--staging", "/st", "--config", "/c", "--address", ONION],
-        "CLI.cmd_restore_config", mock.call("/st", "/c", ONION)),
-    Row("scrub-staging", ["scrub-staging", "--dir", "/st/wp-content"],
-        "CLI.cmd_scrub_staging", mock.call("/st/wp-content")),
-    Row("stage-wp-content", ["stage-wp-content", "--dest", "/st/wp-content"],
-        "CLI.cmd_stage_wp_content", mock.call("/st/wp-content")),
-    Row("stage-hub-data", ["stage-hub-data", "--dest", "/st/onionheaven"],
-        "CLI.cmd_stage_hub_data", mock.call("/st/onionheaven")),
-    Row("settings-page-restore-check", ["settings-page-restore-check", "--staging", "/st"],
-        "CLI.cmd_settings_page_restore_check", mock.call("/st")),
-    Row("wordpress-safe-config", ["wordpress-safe-config", "--config", "/c", "--dest", "/d"],
-        "CLI.cmd_wordpress_safe_config", mock.call("/c", "/d")),
-    Row("restore-hub-data", ["restore-hub-data", "--src", "/st/onionheaven"],
-        "CLI.cmd_restore_hub_data", mock.call("/st/onionheaven")),
-    Row("stage-hub-backup", ["stage-hub-backup", "--staging", "/st"],
-        "CLI.cmd_stage_hub_backup", mock.call("/st", D(""))),
-    Row("settings-page-backup-check", ["settings-page-backup-check", "--address", ONION],
-        "CLI.cmd_settings_page_backup_check", mock.call(ONION, D(""))),
-    Row("settings-page-restore-node-check", ["settings-page-restore-node-check"],
-        "CLI.cmd_settings_page_restore_node_check", mock.call("", D(""))),
     Row("put-wp-tree", ["put-wp-tree", "--src", "/s", "--dest", "/var/www/html/x", "--merge"],
-        "CLI.cmd_put_wp_tree", mock.call("/s", "/var/www/html/x", True)),
+        "CLI.cmd_put_wp_tree", mock.call("/s", "/var/www/html/x", True, docker=ANY)),
 
     # ---- the launchers' read-only helpers ----
     Row("safe-config", ["safe-config"], "config.redact_config",
@@ -328,8 +336,6 @@ ROWS = [
         "redact.wordpress_log_excerpt", mock.call("/l.log", D("")), rc=0, returns="tail\n"),
     Row("wordpress-status", ["wordpress-status"], "redact.status_for_wordpress",
         mock.call({"a": 1}), rc=0, returns={"a": 1}, stdin='{"a": 1}'),
-    Row("linux-status", ["linux-status", "--field", "state=running"],
-        "linux_status.build", mock.call(ANY), rc=0, returns={"state": "running"}),
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
         returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"],
@@ -376,7 +382,8 @@ ROWS = [
         "setup_logic.setup_from_terminal",
         mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
                   user="alice", title="T", from_backup="", ia_account="", log=ANY,
-                  restore=ANY),
+                  restore=ANY, language="en_US", paths=ANY, interactive=True,
+                  register_later=False, report={}, say=print),
         rc=0, returns=0, setup_cli=False,
         check=lambda t, m: t.assertEqual(
             (m.call_args.kwargs["user"], m.call_args.kwargs["title"],
@@ -384,8 +391,28 @@ ROWS = [
     Row("setup", ["setup", "--from-backup", "/b.zip"], "setup_logic.setup_from_terminal",
         mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
                   user="", title="", from_backup="/b.zip", ia_account="", log=ANY,
-                  restore=ANY),
+                  restore=ANY, language="en_US", paths=ANY, interactive=True,
+                  register_later=False, report={}, say=print),
         rc=10, returns=10, setup_cli=False),
+    # #527: the UIs' setup, nothing asked, the answer one JSON object.
+    Row("setup", ["setup", "--user", "alice", "--title", "T", "--language", "fr_FR",
+                  "--register-later", "--json"],
+        "setup_logic.setup_from_terminal",
+        mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
+                  user="alice", title="T", from_backup="", ia_account="", log=ANY,
+                  restore=ANY, language="fr_FR", paths=ANY, interactive=False,
+                  register_later=True, report=ANY, say=ANY),
+        rc=1, returns=1, setup_cli=False),
+    Row("provision", ["provision"], "setup_logic.provision_interactive",
+        mock.call(ANY, docker=ANY, adopt_existing=False, os_name="linux"),
+        rc=0, returns=True, setup_cli=False),
+    Row("provision", ["provision", "--user", "alice", "--title", "T", "--adopt-existing",
+                      "--json"],
+        "setup_logic.provision_from_flags",
+        mock.call(data_dir=ANY, docker=ANY, os_name="linux", user="alice", title="T",
+                  language="en_US", adopt_existing=True, register_later=False, log=ANY,
+                  paths=ANY, report=ANY, say=ANY),
+        rc=1, returns=False, setup_cli=False),
     # #442.8: the launchers' start_containers() is start.start_containers
     # (Linux --until-core); exit 1 stops the start, 0 / 3 say whether
     # WordPress is installed.
@@ -430,9 +457,6 @@ ROWS = [
     # what restore_container_artifacts runs; the password is stdin's first
     # line, never argv. A failure raises there and is exit 1 here
     # (tests/test_db_import_sandbox.py).
-    Row("db-import", ["db-import", "--sql-file", "/st/database/wordpress.sql"],
-        "backup.db_import", mock.call("/st/database/wordpress.sql", "pw"), rc=0,
-        returns=None, stdin="pw\n"),
     # Phase 4 (#120): the launchers' regenerate_derivatives_pending() is this.
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
@@ -461,6 +485,17 @@ ROWS = [
         mock.call(D("config")), rc=1, returns=False),
     # Phase 4 (#120): the launchers' block_wordpress_egress() is this (the
     # verdict logged in their format; --check prints the bare line).
+    # #529: the launchers' wait_for_services() is start.wait_for_services
+    # on a start step's manager (no probe); always 0.
+    Row("wait-for-services", ["wait-for-services", "--wp-port", "18080", "--docker-dir", "/d",
+                              "--errors-file", "/e"],
+        "start.wait_for_services", mock.call(ANY, wp_port=18080, errors=ANY, log=ANY), rc=0,
+        returns=0, check=lambda t, m: (
+            t.assertEqual(m.call_args.args[0].paths.docker_dir, "/d"),
+            t.assertEqual(m.call_args.kwargs["errors"].path, "/e"))),
+    Row("wait-for-services", ["wait-for-services"], "start.wait_for_services",
+        mock.call(ANY, wp_port=28080, errors=None, log=ANY), rc=0,
+        returns=0, env={"ONIONPRESS_WP_PORT": "28080"}),
     Row("wordpress-egress", ["wordpress-egress", "--check", "--wp-port", "8080", "--bin-dir", "/b"],
         "wordpress_egress.ensure", mock.call(ANY, ANY, action="check", wp_port=8080),
         rc=0, returns=mock.Mock(ok=True, line=lambda: "ok"),
@@ -468,34 +503,80 @@ ROWS = [
     Row("wordpress-egress", ["wordpress-egress"], "wordpress_egress.ensure",
         mock.call(ANY, ANY, action="apply", wp_port=9090), rc=1,
         returns=mock.Mock(ok=False, line=lambda: "failed"), env={"ONIONPRESS_WP_PORT": "9090"}),
+    # The launchers' top level (#405): ports.resolve_at_start with the
+    # environment's preset, no OnionPressCLI; the answer is KEY=VALUE lines
+    # (tests/test_launcher_env.py has the lines and the failure).
+    Row("launcher-help", ["launcher-help"], "cli.launcher_help", mock.call("linux"), rc=0,
+        returns="text"),
+    Row("launcher-help", ["launcher-help"], "cli.launcher_help", mock.call("macos"), rc=0,
+        returns="text", os_name="macos"),
+    Row("launcher-env", ["launcher-env"], "ports.resolve_at_start",
+        mock.call(D(""), preset="10000", docker=ANY, log=ANY), rc=0,
+        returns=ports.PortConfig.from_offset(10000), env={"ONIONPRESS_PORT_OFFSET": "10000"}),
+    # #529: the launchers' _validate_oh_address() is onionheaven's; the
+    # JSON is the answer, exit 1 for a refused address.
+    Row("validate-oh-address", ["validate-oh-address", ONION], "onionheaven.validate_hub_address",
+        mock.call(ONION, ANY, D("")), rc=0,
+        returns={"valid": True, "status": "hub", "message": "Valid OnionHeaven hub."}),
+    Row("validate-oh-address", ["validate-oh-address", "x"], "onionheaven.validate_hub_address",
+        mock.call("x", ANY, D("")), rc=1,
+        returns={"valid": False, "status": "invalid_format", "message": "no"}),
     Row("open-login", ["open-login", "http://localhost:8080/wp-admin/"], "launcher_ops.open_login",
-        mock.call("http://localhost:8080/wp-admin/"), rc=0, returns=None),
+        mock.call("http://localhost:8080/wp-admin/", docker=ANY), rc=0, returns=None),
     Row("verify-admin-password", ["verify-admin-password"], "backup.verify_wp_admin_password_any",
-        mock.call("pw"), rc=0, returns=(True, ""), stdin="pw\n", setup_cli=True),
+        mock.call("pw", docker=ANY), rc=0, returns=(True, ""), stdin="pw\n", setup_cli=True),
     Row("verify-admin-password", ["verify-admin-password"], "backup.verify_wp_admin_password_any",
-        mock.call("pw"), rc=1, returns=(False, "no"), stdin="pw\n", setup_cli=True),
+        mock.call("pw", docker=ANY), rc=1, returns=(False, "no"), stdin="pw\n", setup_cli=True),
 
     # ---- WordPress provisioning (multisite) and the lifecycle test ----
     Row("provision-post-install", ["provision-post-install", "--themes-dir", "/t", "--plugins-dir", "/p"],
         "multisite.provision_post_install",
-        mock.call(themes_dir="/t", plugins_dir="/p", log_func=print), setup_cli=True),
+        mock.call(themes_dir="/t", plugins_dir="/p", docker=ANY, log_func=print), setup_cli=True),
     Row("configure-ia-plugin", ["configure-ia-plugin"], "multisite.configure_ia_plugin",
-        mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=0, returns=True, setup_cli=True),
     Row("configure-cache-enabler", ["configure-cache-enabler"], "multisite.configure_cache_enabler",
-        mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=1, returns=False, setup_cli=True),
     Row("apply-cache-policy", ["apply-cache-policy"], "multisite.apply_cache_policy",
-        mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=0, returns=True, setup_cli=True),
     Row("deactivate-wp-statistics", ["deactivate-wp-statistics"], "multisite.deactivate_wp_statistics",
-        mock.call(log_func=print), rc=0, returns=True, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=0, returns=True, setup_cli=True),
     Row("ensure-archive-s3-keys", ["ensure-archive-s3-keys"], "multisite.ensure_archive_s3_keys",
-        mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
+        mock.call(docker=ANY, log_func=print), rc=1, returns=False, setup_cli=True),
+    # The platform picks the cycle (#529: the Mac's reset in place), the
+    # phases run this install's launcher.
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
-        mock.call(password=None, clean=True), setup_cli=True),
+        mock.call(password=None, clean=True, os_name="linux", launcher="/stub/launcher",
+                  data_dir=ANY, docker=ANY), setup_cli=True),
     # The password as backup's: from the environment (then gone from it);
     # one on argv is refused (test_scrub_refuses_a_password_on_argv, #504).
     Row("scrub", ["scrub"], "scrub.run_scrub",
-        mock.call(password="pw", clean=False), setup_cli=True,
+        mock.call(password="pw", clean=False, os_name="macos", launcher="/stub/launcher",
+                  data_dir=ANY, docker=ANY), setup_cli=True, os_name="macos",
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
+    # #529: the Mac launcher's start-tor case is ContainerManager's
+    # migration then start_tor, on a start step's manager.
+    Row("start-tor", ["start-tor", "--docker-dir", "/d", "--bin-dir", "/b"], "cli.ContainerManager",
+        mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": True,
+                             "start_tor.return_value": True}),
+        check=lambda t, m: (
+            m.return_value.migrate_key_volume.assert_called_once_with(),
+            m.return_value.start_tor.assert_called_once_with(),
+            t.assertEqual((m.call_args.args[1].docker_dir, m.call_args.args[1].bin_dir), ("/d", "/b")))),
+    Row("start-tor", ["start-tor"], "cli.ContainerManager",
+        mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": False}),
+        check=lambda t, m: m.return_value.start_tor.assert_not_called()),
+    Row("start-tor", ["start-tor"], "cli.ContainerManager",
+        mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": True,
+                             "start_tor.return_value": False})),
+    # #529: the launchers' setup_db_passwords() makes the file here and
+    # sources it in bash.
+    Row("ensure-secrets", ["ensure-secrets"], "secrets_file.ensure_secrets",
+        mock.call(D("secrets")), rc=0, returns=mock.Mock(wordpress_db_password="w", mysql_root_password="r")),
+    Row("ensure-secrets", ["ensure-secrets"], "secrets_file.ensure_secrets",
+        mock.call(D("secrets")), rc=1, returns=mock.Mock(wordpress_db_password="", mysql_root_password="r")),
 ]
 
 MODULES = {
@@ -505,7 +586,8 @@ MODULES = {
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
-    "start": start, "setup_logic": setup_logic, "linux_status": linux_status,
+    "start": start, "setup_logic": setup_logic, "status_writer": status_writer,
+    "key_import": key_import, "ports": ports, "secrets_file": secrets_file,
 }
 
 
@@ -546,7 +628,7 @@ class TestCensus(unittest.TestCase):
         with_check = {k for k, p in tree.items()
                       if any(a.dest == "check" for a in p._actions)
                       and any(a.dest == "confirmed" for a in p._actions)}
-        self.assertEqual(with_check, {("backup",), ("restore",), ("reset",), ("uninstall",),
+        self.assertEqual(with_check, {("backup",), ("restore",), ("reset",), ("uninstall",), ("import-key",),
                                       ("config", "set")})
         confirmed_only = {k for k, p in tree.items()
                           if any(a.dest == "confirmed" for a in p._actions)} - with_check
@@ -710,24 +792,17 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("usage: onionpress config", out)
 
-    def test_pack_extract_and_verify_need_a_password_on_stdin(self):
-        for argv in (["pack-backup", "--staging", "/st", "--output", "/b.zip"],
-                     ["extract-backup", "--archive", "/b.zip", "--dest", "/d"]):
-            with self.subTest(argv=argv):
-                rc, _, err = self._main(argv, stdin="\n")
-                self.assertEqual((rc, "no password on stdin" in err), (1, True))
+    def test_verify_needs_a_password_on_stdin(self):
         rc, _, _ = self._main(["verify-admin-password"], stdin="")
         self.assertEqual(rc, 1)
 
-    def test_the_mac_only_commands_elsewhere(self):
-        # `update` is the Linux launcher's own (the .deb's checked
-        # install), so the Python CLI has no Linux branch: help, exit 1.
-        rc, out, _ = self._main(["update"])
-        self.assertEqual(rc, 1)
-        self.assertIn("usage: onionpress", out)
+    def test_uninstall_runs_on_both_platforms(self):
+        # `update` runs on both platforms since 2.6.2 (its rows above) and
+        # `uninstall` since #529 (onionpress.uninstall's Linux branch): off
+        # a terminal without its confirmations it is refused, on either.
         rc, out, _ = self._main(["uninstall", "--json"])
-        self.assertEqual(rc, confirm.EXIT_FAILED)
-        self.assertIn("Linux launcher", json.loads(out.strip().splitlines()[-1])["error"])
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertIn("--confirmed", json.loads(out.strip().splitlines()[-1])["error"])
 
     def test_unregister_refuses_a_bad_keep_address(self):
         with mock.patch.object(cli, "release_onionheaven") as rel:

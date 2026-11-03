@@ -57,15 +57,35 @@
   section above GitHub's generated PR list and refuses a version without
   one; the tree's version must have one. `TestReleaseHistory` in
   `tests/test_release_sha256sums.py`.
-- `onionpress update` (Linux) installs only a release `.deb` matching its
-  `SHA256SUMS` line, of the tag's version, newer than installed; the
-  Settings page's update only checks (anything in WordPress can request
-  it). `tests/test_linux_release_update.py`.
+- **`onionpress update` is one updater on both platforms: `cli.cmd_update`
+  over `updater.py`** (`find_release`/`check_release`: the latest, or
+  `--version X.Y.Z`; `--pre` allows a pre-release; a draft, a tag that is
+  not `v` + a release version, or an answer for another tag is refused;
+  `version_newer` compares numbers, `--force` reinstalls or downgrades).
+  Both launchers' `update` cases delegate; the Linux launcher keeps only
+  the install leaves the Python calls back, `update-install-deb` and
+  `update-from-checkout`. No second lookup, comparator or `SHA256SUMS`
+  parser anywhere. `tests/test_linux_release_update.py`,
+  `tests/test_cli_dispatch.py`.
+- On Linux `updater.fetch_deb` installs only a release `.deb` matching
+  its `SHA256SUMS` line, the onionpress package of the tag's version,
+  newer than installed (`/opt/onionpress/VERSION`), downloaded from the
+  release's own URL into a 0700 folder; then `sudo apt-get install -y
+  --no-remove` in the leaf and `update_finish` (`pull --policy missing`).
+  Off a terminal it needs `--yes` (the launcher's `-y` filter passes it
+  on). `tests/test_linux_release_update.py`.
+- The Settings page's update only checks, on both platforms (anything in
+  WordPress can request it): `handle_action._update` runs `update --check
+  --json`, keeps the answer five minutes in `update-check.json` (GitHub
+  allows 60 lookups an hour) and writes `update-result.json` with
+  `installable` and how to install. `TestUpdate` in
+  `tests/test_handle_action.py`.
 - The Mac update mounts a DMG only if it matches the release's `SHA256SUMS`.
   `DmgChecksumTest` in `tests/test_updater_staged_swap.py`.
-- Update-check curl passes `--cacert /etc/ssl/cert.pem` only where it
-  exists; `--json` always exits 0 and reports `error`, which UIs show as
-  failure. `tests/test_update_check_ca_bundle.py`.
+- Every curl in `updater.py` is `_curl_argv` (`--fail`, HTTPS only,
+  `--cacert /etc/ssl/cert.pem` only where it exists); `--check --json`
+  always exits 0 and reports `error`, which UIs show as failure.
+  `tests/test_update_check_ca_bundle.py`.
 - **What goes into `/opt/onionpress` is one list: `linux/install-tree.sh`**
   (the .deb, `install.sh`, `update --from-checkout`). It refuses links and
   special files; `--from-checkout` takes only a clean, non-world-writable
@@ -144,12 +164,14 @@
 - **Linux's first run pulls the tor image before `generate-vanity`** (#519:
   the postinst's first start had pulled nothing, "no image" read as "no
   mkp224o", Tor minted a key that never reached the key volume as a PEM,
-  and every backup of that site was unrestorable). **A Linux backup holds
-  the PEM or says it has no key**: a C-Tor-only key is converted
-  (`key_manager.py ctor-to-arti`, the public key from `hostname` when tor
-  wrote none); no key at all is a WARNING and `excludes_onion_key` in
-  metadata (the restore then keeps the install's key, as for the Mac
-  page's backup), never an archive no restore accepts.
+  and every backup of that site was unrestorable). **A backup holds the
+  PEM or says it has no key** (`backup._stage_onion_key`, both platforms):
+  the key is read out of the tor container by `key_manager.extract_keys`
+  (the delivered PEM, else C Tor's files, the public key from `hostname`
+  when tor wrote none); no key readable is a WARNING and
+  `excludes_onion_key` + `onion_key_unreadable` in metadata (the restore
+  then keeps the install's key, as for the page's backup; `unchecked_notes`
+  says so with the finished backup), never an archive no restore accepts.
   `TestLinux` in `tests/test_first_run_key_seed.py`,
   `tests/test_linux_backup_key_pem.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
@@ -204,21 +226,24 @@
   only measure of reachability. `RepublishTrigger` (rate-based: ≥ 50 % of
   10 min failing; 5 min for `desc-missing`/`desc-stale`) asks the watchdog
   for DEL_ONION + ADD_ONION via `launcher_ops.request_watchdog_republish`.
-  Mac: the daemon's `check_status`; Linux: `onionpress-heartbeat.py`
-  (writes `reachability.json`, which `write_status` prefers).
+  **The daemon's `check_status` runs it on both platforms** (#407): one
+  `RecoveryWindow`, no `reachability.json`, no second driver.
+  `tests/test_linux_recovery_loop.py`, `tests/test_mac_daemon.py`.
 - Rate limits: 15 min host, 15 min watchdog, never within 5 min of an
-  upload. `REPUBLISH_ON_UNREACHABLE=no` makes it log-only. Both wake
-  handlers reset the window (test-enforced).
+  upload. `REPUBLISH_ON_UNREACHABLE=no` makes it log-only. The one wake
+  handler, `Daemon.handle_wake`, resets the window (test-enforced), run
+  by IOKit on a Mac and by logind's PrepareForSleep on Linux
+  (`power.LogindPowerHandler`).
 - Locked together by tests: `PROBE_PATH`/`PROBE_BODY_MARKER` and the
   image's `onionpress-health.conf`; the request path literal in
   `launcher_ops.py` and `tor-watchdog.py`. Every Python entry point in
   `linux/` is installed by both `install.sh` and `build-linux.sh`.
   `tests/test_linux_recovery_loop.py`.
-- **The Linux heartbeat reaches the daemon the launcher uses** (#503): its
-  main() runs `point_docker_at_the_daemon()` before its first `docker` call
-  (`resolve_paths`' socket into DOCKER_HOST, a preset one kept; the unit
+- **The daemon on Linux reaches the Docker daemon the launcher uses**
+  (#503): `Daemon._setup_environment` puts `resolve_paths`' socket into
+  DOCKER_HOST before the first `docker` call (a preset one kept; the unit
   sets no DOCKER_HOST, and must not: a system-Docker install has none).
-  `tests/test_linux_heartbeat_docker_socket.py`.
+  `TestPlatformSeams` in `tests/test_linux_daemon.py`.
 - The watchdog is started only through entrypoint.sh's `supervise_watchdog`
   (a function, not a `*tor-watchdog*` script: hosts signal
   `pgrep -f '[t]or-watchdog'`). `tests/test_tor_watchdog_supervised.py`.
@@ -286,8 +311,10 @@
 - Anything in WordPress can write the request files in
   `/var/lib/onionpress/`. Config changes go only through
   `config.apply_settings_updates` (`SETTINGS_PAGE_KEYS`, every value
-  checked; the rest dropped, logged by key name only).
-  `tests/test_settings_page_updates.py`.
+  checked; the rest dropped, logged by key name only), applied by
+  `handle_action.apply_config` on every `handle-action` run and by
+  `onionpress apply-config`, on both platforms (each launcher's case
+  delegates; no bash twin). `tests/test_settings_page_updates.py`.
 - **Never add to `SETTINGS_PAGE_KEYS`** image overrides,
   `ONIONHEAVEN_ADDRESS`, `ONIONHEAVEN_ACCEPT_REGISTRATIONS`,
   `ADDRESS_PREFIX`, ports, paths or secrets other than
@@ -309,10 +336,29 @@
   never logged (`TestBoundedReads`, `TestThrottle`).
 - Every `wp_ajax_` handler with a side effect `check_ajax_referer`s
   (`tests/test_settings_page_nonces.py`, a census).
-- Page Stop/Restart go through the launcher's cases (Linux stops the
-  heartbeat first). `tests/test_linux_settings_page_stop.py`. Share Now is
-  taken by the long-running process and refused while sharing is off.
-  `tests/test_settings_page_share_now.py`.
+- Page Stop/Restart go through the launcher's cases (Linux asks the
+  daemon for `/offline` first). `tests/test_linux_settings_page_stop.py`. Share Now is
+  handle-action's `upload-analytics` (`analytics_sharing.request_upload`'s
+  data-dir marker, refused while sharing is off; nothing in the volume, no
+  per-cycle `docker exec`). `tests/test_settings_page_share_now.py`.
+- **The page does none of the host's work** (#528): its release line is
+  `status.json`'s `release` (`status_writer.release_status`, the cache of
+  `handle_action.check_release`; its button is the `update` action), never
+  a request of its own; `config-current.json` has one writer, the status
+  writer (the form shows unapplied `config-updates.json` on top); the
+  status page writes no `requested-action`. Every PHP copy of a host
+  constant (fields, token pattern, restart keys, result files, actions,
+  request id, the onion shape) is held to its source.
+  `tests/test_settings_page_host_constants.py`.
+- **The page's archive.org login is the host's** (#528 item 3):
+  handle-action's `archive-login` over `multisite.fetch_archive_s3_keys`
+  (archive.org's onion over Tor) and `save_archive_s3_keys`; no login code
+  in WordPress. The account and password cross the volume only in the
+  `archive-login` request file (0600, written only when `status.json`'s
+  `page_actions` lists the verb), read once and removed before the login
+  or with a throttled request (`INPUT_FILES`); neither is logged or in the
+  result. `TestArchiveLogin` in `tests/test_handle_action.py`,
+  `TestArchiveLoginIsTheHosts` in `tests/test_settings_page_host_constants.py`.
 - **`onionpress config get|set|unset|list` is the apps' one writer of
   `~/.onionpress/config`** (`config.CLI_CONFIG_KEYS`). A new setting gets
   its `config set` entry first (check, `CONFIG_KEY_HELP`, `NEEDS_RESTART` /
@@ -339,11 +385,15 @@
   `OnionPress-<≤8>-<YYYY-MM-DD-HH-MM>.zip` regular file; changing the name
   in `handle_action.py` means changing the pattern.
   `tests/test_backup_download.py`.
-- **A key import never loses the current key**: every import goes through
-  `replace_onion_key` (check, stage, copy old keys to
-  `~/.onionpress/replaced-keys/`, then release hubs and swap). On a Mac the
+- **A key import never loses the current key**: every import is
+  `onionpress import-key` (`key_import.replace_key`, both platforms; the
+  launchers' `import_key` is a delegation, and the one ADDRESS_PREFIX rule
+  is `config.prefix_for_address`): check, stage, copy old keys to
+  `~/.onionpress/replaced-keys/`, then release hubs and swap. On a Mac the
   page's import needs the person at the Mac (native dialog, Cancel default,
-  5 min = Cancel); Linux refuses it from the page.
+  5 min = Cancel); Linux refuses it from the page. The CLI speaks the
+  check/confirm protocol on both platforms (`address-change`, and
+  `hub-holds-key` when a hub may still keep the key).
   `tests/test_onion_key_replacement.py`.
 - An import Docker was not up for (`.import-key-pending`) is finished by
   the next start, first: `ContainerManager.apply_pending_key_import` wipes
@@ -351,18 +401,49 @@
   anything else keeps the marker and stops the start.
   `tests/test_pending_key_import.py`.
 - **Code in WordPress never reads or replaces the site's onion key without
-  the owner at the host**: the Mac page's backup excludes it
-  (`include_onion_key=False`; every `create_backup` call says which); a
-  keyless backup never mints an address on any path; a page restore of
-  another address asks (Mac) or is refused (Linux); a hub/OnionHome node,
-  or one that cannot say, restores nothing from the page.
-  `tests/test_settings_page_onion_key.py`.
+  the owner at the host**: the page's backup excludes it on both platforms
+  (`cmd_settings_page_backup`, `include_onion_key=False`; every
+  `create_backup` call says which); a keyless backup never mints an
+  address on any path; a page restore of another address asks (Mac) or is
+  refused (Linux: `cmd_settings_page_restore`, `ADDRESS_CHANGE_REFUSED_MSG`);
+  a hub/OnionHome node, or one that cannot say, restores nothing from the
+  page. `tests/test_settings_page_onion_key.py`.
 
-## The Mac Daemon (issue #367, CLI-first phase 3)
-- **`onionpress daemon` runs every loop; the menubar is a view** (menu,
-  dialogs, notifications, setup windows, starting the daemon). The menubar
-  runs no loop naming docker, the hub or Tor, no timer but the splash tips.
-  `tests/test_mac_daemon.py`.
+## The Daemon (issue #367, CLI-first phase 3; Linux since #407)
+- **`onionpress daemon` runs every loop on both platforms; the menubar and
+  the tray are views** (menu, dialogs, notifications, setup windows,
+  starting the daemon). The menubar runs no loop naming docker, the hub
+  or Tor, no timer but the splash tips. `tests/test_mac_daemon.py`.
+- **Every platform difference in the daemon is a branch on `self.os_name`**
+  (`detect_os()`, overridable for tests), never a second module: sleep
+  and wake (`mac_power.MacPowerHandler` / `power.LogindPowerHandler`, one
+  interface: `register`, `run_loop_once`, `stop`, `OFFLINE_MAX_TIME`; the
+  sleep and wake policy is `handle_sleep` / `handle_wake` once, the
+  `/offline` within the handler's budget: IOKit 5 s, logind 3 s of its
+  5 s delay), the sleep inhibitor (`CaffeineManager` / `SystemdInhibitor`),
+  the Docker environment, `_runtime_ready` (Colima's `.initialized` only
+  on a Mac), the start of Tor after the first run's setup (`start-tor`,
+  Mac only: Linux's start brings Tor up), the hub gate
+  (`hub_registration_allowed`, below), the rootless Docker namespace watch
+  (`_watch_rootless_netns` → `wordpress-egress`, Linux), and what only a
+  Mac has: thumbnails, the clearnet dmesg capture, the extension's proxy.
+  `tests/test_linux_daemon.py` (the Linux half of the harness),
+  `tests/test_mac_daemon_paths.py`.
+- **Linux runs it as the `onionpress-daemon.service` user unit**
+  (`linux/onionpress-daemon.service`: `Before=onionpress.service`, so the
+  site's `ExecStop` asks it for `/offline` first; `Restart=always`), and
+  `onionpress.service` is a oneshot that stays active (`RemainAfterExit`):
+  the launcher's `start` brings the containers up, runs `daemon start`
+  (`daemon_client`'s systemd half: `systemd_unit(data_dir)`, derived per
+  data dir like the launchd label; `--no-block`) and returns. `stop` and
+  `restart` run `daemon offline` before `stop_containers`; an update
+  stops the daemon `--no-offline` and starts it again. No heartbeat
+  client, no bash status loop, no watcher timer, no system-sleep hook, no
+  `write-status` one-shot: the .deb, `install.sh` and the launcher's
+  uninstall retire the old units (`onionpress-heartbeat.service`,
+  `onionpress-watcher.timer`) and lift their runtime mask.
+  `tests/test_linux_daemon.py`, `tests/test_deb_upgrade_restarts.py`,
+  `tests/test_launcher_dispatch_linux.py`, `tests/test_linux_install_tree.py`.
 - **The menubar performs no operation itself**: every action is an
   `onionpress …` subcommand run through the launcher; it imports none of
   `backup`, `hub_backup`, `updater`. A new menu action gets its subcommand
@@ -398,11 +479,46 @@
 - `.setup_complete` is written by every completed setup path
   (`setup_logic.mark_setup_complete`). `tests/test_setup_complete_marker.py`.
 - Quit takes the site down unless `QUIT_KEEPS_SITE_RUNNING=yes`. Update and
-  uninstall stop the daemon first.
+  uninstall stop the daemon first (on both platforms).
+- **A key import or restore stops no daemon** (#407, as the Mac always
+  was): the hub client reads the key per request and the record's
+  "released" hold keeps a beat off a released key; `heartbeat_unit` is
+  gone. `tests/test_settings_page_onion_key.py`,
+  `tests/test_onionheaven_lifecycle.py`.
 - **The daemon's start never stops Colima**: with no daemon alive a running
   VM is a crash restart's or a terminal start's live site; its port is read
   (`resolve_port_offset`). `TestResolvePorts` in
   `tests/test_mac_daemon_paths.py`.
+
+## One Status Writer (issue #523, consolidation stage 2)
+- **`onionpress.status_writer` writes every status document on both
+  platforms**: `daemon-state.json` (`state_document`, with the status
+  document under `"status"`), the volume's `status.json`, `version`,
+  `config-current.json` and `recent-logs.txt` (`write_volume`, as
+  www-data, `redact.status_for_wordpress` and `wordpress_log_excerpt` on
+  the way in), and the full `~/.onionpress/status.json` host copy
+  (`write_host_copy`: the analytics snapshot, the launcher's port
+  detection). The daemon's `write_status_to_volume` and `publish_state`
+  are `write(self)` / `publish(self)`, the one caller on both platforms
+  (#407 retired Linux's `onionpress write-status` one-shot and the
+  launcher's 30 s tick; `handle_action` runs no `write-status` after an
+  action: the daemon's pass writes it). Nothing else writes those names:
+  the census in `tests/test_status_writer.py`.
+- The fields Linux's bash gathered (`wp_installed`, `onboarded`,
+  `wayback_queue_count`, `mkp224o_available`, `vanity_in_progress`,
+  `serving_from_wayback`, `wp_admin_password_path`, `wp_port`) are one
+  function each there, gathered on both platforms, docker asked only
+  while the stack runs; `mkp224o_available` is `launcher_ops.
+  tor_image_has_mkp224o` on `DEFAULT_TOR_IMAGE` (generate-vanity's
+  image), its answer kept by image id in `.mkp224o-probe`. Platform
+  differences are `detect_os()` seams in the module (`platform_name`,
+  `host_boot_time`, `wedge_warning`), never a second writer.
+- `state` is the daemon's display state (`running`/`starting`/`stuck`/
+  `offline`/`stopped`); the tray reads it, and everything else, from
+  `daemon-state.json` through `daemon_client.read_state` (`"status"`),
+  never `status.json`. `tests/test_status_writer.py`,
+  `tests/test_linux_tray_protocol.py`, `TestStatusPass` in
+  `tests/test_mac_daemon.py`.
 
 ## The Start Is onionpress.start (issue #442)
 - **Each launcher's `start_containers` is the Docker wait (Mac: VM
@@ -418,6 +534,22 @@
 - Best-effort steps name their failures in the Mac START SUMMARY through
   `--errors-file` (`start.StartErrors`, read by `note_start_errors`).
   `tests/test_start_errors_contract.py`.
+- **The wait after a start is `start.wait_for_services`** (#529,
+  `onionpress wait-for-services`, both launchers' `wait_for_services` a
+  delegation): WordPress on its port, Tor bootstrapped and WordPress
+  reachable from the tor container; a WordPress not installed ends the
+  wait with the address written; then `write_shared_onion_address` (as
+  www-data) and `healthcheck_address` (one whole v3 address, cached for
+  the daemon). Always 0; a timeout is the WARNING and `wait-for-services`
+  in the Mac's START SUMMARY. The start's "Onion address:" line reads
+  `onionpress address`. `tests/test_wait_for_services.py`.
+- **The Mac's `start-tor` is `onionpress start-tor`** (#529:
+  `ContainerManager.migrate_key_volume` then `start_tor`, never before the
+  key volume is in place; the daemon runs the launcher verb once setup has
+  installed WordPress). **The database passwords are `onionpress
+  ensure-secrets`** (`secrets_file.ensure_secrets`, an incomplete file
+  refused); each launcher's `setup_db_passwords` keeps only the `source`
+  and the export compose reads. `tests/test_ensure_secrets.py`.
 
 ## `onionpress setup` Is setup_logic's (issue #442)
 - The launchers' `setup)` case is `run_setup` (passwords moved into the
@@ -430,12 +562,40 @@
   key, no new one), marks the setup complete and has the launcher restart.
   Never a WordPress under temporary credentials. `tests/test_terminal_setup.py`,
   `TestLauncherRestorePaths` in `tests/test_backup_metadata_validation.py`.
+- **Both UIs install through `onionpress setup --json`** (#527; the tray's
+  legacy branch `provision --json`): the password in
+  `ONIONPRESS_SETUP_PASSWORD` (`ui_client.SETUP_PASSWORD_ENV`, kept by
+  `run_setup` unless `--pass`), progress on stderr, the answer stdout's
+  last line (the case's closing lines on stderr). The onionname is
+  registered before the install on both platforms
+  (`setup_logic.setup_onionname` over `app_commands.register_onionname`,
+  `onionname set`'s); a taken one installs nothing and answers
+  `{"error": "taken", "suggestions"}`, `--register-later` records it
+  unregistered; a later collision is `onionname set NAME --rename-admin`
+  (`rename_wp_user`: $wpdb, logins on stdin, `site_admins`). Neither UI
+  imports the install, the registrar, `onion_hostname`, `auto_login` or
+  `wp_files`; `--language` is one of `SETUP_LANGUAGES` (both UIs' lists
+  test-held). `tests/test_setup_through_the_cli.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
   live in `src/onionpress/app_commands.py`, shared by both platforms, never
   constructing `OnionPressCLI`. The browser never gets the login token.
   `tests/test_cli_app_commands.py`.
+- **One open-logged-in implementation: `launcher_ops.open_onion`**
+  (`open onion --json`, both UIs, #527): Tor Browser or an extension
+  browser gets `login_target`'s file:// page, Brave the bare URL; a
+  running Linux Tor Browser answers `{"paste_url"}`, a cold launch waits
+  for firefox.real and sends the tab through `start-tor-browser`; a Mac
+  with none answers `no_browser`. `TestOpenOnion` in
+  `tests/test_auto_login_off_argv.py`.
+- **Each launcher's default case delegates to `onionpress.cli`**: a verb
+  with no case of its own (`ensure-archive-s3-keys`, `check-for-update`)
+  is the CLI's, and every verb the daemon, menubar, tray, `handle_action`,
+  `setup_logic` and `launcher_ops` run through a launcher is a case or a
+  subcommand. The daemon runs a CLI-only subcommand itself
+  (`Daemon.run_cli`). `tests/test_launcher_verbs_reach_the_cli.py`,
+  `TestTrayRunsOnlyLauncherVerbs` in `tests/test_launcher_dispatch_linux.py`.
 
 ## Check/Confirm Protocol
 - **Every destructive command speaks it** (`confirm.py`): `--check --json`
@@ -449,6 +609,27 @@
   a word to type is `typed`), a flow in
   `tests/test_cli_confirm_protocol.py` and `tests/test_ui_client.py`. The
   tray's own side is `tests/test_linux_tray_protocol.py`.
+- **`uninstall` and `reset` are the CLI's on both platforms** (#529):
+  `cmd_uninstall` asks `hub-holds-key` then the typed `uninstall`, and on
+  Linux at a terminal offers the backup first (not under
+  `ONIONPRESS_YES=true`), then `uninstall.run`'s platform branch (Linux:
+  the units, the tray, the containers and volumes, `/opt/onionpress` and
+  the symlinks with sudo, the desktop entries, `~/.onionpress`); the tray
+  runs `uninstall --check --json` through `ui_client.run_confirmed` and
+  opens its terminal with the `--confirmed` flags. `cmd_reset` on Linux
+  ends with the launcher's start and `onionheaven.reset_hub_state`. Each
+  launcher's case is the delegation, `-y` confirming through
+  `ONIONPRESS_CONFIRMED` / `--yes`. `tests/test_uninstall_linux.py`.
+- **The launchers hold no verb of their own** (#529): `restore` is the
+  CLI's pass-through (its argparse and `cli.read_backup_password` do the
+  refusals), `scrub` is `scrub.run_scrub`'s platform cycle (the Mac's
+  reset in place: `tests/test_scrub_mac.py`), `validate-oh-address` is
+  `onionheaven.validate_hub_address` (`tests/test_validate_oh_address.py`),
+  `help` is `cli.launcher_help` (`tests/test_launcher_help.py`). What
+  stays bash: the Colima bootstrap, the Linux systemd/rootless and
+  install-state functions (`ONIONPRESS_BIND_HOST`), `config_value`,
+  `start_cloudflare_tunnel`, `read_backup_password`, the daemon's and
+  `start`'s pid lock and wait.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published: nothing private there under a name not
@@ -614,8 +795,8 @@
   `$(( ))`: root in that container chose what the next `onionpress start`
   ran as the Mac user. Every number read out of a container, or derived
   from docker's answer, is now held to `[[ "$x" =~ ^[0123456789]{1,N}$ ]]
-  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`; Linux's
-  `started_epoch`). `[ a -gt b ]` (the test builtin) does not evaluate
+  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`). `[ a -gt
+  b ]` (the test builtin) does not evaluate
   expressions, but write the guard anyway: the census in
   `tests/test_launcher_container_arithmetic.py` follows a value assigned
   from `docker`/`wp_cli`/`wp_exec` output (transitively) into any
@@ -673,27 +854,25 @@
   with `wp core is-installed`'s answer, `bind_wordpress_port_for_install_state`
   records the verdict and recreates the wordpress container when its
   mapping (`docker port`) is not the one the state calls for: once per
-  install, right after setup. Not installed: `hold_heartbeat_client_until_installed`
-  masks the heartbeat user unit at runtime (`systemctl --user mask
-  --runtime`, gone at reboot; `start_heartbeat_client` respects it), so
-  nothing registers the address with the hub before the site exists.
-  Every setup path ends in `after_wordpress_installed` (port moved,
-  hold released): the `provision-post-install` subcommand that
-  `install_fresh_wordpress` runs (the tray, `provision`), the `setup`
-  case, `start_containers` for an installed site. Only the wordpress
-  service's port reads `ONIONPRESS_BIND_HOST` (test-held), so the
-  per-command override reaches nothing else.
-  `tests/test_linux_wordpress_port_until_installed.py` (the functions
-  under bash against stub docker/systemctl).
-- **The hold never outlives the package** (#506: the runtime mask under
-  `/run/user` survived `apt purge`, and the reinstall's `enable --now`
-  failed, starting nothing): the postinst's first install unmasks before
-  `enable --now` (install.sh too), `prerm` remove and `postrm` purge run
-  `lift_heartbeat_holds` (identical in both: every `/run/user/<uid>` with
-  the mask, the user's own manager unmasks), and the postinst's upgrade
-  try-restarts the site's unit alone while the heartbeat is held, then
-  reports each unit's `is-active`, never what it asked for.
-  `TestHeartbeatHold` in `tests/test_deb_upgrade_restarts.py`.
+  install, right after setup. Every setup path ends in
+  `after_wordpress_installed` (the port moved): the
+  `provision-post-install` subcommand that `install_fresh_wordpress` runs
+  (the tray, `provision`), the `setup` case, `start_containers` for an
+  installed site. Only the wordpress service's port reads
+  `ONIONPRESS_BIND_HOST` (test-held), so the per-command override reaches
+  nothing else. `tests/test_linux_wordpress_port_until_installed.py` (the
+  functions under bash against stub docker).
+- **Nothing registers the address with the hub before WordPress is
+  installed: the daemon's own gate** (#407; until then a runtime mask of
+  the heartbeat unit, held by the launcher, #464/#506). On Linux
+  `Daemon.hub_registration_allowed()` is True only once
+  `_check_wordpress_installed` has seen `wp core is-installed` answer
+  yes (Tor runs before setup there); `_hub_loops` passes it into
+  `hub_client.tick`. A Mac has no gate: its Tor starts after setup. No
+  unit is masked, so nothing outlives the package; the .deb and
+  `install.sh` only lift an older install's mask. `TestHubGate` in
+  `tests/test_linux_daemon.py`, `TestRetiredUnits` in
+  `tests/test_deb_upgrade_restarts.py`.
 - **The image denies `install.php` and `setup-config.php` to every
   source but the owner's**: `onionpress-install-page.conf` (`<Files ~>`,
   `Require ip 127.0.0.0/8 ::1` or `%{REMOTE_ADDR} == osenv('ONIONPRESS_WP_GATEWAY')`,
@@ -861,9 +1040,21 @@
 - The choice is re-read before every request carrying the key; nothing
   goes out unless registering. An explicit `no` sends one signed
   `/unregister`, retried every 15 min. `tests/test_onionheaven_opt_out.py`.
-- The Linux heartbeat holds the same hub lock as the Mac client
-  (`onionheaven-hub.lock` next to the record) around every /online,
-  /unregister and record write (#404). `tests/test_linux_heartbeat_hub_lock.py`.
+- **The probe asks the hub only while registering**: the failure path's
+  reference onions (`HealthChecker.reference_onions`) take the hub from
+  `hub_reference` (the daemon's: `onionheaven.reference_hub`, the
+  configured hub or "" unless the choice is `yes`), else only
+  `WELL_KNOWN_ONIONS`. `daemon offline` holds the probe until a pass sees
+  the stack down (`Daemon._stop_hold`, at most `STOP_HOLD_SECONDS`).
+  `TestTheProbeAsksTheHubOnlyWhileRegistering` in
+  `tests/test_onionheaven_opt_in.py`, the stop-hold cases in
+  `TestStatusPass` (`tests/test_mac_daemon.py`).
+- **One client, `onionheaven.OnionHeavenClient`, in one daemon on both
+  platforms** (#407): the hub lock (`onionheaven-hub.lock` next to the
+  record, #404) orders every /online, /unregister and record write with
+  the CLI's `onionheaven-unregister`; no second implementation in
+  `linux/`. `tests/test_onionheaven_opt_in.py`,
+  `TestTheHubLockSpansProcesses` in `tests/test_onionheaven_lifecycle.py`.
 - **Every end of a hub's hold on a key takes it back** (uninstall, reset,
   key import, restore of another address, hub change) via
   `release_registration` / `onionheaven-unregister`; what could not be
@@ -874,10 +1065,20 @@
 
 ## Backups Carry Original Images Only (issue #257)
 - Backups prune WordPress derivatives by `src/onionpress/derivatives.py`'s
-  rule (shared with Linux via `prune-image-derivatives`); restores
+  rule (`backup.create_backup`, both platforms); restores
   regenerate them in the background (`--only-missing`, marker cleared
   only when complete) and the `onionpress-image-fallback.php` mu-plugin
   serves originals meanwhile. The two halves ship together.
+
+## Backup and Restore Are the CLI's on Both Platforms (issue #406)
+- **No backup or restore runs in bash**: both launchers' `backup`,
+  `restore`, `settings-page-backup` and `settings-page-restore` cases
+  delegate to `onionpress.cli` (`cmd_backup` → `backup.create_backup`,
+  `cmd_restore`, `cmd_settings_page_backup`, `cmd_settings_page_restore`
+  → `restore_from_backup(through_wordpress=True)`). No platform seam is
+  left (#407): no unit is stopped around a restore on either platform.
+  `TestLinuxSettingsPageBranches` in `tests/test_backup_hub_data_off_wordpress.py`,
+  `tests/test_launcher_dispatch_linux.py`.
 
 ## Backup/Restore Time Limits Grow With the Site (issue #317)
 - No fixed copy limit: floor + size at `wp_files.COPY_BYTES_PER_S`
@@ -920,8 +1121,9 @@
   `build/py2app-extensions.sh`; `python3-nacl (>= 1.5.0)` on Linux),
   imported guarded so format 1 works without it.
 - **Format 1 (`zip -P`) must restore forever; never write `zip -P` again.**
-- Launchers go through `onionpress.cli pack-backup` / `extract-backup`
-  (password on stdin).
+- Every backup is written by `backup.pack_backup` and read by
+  `extract_backup` (both platforms', through the CLI's backup and
+  restores); nothing else zips or unzips one.
 
 ## Restores Extract Plain Files Only
 - `validate_archive_members` runs before any extractor (no links, devices,
@@ -969,6 +1171,17 @@
   core zip at its fixed name). `tests/test_wp_cli_as_www_data.py`.
 - Provisioning calls run offline (`wp_cli_args(offline=True)`,
   `ONIONPRESS_WP_OFFLINE=1`). `tests/test_wp_cli_offline.py`.
+- **`docker.Docker` is the one way Python runs docker** (#477): a module
+  takes a `Docker` from its caller (the CLI's, the daemon's, the
+  menubar's, built from `OnionPressPaths`; a test's
+  `tests/fake_docker.FakeDocker`) and runs through `run` / `exec` /
+  `wp(offline=…)` / `compose` / `popen` / `run_to`; nothing else builds a
+  `"docker"` argv, finds the binary or threads `docker_bin` / `docker_env`
+  by hand, and `Docker.wp` is the one wp-cli front end, every caller
+  saying `offline=`. The native messaging host builds its own
+  `Docker(resolve_paths())`. A `"docker"` string outside `docker.py` is a
+  path or the binary's name, listed with its reason in the census's
+  `REVIEWED`. `tests/test_docker_runner_census.py`.
 - `onionpress-web-root-owner.sh` follows no link, prunes `creations`, and
   changes nothing if mounts look wrong.
 - Plugins install only from pins (`plugin_pin`, `build/pin-wp-plugin.sh`).
@@ -995,7 +1208,7 @@
 - archive.org keys live in the main site's options; lock and back-off are
   network options via `onionpress_wayback_net_*` only; only the main site's
   cron runs the sweep; one archive.org login
-  (`multisite.fetch_archive_s3_keys`, over Tor).
+  (`multisite.fetch_archive_s3_keys`, over Tor), the Settings page's too.
   `tests/test_wayback_network_state.py` (tests use the
   `onionpress_wayback_net_key` filter, never live keys).
 
@@ -1013,13 +1226,24 @@
   their own data dir, VM and containers. Extra users offset host ports by
   +10000 each (18080/19050/19077…); container-internal ports never.
 - **Detect ports with a socket bind test, never `lsof`** (it sees only the
-  current user's processes). The daemon resolves the offset at start
-  (`_resolve_ports_at_start`), sets `onion_proxy`'s module globals
-  (`_apply_ports`) and publishes `ports`; the launcher's fallback respects a
-  preset `ONIONPRESS_PORT_OFFSET`, and so does `OnionPressCLI` (#507: its
-  bind probe beside this install's own running stack moved a restore to
-  the next offset). `TestPortOffsetFromTheLauncher` in
-  `tests/test_onionpress_cli.py`.
+  current user's processes). **`ports.resolve_at_start` is the one rule**
+  (#405): a preset `ONIONPRESS_PORT_OFFSET` as it is (#507: a bind probe
+  beside this install's own running stack moved a restore to the next
+  offset), else the previous instance's port waited for
+  (`.previous-port-offset`, `wait_for_previous_port`), the running
+  stack's published port, else the probe. The daemon runs it with no
+  preset (`_resolve_ports_at_start`: it is the resolver the others take
+  their preset from), sets `onion_proxy`'s module globals (`_apply_ports`)
+  and publishes `ports`; `OnionPressCLI` and `onionpress launcher-env`
+  run it with the environment's. **Each launcher's `main` opens with
+  `launcher_environment`**: one `launcher-env` call whose `KEY=VALUE`
+  answer (the four port variables, `DOCKER_DIR`; on Linux `DOCKER_HOST`
+  and `DOCKER_SOCK` by the daemon's #503 rule, from `resolve_paths`) is
+  the only place the launchers export them; no answer keeps the preset
+  or 0 with an ERROR in the log. The Mac's Colima environment stays
+  bash. `tests/test_launcher_env.py`, `TestPortOffsetFromTheLauncher` in
+  `tests/test_onionpress_cli.py`, `TestResolvePorts` in
+  `tests/test_mac_daemon_paths.py`.
 - **No `LSMultipleInstancesProhibited`** in any Info.plist (enforced across
   users). Launcher `pgrep` uses `-u "$(whoami)"` and matches this bundle's
   MenubarApp only. `tests/test_launcher_pgrep_anchor.py`.

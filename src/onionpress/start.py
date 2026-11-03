@@ -26,6 +26,8 @@ import re
 import shutil
 import subprocess
 
+from .docker import DockerError
+
 ERROR_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
@@ -94,9 +96,10 @@ def run_detached_cli(argv: list[str], *, data_dir: str, log_file: str) -> None:
     """Start `onionpress --data-dir DATA_DIR ARGV` in the background, its
     output appended to *log_file*, so that it outlives this start and the
     launcher's EXIT trap (which kills its own jobs): a session of its own.
-    Started by the Linux Settings-page watcher (ONIONPRESS_IN_WATCHER),
-    it goes out of the watcher's cgroup through systemd-run, as the bash
-    run_detached did, or the watcher's stop would end it."""
+    Started under the Linux daemon's unit (ONIONPRESS_IN_WATCHER, set by
+    the launcher's handle-action case; until #407 the watcher timer's
+    oneshot), it goes out of that unit's cgroup through systemd-run, as
+    the bash run_detached did, or the unit's stop would end it."""
     from .derivatives import isolated_cli_argv
     command = isolated_cli_argv("--data-dir", data_dir, *argv)
     if os.environ.get("ONIONPRESS_IN_WATCHER") == "true" and shutil.which("systemd-run"):
@@ -145,8 +148,8 @@ DEFAULT_PREFIX = "op2"
 def vanity_key_dir(data_dir: str) -> str | None:
     """The imported or generated key's folder under shared/vanity-keys/:
     the first whose name is a whole v3 onion address, a folder and not a
-    link (it is bind-mounted into a container). The launchers'
-    vanity_key_dir()."""
+    link (it is bind-mounted into a container). The one reader since
+    the launchers' bash copies went (2026-11-02)."""
     from .key_manager import is_valid_onion_address
     base = os.path.join(data_dir, "shared", "vanity-keys")
     try:
@@ -445,7 +448,7 @@ class KeySeed:
 # ---- the core services (#442.6) ----
 
 def egress_step(paths, docker, *, wp_port: int | None, log, errors: StartErrors | None) -> None:
-    """The launchers' block_wordpress_egress: wordpress_egress.ensure
+    """The egress step (once the launchers' block_wordpress_egress): wordpress_egress.ensure
     (issue #144) before the first `compose up`, its verdict in the
     launcher's words; a block not in place is a WARNING and, on the Mac,
     `wordpress-egress` in the START SUMMARY. Never stops the start."""
@@ -732,19 +735,22 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     # wordpress, and without it compose recreates WordPress under the
     # launcher's exported bind host, publishing the installer to the
     # network before setup on Linux (#464; found by the live checks).
+    # tor only: the core services' up started onionheaven, and naming it
+    # under --no-deps drops its depends_on from the config compose hashes,
+    # so an older Compose (2.26, Debian 13) recreated it just as the
+    # bundled plugins went to download over its SOCKS port.
     why = manager.key_volume_not_ready()
-    rc = 1 if why else manager.run_compose_to(["up", "-d", "--no-deps", "tor", "onionheaven"],
-                                              out="log")
+    rc = 1 if why else manager.run_compose_to(["up", "-d", "--no-deps", "tor"], out="log")
     if why:
         log(f"ERROR: not starting Tor: {why}")
         name_failure("tor")
     elif rc != 0:
         if mac:
-            log(f"ERROR: Failed to start tor/onionheaven containers (rc={rc}) — see "
+            log(f"ERROR: Failed to start the tor container (rc={rc}) — see "
                 f"{paths.log_file}")
             name_failure("tor")
         else:
-            log("ERROR: Failed to start tor/onionheaven containers")
+            log("ERROR: Failed to start the tor container")
     if not mac:
         warn_if_socks_port_exposed(manager, log)
 
@@ -811,7 +817,7 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     # Image derivatives (#257): a restore's resized images, rebuilt in the
     # background (niced, resumable), after provision-post-install put the
     # image-fallback mu-plugin in place.
-    if installed and derivatives.regeneration_pending(paths.data_dir, docker.docker_bin):
+    if installed and derivatives.regeneration_pending(paths.data_dir, docker):
         log("Image derivatives: rebuild pending — starting in the background")
         run_detached_cli(["regenerate-derivatives"], data_dir=paths.data_dir,
                          log_file=paths.log_file)
@@ -860,3 +866,130 @@ def start_containers(manager, *, mac: bool, wp_port: int, errors: StartErrors | 
         post_up(manager, mac=mac, installed=installed, errors=errors, themes_dir=themes_dir,
                 plugins_dir=plugins_dir, scripts_dir=scripts_dir, log=log)
     return INSTALLED if installed else NOT_INSTALLED
+
+
+# ---- the wait after the start ----
+
+HEALTHCHECK_HOSTNAME = "/var/lib/tor/hidden_service/healthcheck/hostname"
+HEALTHCHECK_CACHE = "healthcheck-address"
+SHARED_ADDRESS_FILE = "/var/lib/onionpress/onion_address"
+WAIT_FOR_SERVICES_TIMEOUT = 120
+WAIT_FOR_SERVICES_INTERVAL = 2
+
+
+def _wordpress_answers(wp_port: int, http_get=None) -> bool:
+    """True when something answers HTTP on localhost:*wp_port* (what the
+    launchers' `curl -s --max-time 3` asked: any response, a refused
+    connection is a no)."""
+    import urllib.error
+    import urllib.request
+    get = http_get or urllib.request.urlopen
+    try:
+        get(f"http://localhost:{wp_port}/", timeout=3).close()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
+def write_shared_onion_address(docker, log) -> bool:
+    """Copy the served address into the shared volume as www-data
+    (wp_files.put_file; the theme, mu-plugins and REST endpoints read it
+    when the site is reached through localhost). False when there is no
+    well-formed address to write or the write fails."""
+    from . import onion_hostname, wp_files
+    addr = onion_hostname.read_served_address(docker)
+    if not addr:
+        return False
+    try:
+        r = wp_files.put_file(SHARED_ADDRESS_FILE, addr + "\n", "644", docker=docker)
+    except (OSError, DockerError) as e:
+        log(f"onion_address not written: {e}")
+        return False
+    return r.returncode == 0
+
+
+def healthcheck_address(docker, data_dir: str) -> str:
+    """The healthcheck onion service's address from the tor container, one
+    well-formed v3 address or "", cached in the data dir for the daemon
+    (`healthcheck-address`; its read_healthcheck_address reads the cache
+    first)."""
+    from .key_manager import is_valid_onion_address
+    r = docker.exec("onionpress-tor", ["cat", HEALTHCHECK_HOSTNAME], timeout=10, quiet=True)
+    addr = r.output.strip() if r.ok else ""
+    if not is_valid_onion_address(addr):
+        return ""
+    try:
+        with open(os.path.join(data_dir, HEALTHCHECK_CACHE), "w", encoding="utf-8") as f:
+            f.write(addr + "\n")
+    except OSError:
+        pass
+    return addr
+
+
+def wait_for_services(manager, *, wp_port: int, errors: StartErrors | None, log=None,
+                      sleep=None, http_get=None, max_wait: int = WAIT_FOR_SERVICES_TIMEOUT,
+                      interval: int = WAIT_FOR_SERVICES_INTERVAL) -> int:
+    """The launchers' wait_for_services (issue #529): after a start, poll
+    up to *max_wait* s for WordPress to answer on localhost:*wp_port* and
+    for Tor to be bootstrapped with WordPress reachable from the tor
+    container, logging each milestone as the bash did. A WordPress that
+    answers but is not installed ends the wait at once (setup is next;
+    the address is written to the shared volume if there is one, for the
+    setup dialog). Once both are ready: the address into the shared
+    volume, the healthcheck address into the data dir. A timeout is a
+    WARNING and `wait-for-services` in the START SUMMARY, never a failed
+    start. Always 0."""
+    import time
+    from . import onion_hostname, status_writer
+    log = log or manager._log
+    sleep = sleep or time.sleep
+    docker = manager.docker
+    data_dir = manager.paths.data_dir
+    waited = 0
+    wp_ready = onion_ready = False
+    addr = ""
+    log("Waiting for services to be ready...")
+    while waited < max_wait:
+        if not addr:
+            try:
+                addr = onion_hostname.read_served_address(docker)
+            except Exception:
+                addr = ""
+        if not wp_ready and _wordpress_answers(wp_port, http_get):
+            log(f"WordPress is responding on localhost:{wp_port}")
+            wp_ready = True
+            installed = status_writer.wp_installed(docker)
+            if installed is None:
+                log("wp core is-installed could not be asked — treating as not installed")
+            if not installed:
+                log("WordPress not installed — setup required, skipping Tor wait")
+                if addr and write_shared_onion_address(docker, log):
+                    log("Onion address written to shared volume")
+                return 0
+            log("Waiting for Tor to bootstrap and onion service to be reachable (est. 30-90s)...")
+        if not onion_ready and addr and manager._is_tor_bootstrapped():
+            r = docker.exec("onionpress-tor",
+                            ["wget", "-q", "-O", "/dev/null", "--timeout=5", "http://wordpress:80/"],
+                            timeout=15, quiet=True)
+            if r.ok:
+                log(f"Onion service ready: {addr}")
+                onion_ready = True
+        if wp_ready and onion_ready:
+            log(f"All services are ready after {waited}s")
+            if write_shared_onion_address(docker, log):
+                log("Onion address written to shared volume")
+            else:
+                log("WARNING: Failed to write onion address to shared volume")
+            hc = healthcheck_address(docker, data_dir)
+            if hc:
+                log(f"Healthcheck address: {hc}")
+            return 0
+        sleep(interval)
+        waited += interval
+    log(f"WARNING: Services not fully ready after {max_wait}s "
+        f"(wp={str(wp_ready).lower()}, onion={str(onion_ready).lower()})")
+    if errors is not None:
+        errors.add("wait-for-services")
+    return 0

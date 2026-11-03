@@ -183,6 +183,11 @@ class Node:
                 states[name] = state
         return states
 
+    def container_started_at(self, name):
+        """When *name* last started (docker's State.StartedAt), or ""."""
+        r = self.docker(["inspect", "--format", "{{.State.StartedAt}}", name])
+        return r.out.strip() if r.ok else ""
+
     def http_local(self, path, *, method="GET", data=None, headers=(), timeout=30):
         """A request to WordPress's published port, from the node itself."""
         url = f"http://localhost:{self.wp_port}{path}"
@@ -203,6 +208,16 @@ class Node:
         url = f"http://{address}{path}"
         r = self.docker(["exec", "onionpress-tor", "curl", "-sS", "-i", "--max-time", str(timeout),
                          "--socks5-hostname", "127.0.0.1:9050", url], timeout=timeout + 30)
+        if not r.ok:
+            raise RuntimeError(r.describe())
+        return parse_curl_include(r.out)
+
+    def http_from_tor(self, path, *, timeout=30):
+        """A request to WordPress from the tor container: the source every
+        Tor visitor's request arrives from, without waiting for a
+        descriptor."""
+        r = self.docker(["exec", "onionpress-tor", "curl", "-sS", "-i", "--max-time", str(timeout),
+                         f"http://wordpress:80{path}"], timeout=timeout + 30)
         if not r.ok:
             raise RuntimeError(r.describe())
         return parse_curl_include(r.out)

@@ -80,30 +80,6 @@ sys.path[:0] = sys.argv.pop(1).split(":")
 runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' "$ONIONPRESS_PYTHONPATH" "$@"
 }
 
-# True only for a well-formed v3 onion address: 56 lowercase base32
-# characters, then ".onion", and nothing else (no newline, no "/"). The
-# rule of key_manager.is_valid_onion_address; a test keeps the two
-# together. The letters are spelled out because a range like a-z can take
-# in other characters in some locales.
-is_onion_address() {
-    [[ "$1" =~ ^[abcdefghijklmnopqrstuvwxyz234567]{56}\.onion$ ]]
-}
-
-# The imported or generated key's directory under vanity-keys/: the first
-# one whose name is a whole onion address (is_onion_address), not merely
-# "*.onion". Its name is taken for the address and the directory is
-# bind-mounted into a container. Prints nothing and fails if there is none.
-vanity_key_dir() {
-    local d
-    for d in "$DATA_DIR/shared/vanity-keys"/*.onion; do
-        if [ -d "$d" ] && [ ! -L "$d" ] && is_onion_address "$(basename "$d")"; then
-            echo "$d"
-            return 0
-        fi
-    done
-    return 1
-}
-
 # Hand a file to the WordPress container, written as www-data: stdin goes to
 # $1, mode ${2:-600} once in place (a temporary file beside it, renamed
 # over it). Never as root: www-data owns /var/lib/onionpress and the web
@@ -114,13 +90,6 @@ wp_put() {
     docker exec -i -u www-data onionpress-wordpress \
         sh -c 't=$(mktemp "$1.XXXXXX") || exit 1; if cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"; then exit 0; fi; rm -f "$t"; exit 1' \
         sh "$1" "${2:-600}"
-}
-
-# Run a command in the WordPress container as www-data: what the launcher
-# reads from or removes in www-data's folders (a root `cat` would follow a
-# planted link to a file only root may read).
-wp_exec() {
-    docker exec -u www-data onionpress-wordpress "$@"
 }
 
 # Run wp-cli in the WordPress container as www-data: wp_cli <args...>, and
@@ -141,55 +110,6 @@ PIDFILE="$DATA_DIR/onionpress.pid"
 # looser umask is fixed too.
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
-
-# One-time host-side migration: ~/Documents/onionpress (Linux default)
-# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
-# source tree recursively so empty subdirs in the destination (from a
-# previous launcher pass) don't block the mv. Issue #239.
-#
-# REMOVE-AFTER 2026-08-01: by then every active install will have
-# migrated. Delete this block and _op_migrate_tree.
-_op_migrate_tree() {
-    local src="$1" dst="$2"
-    [ -d "$src" ] || return 0
-    mkdir -p "$dst"
-    shopt -s dotglob nullglob 2>/dev/null || true
-    local entry base target
-    for entry in "$src"/*; do
-        [ -e "$entry" ] || continue
-        base=$(basename "$entry")
-        target="$dst/$base"
-        if [ -d "$entry" ] && [ -d "$target" ]; then
-            _op_migrate_tree "$entry" "$target"
-            rmdir "$entry" 2>/dev/null || true
-        else
-            mv -n "$entry" "$target" 2>/dev/null || true
-        fi
-    done
-}
-
-if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    _migration_residual=0
-    _migration_did_work=0
-    for OLD in "$HOME/Documents/onionpress" "$HOME/Documents/OnionPress"; do
-        [ -d "$OLD" ] || continue
-        _migration_did_work=1
-        rm -f "$OLD/MOVED.txt" 2>/dev/null || true
-        _op_migrate_tree "$OLD" "$DOCUMENTS_DIR"
-        rmdir "$OLD" 2>/dev/null || true
-        if [ -d "$OLD" ]; then
-            _migration_residual=1
-            echo "OnionPress content moved to $DOCUMENTS_DIR" \
-                > "$OLD/MOVED.txt" 2>/dev/null || true
-        fi
-    done
-    if [ "$_migration_did_work" = "0" ]; then
-        mkdir -p "$DOCUMENTS_DIR"
-    fi
-    if [ "$_migration_residual" = "0" ]; then
-        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-    fi
-fi
 
 # Ensure subtree exists for compose bind-mounts.
 mkdir -p "$DOCUMENTS_DIR/backups"
@@ -235,115 +155,44 @@ export ONIONPRESS_VERSION
 export TZ="$(cat /etc/timezone 2>/dev/null || echo UTC)"
 export PYTHONDONTWRITEBYTECODE=1
 
-# Rootless Docker: point CLI and compose at the user's rootless daemon socket
-_rootless_sock="/run/user/$(id -u)/docker.sock"
-if [ -S "$_rootless_sock" ]; then
-    export DOCKER_HOST="unix://$_rootless_sock"
-    export DOCKER_SOCK="$_rootless_sock"
-fi
-
-# Port-offset detection. Mirrors app/MacOS/onionpress's detect_port_offset
-# (Mac multi-user). Probes all three host-exposed ports — WP 8080, SOCKS
-# 9050, proxy 9077 — and bumps the offset by 10000 if any is in use. The
-# common Linux collision is a system tor on 9050 (apt-installed by
-# torbrowser-launcher); offset 10000 publishes OnionPress SOCKS on 19050
-# instead. The container internally still listens on 9050, so the onion
-# service is unaffected. Uses real socket bind (not lsof) so it sees
-# ports owned by other users / system services.
-detect_port_offset() {
-    local offset=0
-    while true; do
-        local wp=$((8080 + offset))
-        local socks=$((9050 + offset))
-        local proxy=$((9077 + offset))
-        if [ $proxy -gt 65535 ]; then
-            offset=0
-            break
-        fi
-        if python3 -I -c '
-import socket, sys
-for p in sys.argv[1:]:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", int(p)))
-    except OSError:
-        sys.exit(1)
-    finally:
-        s.close()
-' "$wp" "$socks" "$proxy" 2>/dev/null; then
-            break
-        fi
-        offset=$((offset + 10000))
-    done
-    echo "$offset"
+# The environment every verb runs with (issue #405): the ports and the
+# paths, resolved once by the Python at the top of main() and exported
+# here and nowhere else. `onionpress launcher-env` answers KEY=VALUE per
+# line: ONIONPRESS_PORT_OFFSET and the three port variables compose and
+# every start step read (onionpress.ports.resolve_at_start: a preset
+# ONIONPRESS_PORT_OFFSET, the daemon's or the tray's, as it is; else the
+# previous instance's port waited for, the running stack's published
+# port, else the bind probe), DOCKER_DIR (platform.resolve_paths: the
+# install tree's compose folder, a checkout's), and the Docker daemon the
+# rest of OnionPress uses: DOCKER_HOST (a preset one kept, else the
+# user's rootless socket when it exists, else the system one: the
+# daemon's rule, issue #503) and DOCKER_SOCK, its path, for the compose
+# file's socket mounts. Its log lines go to the log file only: stdout is
+# what the tray reads. When the Python does not answer (a broken install)
+# the launcher keeps going on the preset offset or 0, so `stop` still
+# brings the containers down.
+launcher_environment() {
+    local answer key value
+    answer=$(op_py --data-dir "$DATA_DIR" launcher-env 2>>"$LOG_FILE") || answer=""
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ONIONPRESS_PORT_OFFSET|ONIONPRESS_WP_PORT|ONIONPRESS_SOCKS_PORT|ONIONPRESS_PROXY_PORT)
+                [[ "$value" =~ ^[0123456789]{1,5}$ ]] && export "$key=$value" ;;
+            DOCKER_DIR)
+                [ -n "$value" ] && [ -d "$value" ] && DOCKER_DIR="$value" ;;
+            DOCKER_HOST|DOCKER_SOCK)
+                [ -n "$value" ] && export "$key=$value" ;;
+        esac
+    done <<< "$answer"
+    if ! [[ "${ONIONPRESS_WP_PORT:-}" =~ ^[0123456789]{1,5}$ ]]; then
+        [[ "${ONIONPRESS_PORT_OFFSET:-}" =~ ^[0123456789]{1,5}$ ]] || ONIONPRESS_PORT_OFFSET=0
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: the ports could not be resolved (onionpress launcher-env gave no answer): using offset $ONIONPRESS_PORT_OFFSET" >> "$LOG_FILE"
+        export ONIONPRESS_PORT_OFFSET
+        export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
+        export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
+        export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
+    fi
 }
-
-if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
-    # If the service is already running, read its offset from status.json
-    # rather than re-detecting via socket bind. The bind test returns 0
-    # when nothing currently holds port 8080 (e.g. between restarts or
-    # when another user's containers hold it but the bind test runs as a
-    # different uid), causing standalone commands like `onionpress setup`
-    # to target the wrong port.
-    _status_json="$DATA_DIR/status.json"
-    if [ -f "$_status_json" ] && command -v python3 >/dev/null 2>&1; then
-        _running_wp_port=$(python3 -I -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    p = int(d.get('wp_port', 0))
-    if p > 0:
-        print(p - 8080)
-except Exception:
-    pass
-" "$_status_json" 2>/dev/null)
-        if [ -n "$_running_wp_port" ] && [ "$_running_wp_port" -ge 0 ] 2>/dev/null; then
-            ONIONPRESS_PORT_OFFSET="$_running_wp_port"
-        fi
-    fi
-fi
-
-if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
-    # Sticky-offset recovery (mirrors src/menubar.py:258). If we just
-    # quit/restarted, our previous offset's ports are likely in
-    # TIME_WAIT for ~30-60s. Naive detection sees them as "taken" and
-    # bumps to the next offset, giving the user a different port number
-    # for the rest of the session even after the old socket frees.
-    # Avoid this by reading a sentinel written on stop and waiting up
-    # to 15s for the prior offset's ports to come back. Stale sentinels
-    # (>60s) are ignored — likely from a crash where we never got to
-    # write a fresh one.
-    _prev_sentinel="$DATA_DIR/.previous-port-offset"
-    if [ -f "$_prev_sentinel" ]; then
-        _age=$(( $(date +%s) - $(stat -c %Y "$_prev_sentinel" 2>/dev/null || echo 0) ))
-        if [ "$_age" -lt 60 ]; then
-            _prev=$(cat "$_prev_sentinel" 2>/dev/null | tr -dc '0-9')
-            if [ -n "$_prev" ]; then
-                _desired=$((8080 + _prev))
-                for _i in $(seq 1 30); do  # up to 15s, 0.5s each
-                    if python3 -I -c '
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-try:
-    s.bind(("127.0.0.1", int(sys.argv[1])))
-    s.close()
-except OSError:
-    s.close(); sys.exit(1)
-' "$_desired" 2>/dev/null; then
-                        break
-                    fi
-                    sleep 0.5
-                done
-            fi
-        fi
-        rm -f "$_prev_sentinel"
-    fi
-    ONIONPRESS_PORT_OFFSET=$(detect_port_offset)
-fi
-export ONIONPRESS_PORT_OFFSET
-export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
-export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
-export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
 
 # Bind host for WordPress's published port. Only WordPress: Tor's SOCKS
 # port is fixed to 127.0.0.1 in the compose file. Linux is typically
@@ -416,14 +265,6 @@ using_local_images() {
     op_py --data-dir "$DATA_DIR" using-local-images
 }
 
-# Whether the address given is the OnionHeaven hub's (issue #345): the Mac
-# daemon's rule, onionheaven.is_onionheaven_instance. Every node runs an
-# onionheaven container (its heartbeat monitor idles off the hub), so a
-# running one says nothing about the node's mode.
-is_onionheaven_hub() {
-    op_py --data-dir "$DATA_DIR" is-onionheaven-hub "$1"
-}
-
 # The image every one-shot helper that handles the onion service key runs
 # from (the key volume migration, the key seeds, the backup's key reads):
 # the stack's own tor image, pinned by digest like the rest, or the locally
@@ -431,27 +272,6 @@ is_onionheaven_hub() {
 # mirror could swap for an image that reads the key. Each run overrides the
 # entrypoint and joins no network (tests/test_container_capabilities.py).
 KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
-
-# Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
-# volume migration and the first-run seed come before any pull. A missing
-# image is pulled by its pinned reference, never when the stack runs locally
-# built images. Returns 1 when it is not here and cannot be. Kept identical
-# in the macOS and Linux launchers; a test enforces that.
-ensure_key_helper_image() {
-    if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
-        return 0
-    fi
-    if using_local_images; then
-        log "ERROR: the locally built tor image $KEY_HELPER_IMAGE is not here (build it with build/build-images.sh)"
-        return 1
-    fi
-    log "Pulling $KEY_HELPER_IMAGE for the onion service key helpers..."
-    if ! docker pull "$KEY_HELPER_IMAGE" >> "$LOG_FILE" 2>&1; then
-        log "ERROR: could not pull $KEY_HELPER_IMAGE"
-        return 1
-    fi
-    docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
-}
 
 # Create default config if it doesn't exist (0600, issue #397: it may hold
 # CLOUDFLARE_TUNNEL_TOKEN).
@@ -489,8 +309,9 @@ fi
 # that stop or remove take COMPOSE_WITH_CF, so a tunnel whose token was just
 # removed still goes down with the rest (#352), and start_cloudflare_tunnel
 # names both files itself.
-# apply_config_updates reads it again: the Settings page's Restart applies
-# the page's changes in this same process before start_containers.
+# The Settings page's Restart applies the page's changes (handle-action
+# runs `apply-config`, then `restart`: this process reads the config
+# fresh).
 COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
 read_cloudflare_token() {
     CLOUDFLARE_TUNNEL_TOKEN=""
@@ -556,9 +377,12 @@ wp_access_url() {
     fi
 }
 
-# The address line of a start: the address, or what to do for one.
+# The address line of a start: the address the tor container serves
+# (`onionpress address`), or what to do for one.
 onion_address_line() {
-    echo "Onion address: ${ONION_ADDR:-none yet (set up the site: onionpress setup)}"
+    local addr
+    addr=$(op_py --data-dir "$DATA_DIR" address 2>/dev/null) || addr=""
+    echo "Onion address: ${addr:-none yet (set up the site: onionpress setup)}"
 }
 
 command_exists() {
@@ -583,8 +407,10 @@ wp_is_installed() {
 #   yes, removed when it said no) and moves the port once the verdict is
 #   in (bind_wordpress_port_for_install_state: a recreate of the one
 #   container, once per install, right after setup).
-# - The heartbeat client, which would register the address with the
-#   OnionHeaven hub, is held (a runtime mask of its user unit) until then.
+# - The daemon (onionpress.daemon, the onionpress-daemon.service user
+#   unit) registers the address with the OnionHeaven hub only once it has
+#   seen WordPress installed (Daemon.hub_registration_allowed; until #407 a
+#   runtime mask of the heartbeat client's unit, held here).
 # - The image denies install.php and setup-config.php to every source but
 #   the owner's (loopback and the network's gateway), so Tor visitors never
 #   see them (onionpress-install-page.conf in the WordPress image).
@@ -592,7 +418,6 @@ wp_is_installed() {
 # installed it (setup_logic's .wordpress-installed-by-onionpress marker).
 WP_INSTALLED_MARKER=".wordpress-installed"
 WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"
-HEARTBEAT_UNIT=onionpress-heartbeat.service
 
 # The bind host for this start's `compose up`: the configured one once a
 # start has seen WordPress installed, else 127.0.0.1.
@@ -634,80 +459,14 @@ bind_wordpress_port_for_install_state() {
         || log "WARNING: could not move WordPress's port to $wanted (see $LOG_FILE)"
 }
 
-# Whether the heartbeat client's user unit is held (masked at runtime).
-heartbeat_client_held() {
-    case "$(systemctl --user is-enabled "$HEARTBEAT_UNIT" 2>/dev/null)" in
-        masked*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# Hold the heartbeat client while WordPress is not installed: nothing
-# registers an address whose site does not exist yet with the hub. The
-# runtime mask fails the start job systemd queues after this unit's
-# READY and does not survive a reboot (the next start decides again).
-hold_heartbeat_client_until_installed() {
-    if ! heartbeat_client_held; then
-        systemctl --user mask --runtime "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || return 0
-        log "Heartbeat client held until WordPress is installed (no hub registration before setup)"
-    fi
-    if systemctl --user is-active "$HEARTBEAT_UNIT" >/dev/null 2>&1; then
-        systemctl --user stop "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || true
-    fi
-}
-
-release_heartbeat_client_hold() {
-    heartbeat_client_held || return 0
-    systemctl --user unmask --runtime "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || true
-    log "WordPress is installed: heartbeat client released"
-    start_heartbeat_client
-}
-
 # What every setup path ends with once WordPress is installed: the port
-# where the config says, the heartbeat client running.
+# where the config says (the daemon sees the install on its next pass and
+# opens its hub gate itself).
 after_wordpress_installed() {
     bind_wordpress_port_for_install_state true
-    release_heartbeat_client_hold
 }
 
-# Verify a WP admin password without making a backup. Used by scrub/
-# uninstall to pre-validate the password BEFORE any destructive work —
-# otherwise create_backup verifies mid-script and the user can end up
-# in a half-uninstalled state on a bad password. create_backup's own
-# check calls it too.
-#
-# Stdin: the password (never argv, never spliced into PHP).
-# Returns 0 if valid, non-zero otherwise.
-verify_wp_admin_password() {
-    op_py verify-admin-password
-}
 
-# Prompt for + validate a WP admin password. Sets PROMPTED_WP_PASS on
-# success. Retries up to 3 times; returns 1 if user gives up.
-prompt_and_validate_wp_password() {
-    local prompt="${1:-WordPress admin password: }"
-    local attempt
-    PROMPTED_WP_PASS=""
-    for attempt in 1 2 3; do
-        local pw
-        read -r -s -p "$prompt" pw
-        echo ""
-        if [ -z "$pw" ]; then
-            echo "  (empty — aborting)"
-            return 1
-        fi
-        if printf '%s' "$pw" | verify_wp_admin_password; then
-            PROMPTED_WP_PASS="$pw"
-            return 0
-        fi
-        echo "  Password does not match any WordPress admin account."
-        if [ "$attempt" -lt 3 ]; then
-            echo "  ($((3 - attempt)) more attempt$([ $attempt -lt 2 ] && echo s) remaining)"
-        fi
-    done
-    echo "  Too many bad attempts — aborting."
-    return 1
-}
 
 # Backup passwords are handed over in ONIONPRESS_BACKUP_PASSWORD, never on a
 # command line: other local users can read any process's argv (ps,
@@ -768,367 +527,36 @@ run_setup() {
             *) args+=("$1"); shift ;;
         esac
     done
-    ONIONPRESS_SETUP_PASSWORD="$setup_pass" ONIONPRESS_IA_PASSWORD="$ia_pass" \
+    # A UI hands the passwords over in the environment itself (issue #527):
+    # kept unless `--pass` / `--ia-password` were given.
+    ONIONPRESS_SETUP_PASSWORD="${setup_pass:-${ONIONPRESS_SETUP_PASSWORD:-}}" \
+        ONIONPRESS_IA_PASSWORD="${ia_pass:-${ONIONPRESS_IA_PASSWORD:-}}" \
         ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
         op_py --data-dir "$DATA_DIR" setup --launcher "$INSTALL_DIR/onionpress" "${args[@]}"
 }
 
 # ─── Secrets management ─────────────────────────────────────────────
 
+# The database passwords (issue #529): `onionpress ensure-secrets`
+# (secrets_file.ensure_secrets: made once, random per install, 0600;
+# refused when the file is incomplete) and then, here, the `source` and
+# the export compose reads. Nothing else in bash touches the file.
 setup_db_passwords() {
-    local secrets_file="$DATA_DIR/secrets"
-
-    if [ ! -f "$secrets_file" ]; then
-        log "Generating random database passwords..."
-
-        local wordpress_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-        local root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-
-        touch "$secrets_file"
-        chmod 600 "$secrets_file"
-
-        cat > "$secrets_file" <<EOF
-# Database passwords - generated on $(date)
-# DO NOT SHARE THESE PASSWORDS
-WORDPRESS_DB_PASSWORD='$wordpress_pass'
-MYSQL_PASSWORD='$wordpress_pass'
-MYSQL_ROOT_PASSWORD='$root_pass'
-EOF
-
-        log "Database passwords generated and saved to $secrets_file"
-    fi
-
-    if [ -f "$secrets_file" ]; then
-        source "$secrets_file"
-        export WORDPRESS_DB_PASSWORD
-        export MYSQL_PASSWORD
-        export MYSQL_ROOT_PASSWORD
-    else
-        log "ERROR: Secrets file not found at $secrets_file"
-        exit 1
-    fi
+    op_py --data-dir "$DATA_DIR" ensure-secrets 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || exit 1
+    source "$DATA_DIR/secrets"
+    export WORDPRESS_DB_PASSWORD MYSQL_PASSWORD MYSQL_ROOT_PASSWORD
 }
 
-# Run a MariaDB client in onionpress-db: db_client <password> <client> [args...]
-# The password goes in on stdin and reaches the client as MYSQL_PWD. As
-# -p<password> it would sit in the process list, where ps shows every
-# user's command lines.
-db_client() {
-    local db_pass="$1"
-    shift
-    printf '%s\n' "$db_pass" | docker exec -i onionpress-db \
-        sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
-}
-
-# Import a restored dump into the wordpress DB: db_import <password> <sql_file>
-# onionpress.cli db-import, backup.db_import (Phase 4, #120): the one
-# implementation, what the Mac's restores run too. The password is the
-# first stdin line (reaches the client as MYSQL_PWD, never argv: ps shows
-# every user's command lines); the dump is streamed after it into a client
-# run --sandbox --binary-mode --local-infile=0, so nothing in a crafted
-# dump can run anything but SQL in the db container, and a client too old
-# for --sandbox is refused rather than imported into unsandboxed. The
-# pipeline's status is the Python's (exit 1 on any failure, one ERROR line
-# on stderr).
-db_import() {
-    printf '%s\n' "$1" | op_py --data-dir "$DATA_DIR" db-import --sql-file "$2"
-}
 
 # ─── Key import ──────────────────────────────────────────────────────
 
+# Replace the site's onion service key (onionpress.key_import, issue #524):
+# the check, the confirm protocol (--check --json, --confirmed
+# address-change; a terminal is asked), the copy of the current key, the
+# hubs, the swap.
 import_key() {
-    # import-key [<key>|-|--file <hs_ed25519_secret_key>]: the key as
-    # base32; "-" reads it from stdin (so a caller keeps it out of this
-    # process's argv, which ps shows to every user); --file reads C Tor's
-    # key file (key_manager.py encode-key-file checks it first).
-    local key_b32=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --file)
-                key_b32=$(python3 "$SCRIPTS_DIR/key_manager.py" encode-key-file "${2:-}") || return 1
-                shift ;;
-            --help|-h) key_b32="--help" ;;
-            --*) echo "Unknown import-key option: $1" >&2; return 2 ;;
-            *) key_b32="$1" ;;
-        esac
-        shift
-    done
-    if [ "$key_b32" = "-" ]; then
-        IFS= read -r key_b32 || true
-    fi
-
-    mkdir -p "$DATA_DIR"
-
-    if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
-        cat <<HELPEOF
-Usage: onionpress import-key <base32-secret-key>
-       onionpress import-key --file <hs_ed25519_secret_key>
-       onionpress import-key -        (the key on stdin)
-
-Import a pre-generated ed25519 key for your onion service.
-
-The base32 key should encode the 64-byte expanded ed25519 secret key.
-OnionPress will derive the .onion address automatically.
-
-HOW TO GET THE KEY FROM mkp224o OUTPUT:
-
-  OnionPress stores vanity keys in ~/.onionpress/shared/vanity-keys/.
-  Each address has its own directory containing hs_ed25519_secret_key.
-  Encode that file to base32:
-
-    python3 -I -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
-
-EXAMPLE:
-
-  KEY=\$(python3 -I -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
-  onionpress import-key "\$KEY"
-
-WHAT THIS COMMAND DOES:
-
-  1. Decodes the base32 key and checks it is a usable 64-byte expanded
-     ed25519 key; nothing is changed for a key that is refused
-  2. Derives the .onion address from it
-  3. Keeps a copy of the current key in ~/.onionpress/replaced-keys/
-     <address>-<time>/ (import that key again to go back)
-  4. Writes key files to ~/.onionpress/shared/vanity-keys/<address>/
-     - ks_hs_id.ed25519_expanded_private  (OpenSSH PEM, the format the container takes)
-     - hostname                           (the .onion address)
-  5. On next start, OnionPress will use this key
-
-NOTE: If an onion address already exists, you will be prompted to
-confirm the replacement. OnionPress will handle stopping and
-removing the old keys automatically.
-
-HELPEOF
-        return 0
-    fi
-
-    # Check the key and derive its .onion address before anything is
-    # touched: a key that is refused changes nothing.
-    local address
-    # The key goes to key_manager.py on stdin ("-"): in argv it would show
-    # in ps to every user.
-    if ! address=$(printf '%s\n' "$key_b32" | python3 "$SCRIPTS_DIR/key_manager.py" decode-key - 2>&1); then
-        echo "$address" >&2
-        return 1
-    fi
-
-    # Check if this is the same key already installed
-    local current_addr
-    current_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
-    if [ "$current_addr" = "$address" ]; then
-        echo "Key already installed for: $address"
-        echo "Nothing to do."
-        return 0
-    fi
-
-    # Check if a key volume already exists (either name: an install that never
-    # started on this version has not migrated yet)
-    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx 'onionpress-onion-keys\|onionpress-arti-state'; then
-        echo "An onion address key already exists."
-        echo ""
-        if [ -n "$current_addr" ]; then
-            echo "Current address: $current_addr"
-            echo ""
-        fi
-        echo "Importing a new key will REPLACE your current onion address."
-        echo "A copy of the current key is kept in $DATA_DIR/replaced-keys/."
-        echo ""
-        printf "Continue? [y/N] "
-        local confirm=""
-        read -r confirm || true
-        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-            echo "Cancelled."
-            return 1
-        fi
-    fi
-
-    # Keep a copy of the current key, ask the OnionHeaven hubs that may hold
-    # it to delete theirs (this stops the heartbeat client, which holds the
-    # old key; the next start of OnionPress brings it back with the new one),
-    # stop OnionPress and put the new key in place.
-    local rc=0
-    replace_onion_key "$key_b32" || rc=$?
-    if [ "$rc" -eq 2 ]; then
-        echo "Key already installed for: $address"
-        echo "Nothing to do."
-        return 0
-    elif [ "$rc" -ne 0 ]; then
-        echo "ERROR: $REPLACE_KEY_ERROR" >&2
-        if [ "$REPLACE_KEY_STOPPED" = "yes" ]; then
-            echo "OnionPress was stopped; start it again with 'onionpress restart'." >&2
-        fi
-        start_heartbeat_client
-        return 1
-    fi
-
-    echo "Imported key for: $address"
-    echo "Key files written to: $DATA_DIR/shared/vanity-keys/$address"
-    if [ -n "$REPLACE_KEY_KEPT" ]; then
-        echo "The replaced key is kept in:"
-        printf '%s\n' "$REPLACE_KEY_KEPT" | sed 's/^/  /'
-    fi
-    echo ""
-    echo "Run 'onionpress restart' to use this address (it starts the heartbeat client again)."
-    # Not started here: the unit Wants= onionpress.service, so starting it
-    # would start the whole stack the line above says to restart (#507);
-    # the restart's end starts it, where it is enabled.
-    return 0
-}
-
-# Replace this site's onion service key, in an order that never loses the
-# current one (onionpress import-key comes here; the Settings page never
-# replaces the key on Linux: its import-key-file is refused):
-#   1. check: the key goes to key_manager.py on stdin, which refuses one Tor
-#      would not serve as the address it derives (check_expanded_secret_key)
-#      and writes it to a staging folder; the staged files are read back as
-#      that address;
-#   2. keep: a copy of every key this install may be using (what the tor
-#      container holds, and vanity-keys/) goes to $DATA_DIR/replaced-keys/
-#      <address>-<UTC time>/ (host only: not under shared/, which the
-#      containers mount; 0700, key_manager.keep_replaced_key). If no
-#      copy can be made, or nothing could be read while a key volume exists
-#      (or Docker cannot say), nothing is replaced;
-#   3. only then the OnionHeaven hubs are asked to delete the old key
-#      (onionheaven_release, which asks unless ONIONPRESS_YES=true) and
-#      OnionPress is stopped;
-#   4. the staged folder becomes vanity-keys/ and .import-key-pending is
-#      set: the next start removes the old key volumes (only a confirmed
-#      removal counts) and installs the new key from vanity-keys/;
-#   5. ADDRESS_PREFIX follows the new address.
-# Usage: replace_onion_key <base32 key> (a function argument, never a
-# command's argv). Sets REPLACE_KEY_ADDRESS (the new address),
-# REPLACE_KEY_KEPT (the kept folders, one per line), REPLACE_KEY_STOPPED
-# (yes once OnionPress was stopped) and, on failure, REPLACE_KEY_ERROR (one
-# line for the user or the Settings page). Returns 0 replaced, 2 already
-# this site's key (nothing done), 1 refused or failed. Never starts
-# OnionPress again: the caller does.
-replace_onion_key() {
-    local staging new_addr staged rc vdir vol state
-    local vdirs=()
-    REPLACE_KEY_ADDRESS=""
-    REPLACE_KEY_KEPT=""
-    REPLACE_KEY_STOPPED=""
-    REPLACE_KEY_ERROR=""
-    mkdir -p "$DATA_DIR/shared"
-    if ! staging=$(mktemp -d "$DATA_DIR/.key-import-XXXXXX"); then
-        REPLACE_KEY_ERROR="Could not make a staging folder in $DATA_DIR"
-        return 1
-    fi
-    mkdir "$staging/vanity-keys"
-
-    # 1. Check and stage.
-    if ! new_addr=$(printf '%s\n' "$1" | python3 "$SCRIPTS_DIR/key_manager.py" import-key - "$staging/vanity-keys" 2>"$staging/error"); then
-        REPLACE_KEY_ERROR=$(head -c 400 "$staging/error" | tr -d '\r' | head -1)
-        REPLACE_KEY_ERROR="${REPLACE_KEY_ERROR#Error: }"
-        REPLACE_KEY_ERROR="${REPLACE_KEY_ERROR:-The key could not be read}"
-        rm -rf "$staging"
-        log "Key import refused: $REPLACE_KEY_ERROR"
-        return 1
-    fi
-    staged=$(python3 "$SCRIPTS_DIR/key_manager.py" staged-address "$staging/vanity-keys/$new_addr" 2>>"$LOG_FILE") || staged=""
-    if ! is_onion_address "$new_addr" || [ "$staged" != "$new_addr" ]; then
-        REPLACE_KEY_ERROR="The imported key did not read back as one onion address"
-        rm -rf "$staging"
-        log "Key import refused: $REPLACE_KEY_ERROR"
-        return 1
-    fi
-    REPLACE_KEY_ADDRESS="$new_addr"
-
-    # Already the address Tor serves (or, with Tor not answering, the one in
-    # vanity-keys/): nothing to replace.
-    vdir=$(vanity_key_dir || true)
-    staged=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ') || staged=""
-    if [ "$staged" = "$new_addr" ] \
-            || { [ -z "$staged" ] && [ -n "$vdir" ] && [ "$(basename "$vdir")" = "$new_addr" ]; }; then
-        rm -rf "$staging"
-        log "Key import: $new_addr is already this site's address"
-        return 2
-    fi
-
-    # 2. Keep a copy of the current key.
-    [ -n "$vdir" ] && vdirs=("$vdir")
-    rc=0
-    REPLACE_KEY_KEPT=$(python3 "$SCRIPTS_DIR/key_manager.py" keep-current "$DATA_DIR/replaced-keys" "${vdirs[@]}" 2>>"$LOG_FILE") || rc=$?
-    if [ "$rc" -eq 3 ]; then
-        # Nothing could be read. Only Docker's confirmed "no such volume"
-        # for every place a key lives means there is no key to keep.
-        for vol in onionpress-onion-keys onionpress-arti-state onionpress-tor-state; do
-            state=0; docker_volume_state "$vol" || state=$?
-            if [ "$state" -ne 1 ]; then
-                REPLACE_KEY_ERROR="The current onion service key could not be read, so no copy of it could be kept. Start OnionPress and try again; nothing was changed."
-                rm -rf "$staging"
-                log "Key import refused: no copy of the current key (volume $vol: state $state)"
-                return 1
-            fi
-        done
-        REPLACE_KEY_KEPT=""
-        log "Key import: no current key to keep (no key volume)"
-    elif [ "$rc" -ne 0 ]; then
-        REPLACE_KEY_ERROR="A copy of the current onion service key could not be kept (see $LOG_FILE); nothing was changed."
-        rm -rf "$staging"
-        log "Key import refused: keeping the current key failed"
-        return 1
-    else
-        log "Kept a copy of the current onion service key: $(printf '%s' "$REPLACE_KEY_KEPT" | tr '\n' ' ')"
-    fi
-
-    # 3. Only now: the hubs, then OnionPress.
-    if ! onionheaven_release key-import; then
-        REPLACE_KEY_ERROR="Cancelled: an OnionHeaven hub may still hold the current key"
-        rm -rf "$staging"
-        return 1
-    fi
-    REPLACE_KEY_STOPPED=yes
-    stop_containers 2>/dev/null || true
-
-    # 4. The staged key becomes vanity-keys/; the next start does the rest.
-    if [ -e "$DATA_DIR/shared/vanity-keys" ] || [ -L "$DATA_DIR/shared/vanity-keys" ]; then
-        if ! mv "$DATA_DIR/shared/vanity-keys" "$staging/replaced-vanity-keys"; then
-            REPLACE_KEY_ERROR="Could not move the old vanity-keys folder aside; the key was not replaced"
-            rm -rf "$staging/vanity-keys"
-            log "ERROR: $REPLACE_KEY_ERROR (staging folder $staging)"
-            return 1
-        fi
-    fi
-    if ! mv "$staging/vanity-keys" "$DATA_DIR/shared/vanity-keys"; then
-        mv "$staging/replaced-vanity-keys" "$DATA_DIR/shared/vanity-keys" 2>/dev/null || true
-        REPLACE_KEY_ERROR="Could not put the new key in place; the key was not replaced"
-        log "ERROR: $REPLACE_KEY_ERROR (staging folder $staging)"
-        return 1
-    fi
-    touch "$DATA_DIR/.import-key-pending"
-    # A replaced identity ends any unfinished move of the old key into
-    # its new volume: the next start must not copy it back.
-    rm -f "$DATA_DIR/.key-volume-migration-pending"
-    rm -rf "$staging"
-
-    # 5.
-    set_address_prefix_for "$new_addr"
-    log "Imported key for address: $new_addr"
-    return 0
-}
-
-# ADDRESS_PREFIX follows an imported address, keeping the configured
-# prefix's length (3 when there is none).
-set_address_prefix_for() {
-    local address="$1"
-    # Update ADDRESS_PREFIX in config to match imported address
-    local current_prefix=""
-    if [ -f "$DATA_DIR/config" ]; then
-        current_prefix=$(config_value ADDRESS_PREFIX)
-    fi
-    local prefix_len=${#current_prefix}
-    if [ "$prefix_len" -lt 2 ]; then
-        prefix_len=3
-    fi
-    local addr_prefix=$(echo "$address" | cut -c1-$prefix_len)
-    if [ -f "$DATA_DIR/config" ] && grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
-        sed -i "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
-    else
-        echo "ADDRESS_PREFIX=$addr_prefix" >> "$DATA_DIR/config"
-    fi
-    log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
+    op_py --data-dir "$DATA_DIR" import-key "$@"
 }
 
 # Configure, then activate, Cache Enabler (network-wide, with its cache
@@ -1213,8 +641,8 @@ print(json.dumps({"reset": True, **reset_onionheaven()}))
 # the SOCKS port check, the Cloudflare tunnel (only once WordPress is
 # installed; removed when the token goes), the pinned plugins, the
 # provisioning steps, the plugins' setup and the image rebuild (detached:
-# out of this script's job table, and out of the settings watcher's
-# cgroup through systemd-run). Best effort: it never stops the start.
+# out of this script's job table, and out of the daemon unit's cgroup
+# through systemd-run). Best effort: it never stops the start.
 # $1: whether WordPress is installed.
 start_post_up() {
     op_py --data-dir "$DATA_DIR" start-post-up \
@@ -1225,17 +653,6 @@ start_post_up() {
 }
 
 
-
-# Whether Docker has volume $1: 0 yes, 1 no, 2 Docker could not say (the
-# daemon is not up yet, e.g. the Colima VM is still booting). Callers must
-# treat 2 as "stop", never as "no": a missing key volume is the first-run
-# signal, so reading a Docker error as absence turns an upgrade into a first
-# run. Kept identical in the macOS and Linux launchers; a test enforces that.
-docker_volume_state() {
-    local names
-    names=$(docker volume ls --format '{{.Name}}' 2>>"$LOG_FILE") || return 2
-    printf '%s\n' "$names" | grep -qx -- "$1"
-}
 
 
 # Wait up to $1 seconds for the Docker daemon to answer; returns 1 if it
@@ -1258,21 +675,6 @@ wait_for_docker() {
     return 0
 }
 
-
-# One-time migration of the onion service key volume from its historical
-# name, onionpress-arti-state (until 2026-09-25), to onionpress-onion-keys:
-# ContainerManager.migrate_key_volume (Phase 4, #120; CLAUDE.md, "The key
-# volume migration fails loudly"), run through the shared CLI. It runs
-# before the first-run check, which keys off the NEW volume's existence, so
-# its exit status is this function's and a 1 stops the start (the callers'
-# `if ! migrate_key_volume`): an empty onionpress-onion-keys that starting
-# tor would create passes for the migrated key on the next start. The log
-# lines reach the log and the terminal as log's do; PIPESTATUS keeps the
-# Python's status past tee.
-migrate_key_volume() {
-    op_py --data-dir "$DATA_DIR" migrate-key-volume 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
-}
 
 # Rootless Docker's default port driver (RootlessKit "builtin") does not
 # carry a visitor's address: everyone who opens WordPress's published port,
@@ -1298,44 +700,9 @@ note_if_lan_looks_local() {
     return 0
 }
 
-# WordPress and MariaDB reach nothing outside Docker (issue #144). Their
-# network's bridge (onionpress-wp0, docker-compose.yml) gets the
-# ONIONPRESS-WP chain before anything starts on it: only replies to
-# connections made from outside (the published port, LAN browsers,
-# docker-proxy) leave the bridge or reach the host itself. Where the rules
-# go, from onionpress/wordpress_egress.py (shared with macOS):
-#   rootless Docker  RootlessKit's network namespace, entered as its owner
-#                    (nsenter -U --preserve-credentials -n -m), as Docker's
-#                    rootless docs do;
-#   system Docker    the host, through a one-shot helper container
-#                    (--privileged --pid host --network none, the pinned
-#                    tor image) running the host's own iptables. The docker
-#                    group can do that already; this user is not root. The
-#                    .deb's docker.service drop-in does it at boot, before
-#                    Docker restarts the containers.
-# The same call shuts the Tor side (onionpress-network, bridge
-# onionpress-tor0: tor, onionheaven, cloudflared, takeover workers) off from
-# this machine and private addresses (the LAN), and refuses WordPress's
-# published port (ONIONPRESS_WP_PORT) from anything but loopback: a
-# container on any bridge, other projects' too, would otherwise reach it
-# through docker-proxy and arrive as the gateway auto-login trusts.
-# Best effort: without the chain the site still starts (WordPress's own
-# requests still go through Tor) and the log says so. The body is
-# onionpress.cli's (Phase 4, #120): it logs the verdict in this script's
-# log format, tee'd into the log, and its status never stops the start.
-block_wordpress_egress() {
-    op_py --data-dir "$DATA_DIR" wordpress-egress --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
-    return 0
-}
-
-# Rootless Docker's network namespace, as /proc names it ("" under system
-# Docker). It is new, and holds none of the rules above, each time the
-# rootless daemon starts; the status loop re-applies them when it changes.
-rootless_netns() {
-    local pid
-    pid=$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dockerd-rootless/child_pid" 2>/dev/null) || return 0
-    readlink "/proc/$pid/ns/net" 2>/dev/null || true
-}
+# Rootless Docker's network namespace is new, and holds none of the rules
+# above, each time the rootless daemon starts; the daemon re-applies them
+# when it changes (Daemon._watch_rootless_netns).
 
 start_containers() {
     log "Starting OnionPress containers..."
@@ -1382,7 +749,6 @@ start_containers() {
     else
         log "WordPress not installed -- run 'onionpress setup' or open the OnionPress tray's Setup dialog to configure"
         bind_wordpress_port_for_install_state false
-        hold_heartbeat_client_until_installed
     fi
     note_if_lan_looks_local
     # Tor, the SOCKS port check, the plugins,
@@ -1424,7 +790,6 @@ start_cloudflare_tunnel() {
 
 stop_containers() {
     log "Stopping OnionPress containers..."
-    stop_container_log_capture
     stop_onionheaven_farm
     # Capture the offset BEFORE compose-down so the next start can wait
     # for the TIME_WAIT sockets to clear and reuse the same offset.
@@ -1440,1758 +805,114 @@ stop_containers() {
     [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
     if [ "$down_rc" -ne 0 ]; then
         log "ERROR: stopping the containers failed (compose down exited $down_rc)"
-        write_status 2>/dev/null || true
         return "$down_rc"
     fi
     log "Containers stopped"
-    # Write a final stopped status.json so any surviving tray process
-    # (the tray runs as its own user process, not under our service)
-    # flips its icon to gray instead of holding the previous "running"
-    # snapshot indefinitely. write_status's `docker compose ps` will
-    # return empty here, which the state derivation maps to "stopped".
-    write_status 2>/dev/null || true
+    # The daemon's next pass (within 10 s) writes the stopped status the
+    # tray and the pages read.
 }
 
 # ─── Status queries ──────────────────────────────────────────────────
 
-get_status() {
-    cd "$DOCKER_DIR"
-    docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
-}
 
 # ─── OnionHeaven on/off ─────────────────────────────────────────────
-
-# The heartbeat client (onionpress-heartbeat.py) holds the onion service key
-# it loaded at start and sends it with every /online. Before that key goes
-# or is replaced it is stopped, or its next beat would put the key back on
-# the hub after the /unregister. Current installs run it as a user unit,
-# old ones as a system unit: both are stopped (by stop, restart and update
-# too).
-stop_heartbeat_client() {
-    if systemctl --user is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-        log "Stopping heartbeat client..."
-        systemctl --user stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-    fi
-    if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-        log "Stopping heartbeat client (system unit)..."
-        sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-    fi
-}
-
-# Start it again (it then loads the key Tor serves now) where its unit is
-# enabled.
-start_heartbeat_client() {
-    if heartbeat_client_held; then
-        log "Heartbeat client stays held: WordPress is not installed yet"
-        return 0
-    fi
-    if systemctl --user is-enabled onionpress-heartbeat.service >/dev/null 2>&1; then
-        systemctl --user start onionpress-heartbeat 2>>"$LOG_FILE" \
-            || log "WARNING: Failed to start heartbeat client"
-    elif systemctl is-enabled onionpress-heartbeat.service >/dev/null 2>&1; then
-        sudo systemctl start onionpress-heartbeat 2>>"$LOG_FILE" \
-            || log "WARNING: Failed to start heartbeat client"
-    fi
-}
-
-# Before this install forgets its onion service key (reset, key import, a
-# restore to another address, uninstall): ask every OnionHeaven hub that
-# may hold a copy to delete it, while the key is still here to sign the
-# request. Stops the heartbeat client first (above), then onionpress.cli
-# onionheaven-unregister sends the signed /unregister for the whole address
-# to the hub the registration record names, through the tor container
-# (which must be running), and says what it did; with nothing registered it
-# does and prints nothing. Usage: onionheaven_release <reason> [<address
-# whose key stays>]. Sets ONIONHEAVEN_RELEASE_RC (0 nothing left on a hub,
-# 1 something the user could still take back, 3 something nothing here can
-# take back, other: the command failed) and returns 1 only when the user
-# chose to stop at the question
-# (the heartbeat client is started again then).
-onionheaven_release() {
-    local answer=""
-    ONIONHEAVEN_RELEASE_RC=0
-    stop_heartbeat_client
-    op_py onionheaven-unregister --reason "$1" \
-        ${2:+--keep-address "$2"} || ONIONHEAVEN_RELEASE_RC=$?
-    # 0 and 3: nothing the user could still do. Anything else (1, or a
-    # failure of the command itself) may leave a key on a hub: ask.
-    case "$ONIONHEAVEN_RELEASE_RC" in 0|3) return 0 ;; esac
-    [ "$ONIONPRESS_YES" = "true" ] && return 0
-    printf "Continue anyway? The hub keeps the key listed above. [y/N] "
-    read -r answer || true
-    if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
-        return 0
-    fi
-    start_heartbeat_client
-    return 1
-}
 
 # `onionpress onionheaven enable|disable|status [--json]`: one
 # implementation for both platforms in src/onionpress/onionheaven.py
 # (issue #365). It writes REGISTER_WITH_ONIONHEAVEN through the config
-# CLI's checked path; the heartbeat daemon re-reads the choice every
-# cycle, so it takes effect without a restart.
+# CLI's checked path; the daemon re-reads the choice every cycle, so it
+# takes effect without a restart.
 onionheaven_cmd() {
     op_py --data-dir "$DATA_DIR" onionheaven "$@"
 }
 
-get_onion_address() {
-    cd "$DOCKER_DIR"
-    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    # The whole value must be an onion address: callers cache it and put it
-    # into URLs. Anything else reads as not generated yet.
-    if is_onion_address "$ONION_ADDR"; then
-        echo "$ONION_ADDR"
-        return 0
-    fi
-    echo "Generating..."
-    return 1
-}
 
-# Read and cache healthcheck onion address
-get_healthcheck_address() {
-    cd "$DOCKER_DIR"
-    local addr
-    addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/healthcheck/hostname 2>/dev/null || echo "")
-    if is_onion_address "$addr"; then
-        echo "$addr"
-        echo "$addr" > "$DATA_DIR/healthcheck-address"
-        return 0
-    fi
-    return 1
-}
 
-# ─── Container log capture ───────────────────────────────────────────
-# Capture stdout/stderr from key containers to rotating log files.
-# Runs as background processes; PIDs saved for cleanup on stop.
-
-CONTAINER_LOG_DIR="$DATA_DIR/logs"
-CONTAINER_LOG_PIDS=""
-
-_status_poll_loop() {
-    # Transient failures (docker hiccup, network blip) must not kill this loop.
-    set +e
-    # A rootless daemon that restarts behind our back (crash, a manual
-    # `systemctl --user restart docker`) brings the containers back in a new
-    # namespace without the WordPress network's rules: put them back. One
-    # attempt per namespace, so a lasting failure logs once.
-    local netns now
-    netns=$(rootless_netns)
-    while true; do
-        sleep 30
-        write_status
-        now=$(rootless_netns)
-        if [ -n "$now" ] && [ "$now" != "$netns" ]; then
-            log "Rootless Docker's network namespace changed (daemon restarted); re-applying the WordPress network's egress block"
-            block_wordpress_egress
-            netns=$now
-        fi
-    done
-}
-
-start_container_log_capture() {
-    mkdir -p "$CONTAINER_LOG_DIR"
-    # onionpress-wordpress too (container-wordpress.log): its stderr carries
-    # every PHP error_log line, the `[OnionPress Wayback]` state transitions
-    # among them, which the analytics upload ships; it was left out through
-    # 2.5.6 while the Mac daemon captured it (issue #203). The tailers end
-    # with their containers (`docker logs -f` exits when the container is
-    # removed by `compose down`), which is what keeps a restart from running
-    # two per container; this process's own are killed in stop_containers.
-    for container in onionpress-tor onionheaven onionpress-wordpress; do
-        local logfile="$CONTAINER_LOG_DIR/container-${container#onionpress-}.log"
-        # Rotate container log if over 5MB
-        if [ -f "$logfile" ]; then
-            local sz
-            sz=$(stat -c%s "$logfile" 2>/dev/null || echo 0)
-            if [ "$sz" -ge "$LOG_MAX_SIZE" ]; then
-                mv -f "$logfile" "${logfile}.1"
-            fi
-        fi
-        docker logs -f --tail 200 "$container" >> "$logfile" 2>&1 &
-        CONTAINER_LOG_PIDS="$CONTAINER_LOG_PIDS $!"
-    done
-}
-
-stop_container_log_capture() {
-    for pid in $CONTAINER_LOG_PIDS; do
-        kill "$pid" 2>/dev/null || true
-    done
-    CONTAINER_LOG_PIDS=""
-}
-
-# Copy the tor hostname into the shared volume so WP code (theme,
-# mu-plugins, REST endpoints) can answer "what's my .onion?" without
-# parsing Host headers — needed when the site is hit via localhost.
-# Idempotent; safe to call from multiple places. Read from the tor
-# container, written by www-data: root's cp in the tor container followed a
-# link www-data can plant at onion_address to any file there (its key).
-write_shared_onion_address() {
-    local addr
-    addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-    is_onion_address "$addr" || return 1
-    printf '%s\n' "$addr" | wp_put /var/lib/onionpress/onion_address 644 >/dev/null 2>&1
-}
-
+# The wait after a start (issue #529): onionpress.start.wait_for_services
+# over a start step's manager, every log line as this bash body's, the
+# address into the shared volume and the healthcheck address into the data
+# dir once both are ready. A timeout is a WARNING (Linux has no START
+# SUMMARY); never a failed start, which would have systemd stop the
+# running containers. The site's address is read back afterwards by
+# onion_address_line.
 wait_for_services() {
-    cd "$DOCKER_DIR"
-    local max_wait=120
-    local waited=0
-    local wp_ready=false
-    local onion_ready=false
-    local onion_addr=""
-
-    log "Waiting for services to be ready..."
-
-    while [ $waited -lt $max_wait ]; do
-        # Get onion address
-        if [ -z "$onion_addr" ] || [ "$onion_addr" = "Generating..." ]; then
-            onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-        fi
-
-        # Check WordPress
-        if [ "$wp_ready" = false ]; then
-            if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
-                log "WordPress is responding on localhost:${ONIONPRESS_WP_PORT}"
-                wp_ready=true
-
-                if ! wp_is_installed; then
-                    log "WordPress not installed -- setup required, skipping Tor wait"
-                    # Even on the early-bail path, write the address so
-                    # the Setup dialog (and later, the theme accessed via
-                    # localhost) can read it.  No-op if hostname not yet
-                    # generated.
-                    if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-                        write_shared_onion_address && \
-                            log "Onion address written to shared volume" || true
-                    fi
-                    return 0
-                fi
-                log "Waiting for Tor to bootstrap and onion service to be reachable..."
-            fi
-        fi
-
-        # Check Tor bootstrap
-        if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-            if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
-                if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
-                    log "Onion service ready: ${onion_addr}"
-                    onion_ready=true
-                fi
-            fi
-        fi
-
-        # Both ready
-        if [ "$wp_ready" = true ] && [ "$onion_ready" = true ]; then
-            log "All services are ready after ${waited}s"
-            ONION_ADDR="$onion_addr"
-
-            # Write onion address to shared volume for WordPress plugins
-            write_shared_onion_address && \
-                log "Onion address written to shared volume" || \
-                log "WARNING: Failed to write onion address to shared volume"
-
-            # Read and save healthcheck address
-            if hc_addr=$(get_healthcheck_address); then
-                log "Healthcheck address: ${hc_addr}"
-            fi
-
-            return 0
-        fi
-
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    log "WARNING: Services not fully ready after ${max_wait}s (wp=${wp_ready}, onion=${onion_ready})"
-    if [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-        ONION_ADDR="$onion_addr"
-    else
-        ONION_ADDR="Generating..."
-    fi
-    # Return success — containers are running, Tor may still be bootstrapping.
-    # Failing here would cause systemd to kill the running containers.
+    op_py --data-dir "$DATA_DIR" wait-for-services \
+        --docker-dir "$DOCKER_DIR" --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
     return 0
 }
 
 # ─── Backup & Restore ─────────────────────────────────────────────────
+# The backup and both restores are the shared Python's (issue #406):
+# onionpress backup (cli.cmd_backup → backup.create_backup), restore
+# (cmd_restore, install-from-backup), settings-page-backup and
+# settings-page-restore (cmd_settings_page_backup / _restore). The
+# cases below delegate.
 
-# Print file $2 of key volume $1 (a path inside the volume) for a backup:
-# root in a throwaway container from the stack's tor image (KEY_HELPER_IMAGE)
-# with DAC_OVERRIDE alone (the files are debian-tor's, or arti's, in 0700
-# folders), the volume read-only, no network. Fails, without running
-# anything, when the volume does not exist: `docker run -v` would create it,
-# and an empty onionpress-onion-keys passes for an installed key (or, beside
-# onionpress-arti-state, for a migrated one) at the next start.
-key_volume_cat() {
-    local vol="$1" path="$2" state=0
-    docker_volume_state "$vol" || state=$?
-    [ "$state" -eq 0 ] || return 1
-    docker run --rm \
-        --network none \
-        --cap-drop ALL \
-        --cap-add DAC_OVERRIDE \
-        --security-opt no-new-privileges:true \
-        -v "$vol:/src:ro" \
-        --entrypoint cat \
-        "$KEY_HELPER_IMAGE" "/src/$path"
+# ─── The daemon ───────────────────────────────────────────────────────
+
+# `onionpress daemon` (onionpress.daemon, issue #407) is the long-running
+# process: the status loop and the two documents the tray and the pages
+# read, the dual probe and the republish trigger, the OnionHeaven
+# heartbeat, the Settings page's requests (handle-action), the container
+# log capture, sleep and wake. It runs as the onionpress-daemon.service
+# user unit, ordered before onionpress.service; `daemon start` here is
+# for a site started from a terminal (idempotent, --no-block), and a
+# failure is a warning: the stack serves without it.
+start_daemon() {
+    if ! op_py --data-dir "$DATA_DIR" daemon start --launcher "$INSTALL_DIR/onionpress" >> "$LOG_FILE" 2>&1; then
+        log "WARNING: the OnionPress daemon could not be started (systemctl --user status onionpress-daemon)"
+    fi
 }
 
-create_backup() {
-    # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
-    # Usage: create_backup <password> <output_path> [--without-hub-data] [--without-host-secrets]
-    # --without-hub-data: for a backup handed to WordPress (the Settings
-    # page's download), whose password came from there too. Refused on an
-    # OnionHeaven hub or OnionHome, or when that could not be checked
-    # (return 3, BACKUP_REFUSAL says why:
-    # backup.settings_page_backup_refusal), and never a hub's registry or
-    # registrants' keys. Without it, a hub's are in, sealed to its recovery
-    # key when one is set up (backup.stage_hub_backup).
-    # --without-host-secrets: for that backup too. Its config is cut to what
-    # WordPress's status page shows (no Cloudflare tunnel token, image
-    # overrides, bind host...), the healthcheck onion service's key (a start
-    # makes a new one) is left out, and metadata.json says so
-    # (backup.TUNNEL_TOKEN_KEY).
-    local password="$1"
-    local output_path="$2"
-    local with_hub_data="yes" with_host_secrets="yes"
-    local staging
-    BACKUP_REFUSAL=""
-
-    local opt
-    for opt in "${@:3}"; do
-        case "$opt" in
-            --without-hub-data) with_hub_data="no" ;;
-            --without-host-secrets) with_host_secrets="no" ;;
-            *) echo "ERROR: create_backup: unknown option: $opt" >&2
-               return 1 ;;
-        esac
-    done
-
-    if [ -z "$password" ]; then
-        echo "ERROR: Password is required" >&2
-        return 1
-    fi
-
-    # Verify password matches a WordPress admin account before creating backup
-    # (backup contains Tor private keys — only WP admins should be able to export them).
-    # The password reaches the verifier on stdin and is never part of any PHP
-    # source, so no character in it can change the code that runs.
-    log "Backup: verifying WordPress admin password..."
-    if ! printf '%s' "$password" | verify_wp_admin_password; then
-        log "ERROR: Password does not match any WordPress admin account"
-        echo "ERROR: Password does not match any WordPress admin account" >&2
-        return 1
-    fi
-    log "Backup: password verified"
-
-    # The onion address, for metadata.json. The tor container writes this
-    # file, and a restore refuses a backup whose metadata holds anything
-    # but a whole address — so refuse now, before any work and while the
-    # site is still here. No address at all (tor not running) stays empty
-    # as before: the restore takes the address from the key.
-    local onion_addr
-    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
-    if [ -n "$onion_addr" ] && ! is_onion_address "$onion_addr"; then
-        log "ERROR: Backup: the tor container's onion address is not a valid v3 address — no backup made"
-        echo "ERROR: The onion address the tor container reports is not a valid v3 .onion address; no backup was made." >&2
-        return 1
-    fi
-
-    # The Settings page's backup carries this node's own onion service key
-    # to WordPress: refused on an OnionHeaven hub or OnionHome, before
-    # anything is copied (not on status.json's server_active, the status
-    # page's view, which fails open). Fails closed: no address, a container
-    # that does not answer, or a helper that fails, and it is refused too.
-    # Only exit 3 says why on stdout; any other failure (a crash, an older
-    # CLI) gets the words of backup.UNVERIFIED_BACKUP_REFUSED_MSG, which the
-    # Mac shows for the same case (a test keeps the two equal).
-    if [ "$with_hub_data" = "no" ]; then
-        local refusal="" refusal_rc=0
-        refusal=$(op_py --data-dir "$DATA_DIR" settings-page-backup-check --address "$onion_addr" 2>>"$LOG_FILE") || refusal_rc=$?
-        if [ "$refusal_rc" -ne 0 ]; then
-            if [ "$refusal_rc" -ne 3 ] || [ -z "$refusal" ]; then
-                refusal="OnionPress could not check whether this node is an OnionHeaven hub or OnionHome (its containers did not answer), and a backup made here goes through WordPress. Nothing was backed up: try again once OnionPress is running, or back up from the OnionPress app (Backup... in its menu) or with onionpress backup."
-            fi
-            BACKUP_REFUSAL="$refusal"
-            log "Backup: refused (the Settings page's backup): $refusal"
-            return 3
-        fi
-    fi
-
-    # The key reads below run from the stack's tor image; a backup without
-    # the keys it could have held is not made.
-    if ! ensure_key_helper_image; then
-        log "ERROR: Backup: no tor image to read the onion service keys with — no backup made"
-        echo "ERROR: The tor image is not available to read the onion service keys; no backup was made." >&2
-        return 1
-    fi
-
-    staging=$(mktemp -d -t onionpress-backup-XXXXXX)
-    trap "rm -rf '$staging'" RETURN
-
-    # 1. Extract Tor keys (both PEM and C Tor formats), from the user's
-    # vanity-keys folder or else out of the volumes (key_volume_cat).
-    log "Backup: extracting Tor keys..."
-    mkdir -p "$staging/tor-keys"
-
-    # PEM key (ks_hs_id.ed25519_expanded_private)
-    local arti_key
-    arti_key=$(find "$DATA_DIR/shared/vanity-keys" -name "ks_hs_id.ed25519_expanded_private" 2>/dev/null | head -1)
-    if [ -n "$arti_key" ]; then
-        cp "$arti_key" "$staging/tor-keys/"
-    else
-        # Try extracting from the key volume — the current name first, then the
-        # pre-2026-09-25 one for an install backed up before its first start
-        # on this version migrated it.
-        key_volume_cat onionpress-onion-keys wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
-            || key_volume_cat onionpress-arti-state state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
-            || true
-        if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
-            rm -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
-            log "WARNING: No PEM key found"
-        fi
-    fi
-
-    # C Tor format keys (hs_ed25519_secret_key, hs_ed25519_public_key)
-    local ctor_key
-    ctor_key=$(find "$DATA_DIR/shared/vanity-keys" -name "hs_ed25519_secret_key" 2>/dev/null | head -1)
-    if [ -n "$ctor_key" ]; then
-        cp "$ctor_key" "$staging/tor-keys/"
-        # Also grab public key if present
-        local ctor_pub="${ctor_key%secret_key}public_key"
-        [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
-    else
-        # Try extracting from the tor-state volume
-        key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_secret_key > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
-        if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
-            rm -f "$staging/tor-keys/hs_ed25519_secret_key"
-            log "WARNING: No C Tor secret key found"
-        else
-            key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
-            [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
-            key_volume_cat onionpress-tor-state hidden_service/wordpress/hostname > "$staging/tor-keys/hostname" 2>/dev/null || true
-            [ ! -s "$staging/tor-keys/hostname" ] && rm -f "$staging/tor-keys/hostname"
-        fi
-    fi
-
-    # The restore takes the PEM and nothing else. A key Tor minted itself
-    # (a first start that could not seed one, issue #519) exists only in C
-    # Tor's form: derive the PEM from it, as the Mac's backup does; no key
-    # at all is no backup, not an archive no restore accepts.
-    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] \
-       && [ -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
-        if python3 "$SCRIPTS_DIR/key_manager.py" ctor-to-arti "$staging/tor-keys" >>"$LOG_FILE" 2>&1 \
-           && [ -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
-            log "Backup: onion service key PEM derived from C Tor's key files"
-        else
-            log "WARNING: could not derive the onion service key PEM from C Tor's key files"
-        fi
-    fi
-    rm -f "$staging/tor-keys/hostname"
-    # No key at all: the archive says so (metadata excludes_onion_key, as
-    # the Mac page's backup does), and a restore keeps the install's own
-    # key and address; an archive with no PEM and no such word failed
-    # every restore ("Backup is missing ks_hs_id.ed25519_expanded_private").
-    local keyless_backup=no
-    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
-        keyless_backup=yes
-        rm -rf "$staging/tor-keys"
-        mkdir -p "$staging/tor-keys"
-        log "WARNING: Backup: no onion service key could be read (the PEM in onionpress-onion-keys, or C Tor's key in onionpress-tor-state): this backup carries none, and a restore of it keeps the key and address of the install it is restored onto"
-        echo "WARNING: No onion service key could be read: this backup carries none (a restore of it keeps the target install's address). See $LOG_FILE." >&2
-    fi
-
-    # The healthcheck onion service's key is never backed up, as on the
-    # Mac: a start makes a new one and the heartbeat gives the hub its
-    # address (one restore path, one secret fewer in every backup).
-
-    # 2. Dump WordPress database
-    log "Backup: exporting database..."
-    mkdir -p "$staging/database"
-    local db_pass="${WORDPRESS_DB_PASSWORD:-}"
-    if [ -z "$db_pass" ]; then
-        setup_db_passwords
-        db_pass="$WORDPRESS_DB_PASSWORD"
-    fi
-    db_client "$db_pass" mariadb-dump -u wordpress wordpress > "$staging/database/wordpress.sql" 2>>"$LOG_FILE"
-    if [ $? -ne 0 ] || [ ! -s "$staging/database/wordpress.sql" ]; then
-        log "ERROR: Database export failed"
-        return 1
-    fi
-
-    # 3. Copy wp-content from container. Read there as www-data (root's
-    #    docker cp followed a wp-content link www-data can plant to any
-    #    folder in the container) and unpacked here as plain files and
-    #    folders: a link planted in the container would point at a host
-    #    path, where zip would store the host file and the pruning and
-    #    marker below would follow it (pack-backup sweeps the tree again).
-    log "Backup: copying wp-content (themes, plugins, uploads)..."
-    if ! op_py stage-wp-content --dest "$staging/wp-content" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: could not copy wp-content out of the container"
-        return 1
-    fi
-
-    # 3b. Drop the regenerable image derivatives (-WxH sizes, -scaled) —
-    #     about half of a media-heavy uploads/ (issue #257). The Python
-    #     helper holds the one classification both platforms use (a file is
-    #     a derivative only when its base image sits beside it). The marker
-    #     it leaves in uploads/ rides along in the archive so the restore
-    #     knows to rebuild the sizes. A helper failure keeps the full copy.
-    local pruned excludes_derivatives="false"
-    if pruned=$(op_py prune-image-derivatives --uploads-dir "$staging/wp-content/uploads" 2>>"$LOG_FILE"); then
-        log "Backup: pruned ${pruned% *} regenerable image derivative(s) — the restore rebuilds them"
-        mkdir -p "$staging/wp-content/uploads"
-        echo "OnionPress: this backup carries original images only; the resized copies (-WxH, -scaled) are rebuilt after a restore by wp media regenerate --only-missing. Removed on completion." \
-            > "$staging/wp-content/uploads/.onionpress-regenerate-derivatives"
-        excludes_derivatives="true"
-    else
-        log "WARNING: derivative pruning failed — backing up uploads in full"
-    fi
-
-    # 4. Save config. A backup handed to WordPress (--without-host-secrets)
-    #    gets only what WordPress's status page shows anyway; the names of
-    #    the secrets that were set go into metadata.json, so a restore can
-    #    say what to enter again (backup.write_wordpress_safe_config).
-    local secrets_left_out=""
-    if [ -f "$DATA_DIR/config" ]; then
-        log "Backup: saving config..."
-        if [ "$with_host_secrets" = "yes" ]; then
-            cp "$DATA_DIR/config" "$staging/config"
-        elif ! secrets_left_out=$(op_py wordpress-safe-config --config "$DATA_DIR/config" \
-                --dest "$staging/config" 2>>"$LOG_FILE"); then
-            log "ERROR: could not write the config for a backup handed to WordPress"
-            return 1
-        fi
-    fi
-
-    # 5. OnionHeaven registry + keys, if this instance is an OnionHeaven hub
-    #    (its volume holds registrants' keys or a registry with a row): a
-    #    consistent copy of the registry and keys/, as plain files, nothing
-    #    else from there (backup.stage_hub_data, shared with the Mac). It
-    #    used to take every node with an onionheaven container, and copied
-    #    registry.db without its write-ahead log.
-    #    Sealed to the hub's recovery key when one is set up
-    #    (onionheaven.sealed: read into memory, never a file in the clear),
-    #    else a plain onionheaven/ under the password, with a warning every
-    #    time (backup.stage_hub_backup). It prints the metadata fields.
-    #    Never in a backup handed to WordPress (--without-hub-data), which a
-    #    hub refused above.
-    #    No answer (4) is never "not a hub": the backup goes ahead without
-    #    the hub data and says so (the log, metadata.json's
-    #    onionheaven_data_unchecked, and backup.HUB_DATA_UNCHECKED_NOTE on
-    #    the terminal, a test keeps the words equal).
-    local hub_rc=0 hub_fields="" hub_unchecked="false"
-    if [ "$with_hub_data" = "yes" ]; then
-        hub_fields=$(op_py --data-dir "$DATA_DIR" stage-hub-backup --staging "$staging" 2>>"$LOG_FILE") || hub_rc=$?
-        case "$hub_rc" in
-            0) ;;
-            3) ;;   # not a hub
-            4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not"
-               hub_unchecked="true"
-               echo "WARNING: OnionPress could not check whether this node is an OnionHeaven hub (its onionheaven container did not answer, or could not read the hub registry), so this backup holds no hub registry or registrants' keys. If this is a hub, make another backup once OnionPress is running." >&2 ;;
-            *) log "ERROR: could not back up the OnionHeaven data (see above)"
-               return 1 ;;
-        esac
-    fi
-    if [ "$hub_rc" -ne 0 ]; then
-        hub_fields=""
-        rm -rf "$staging/onionheaven" "$staging/onionheaven.sealed"
-    fi
-    case "$hub_fields" in
-        *'"onionheaven_data": "unsealed"'*)
-            echo "WARNING: this OnionHeaven hub has no backup recovery key: its registrants' onion service keys are in this backup protected only by its password. Set one up with: onionpress hub-recovery-key create" >&2 ;;
-    esac
-
-    # 6. Write metadata (onion_addr was read and checked at the top)
-    local has_onionheaven="false"
-    { [ -d "$staging/onionheaven" ] || [ -f "$staging/onionheaven.sealed" ]; } && has_onionheaven="true"
-
-    log "Backup: writing metadata..."
-    local meta_flags=()
-    [ "$has_onionheaven" = "true" ] && meta_flags+=(--has-onionheaven)
-    [ "$excludes_derivatives" = "true" ] && meta_flags+=(--excludes-image-derivatives)
-    [ "$hub_unchecked" = "true" ] && meta_flags+=(--hub-unchecked)
-    [ "$with_host_secrets" = "no" ] && meta_flags+=(--without-host-secrets)
-    [ "$keyless_backup" = "yes" ] && meta_flags+=(--excludes-onion-key)
-    if ! op_py --data-dir "$DATA_DIR" backup-metadata \
-            --onion-address "$onion_addr" --version "$ONIONPRESS_VERSION" \
-            --hub-fields "$hub_fields" --secrets-left-out "$secrets_left_out" \
-            ${meta_flags[@]+"${meta_flags[@]}"} > "$staging/metadata.json" 2>>"$LOG_FILE"; then
-        log "ERROR: could not write the backup's metadata"
-        return 1
-    fi
-
-    # 7. Zip and encrypt — backup format 2, written by the shared Python
-    #    helper so both platforms produce the one format (not `zip -P`,
-    #    whose ZipCrypto cipher is weak). It stamps backup_format into
-    #    metadata.json. The password goes over stdin, not argv.
-    log "Backup: creating encrypted archive..."
-    if ! printf '%s' "$password" | op_py pack-backup --staging "$staging" --output "$output_path" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: creating the encrypted archive failed"
-        return 1
-    fi
-
-    local size
-    size=$(du -h "$output_path" | cut -f1)
-    log "Backup: complete ($size) -> $output_path"
-}
-
-restore_backup() {
-    # Restores from a password-protected backup zip.
-    # Usage: restore_backup <password> <zip_path> [--from-settings-page]
-    # --from-settings-page: the file and its password came through
-    # WordPress. Refused before anything is touched (return 3, the reason
-    # as the last line of stdout): on an OnionHeaven hub or OnionHome, or a
-    # node that could not be checked (backup.settings_page_restore_node_refusal,
-    # before the upload is opened); a backup holding an OnionHeaven hub's
-    # registrants' keys or OnionHome's name registry
-    # (backup.settings_page_restore_refusal); a backup of another onion
-    # address than the one the tor container serves
-    # (backup.ADDRESS_CHANGE_REFUSED_MSG: no one at this host is asked, so
-    # the page never changes the address; onionpress restore does). A
-    # backup without a key (a Mac Settings page backup) keeps this site's
-    # address. The hub data volume is never written.
-    local password="$1"
-    local zip_path="$2"
-    local from_settings_page="false"
-    local staging
-
-    case "${3:-}" in
-        "") ;;
-        --from-settings-page) from_settings_page="true" ;;
-        *) echo "ERROR: restore_backup: unknown option: $3" >&2
-           return 1 ;;
-    esac
-
-    if [ -z "$password" ] || [ -z "$zip_path" ]; then
-        echo "ERROR: Password and zip path are required" >&2
-        return 1
-    fi
-    if [ ! -f "$zip_path" ]; then
-        echo "ERROR: Backup file not found: $zip_path" >&2
-        return 1
-    fi
-
-    # The Settings page's restore, before the upload is opened: never on an
-    # OnionHeaven hub or OnionHome, nor on a node whose containers do not
-    # say (fails closed, as the page's backup). The address the tor
-    # container serves is what that check asks about, and what a backup of
-    # another address would replace (refused below). Only exit 3 says why;
-    # any other failure gets backup.UNVERIFIED_RESTORE_REFUSED_MSG's words
-    # (a test keeps them equal).
-    local current_address=""
-    if [ "$from_settings_page" = "true" ]; then
-        current_address=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-        is_onion_address "$current_address" || current_address=""
-        local node_refusal="" node_rc=0
-        node_refusal=$(op_py --data-dir "$DATA_DIR" settings-page-restore-node-check --address "$current_address" 2>>"$LOG_FILE") || node_rc=$?
-        if [ "$node_rc" -ne 0 ]; then
-            if [ "$node_rc" -ne 3 ] || [ -z "$node_refusal" ]; then
-                node_refusal="OnionPress could not check whether this node is an OnionHeaven hub or OnionHome (its containers did not answer), and a restore made here comes through WordPress. Nothing was restored: try again once OnionPress is running, or restore from the OnionPress app (Restore... in its menu) or with onionpress restore."
-            fi
-            log "Restore: refused (the Settings page's restore): $node_refusal"
-            echo "$node_refusal"
-            return 3
-        fi
-    fi
-
-    staging=$(mktemp -d -t onionpress-restore-XXXXXX)
-    trap "rm -rf '$staging'" RETURN
-
-    # Extract — either backup format (format 2 needs the Python decoder;
-    # format 1 ZipCrypto zips still go through unzip inside it).
-    log "Restore: extracting backup archive..."
-    if ! printf '%s' "$password" | op_py extract-backup --archive "$zip_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)"
-        return 1
-    fi
-
-    # Verify metadata exists
-    local metadata_file="$staging/metadata.json"
-    if [ ! -f "$metadata_file" ]; then
-        metadata_file="$staging/./metadata.json"
-    fi
-    if [ ! -f "$metadata_file" ]; then
-        log "ERROR: Not a valid OnionPress backup (no metadata.json)"
-        return 1
-    fi
-
-    # The Settings page's restore: refused before anything is touched.
-    if [ "$from_settings_page" = "true" ]; then
-        local refusal="" refusal_rc=0
-        refusal=$(op_py settings-page-restore-check --staging "$staging" 2>>"$LOG_FILE") || refusal_rc=$?
-        if [ "$refusal_rc" -ne 0 ]; then
-            [ -n "$refusal" ] || refusal="Could not check the backup; nothing was restored."
-            log "Restore: refused (the Settings page's restore): $refusal"
-            echo "$refusal"
-            return 3
-        fi
-    fi
-
-    # metadata.json and the key files are whoever made the backup file's (a
-    # password proves nothing about that). backup-address checks them and
-    # prints the address the key belongs to, or nothing if the backup has no
-    # key; that address names a directory and goes into config below, so it
-    # is never read from metadata.json. Refused before anything is touched.
-    local onion_address
-    if ! onion_address=$(op_py backup-address --staging "$staging" 2>>"$LOG_FILE") \
-        || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
-        log "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)"
-        return 1
-    fi
-    log "Restore: backup from ${onion_address:-a backup without a key}"
-
-    # The Settings page never changes this site's address: a backup of
-    # another one is refused, before anything is touched. Nobody at this
-    # host is asked (the Mac asks the person at the Mac); onionpress
-    # restore on the host does it. A backup without a key keeps this one.
-    if [ "$from_settings_page" = "true" ] && [ -n "$onion_address" ] \
-            && [ "$onion_address" != "$current_address" ]; then
-        local change_refusal="Not restored: this backup is of another onion address, and a restore from this page never replaces this site's address. Restore it on the computer running OnionPress: onionpress restore <backup file>"
-        log "Restore: refused (the Settings page's restore): the backup is of $onion_address, not of this site's $current_address"
-        echo "$change_refusal"
-        return 3
-    fi
-
-    # 1. Restore Tor keys — copy whatever formats the backup has to vanity-keys.
-    #    start_containers() will derive C Tor keys from the PEM if needed.
-    local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
-    local ctor_secret="$staging/tor-keys/hs_ed25519_secret_key"
-    local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
-    if { [ -f "$arti_key" ] || [ -f "$ctor_secret" ]; } && [ -n "$onion_address" ]; then
-        # The backup's key replaces the one Tor serves now: OnionHeaven hubs
-        # that may hold a copy of that one (not of the backup's own address,
-        # which stays) are asked to delete it first, while it can still
-        # sign the request. The caller starts the heartbeat client again.
-        ONIONPRESS_YES=true onionheaven_release restore "$onion_address"
-        log "Restore: writing Tor keys..."
-        # Mark the key volume for removal on next start (can't remove now — containers may be running)
-        touch "$DATA_DIR/.import-key-pending"
-        rm -rf "$DATA_DIR/shared/vanity-keys/"
-
-        local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
-        mkdir -p "$addr_dir"
-        [ -f "$arti_key" ] && cp "$arti_key" "$addr_dir/"
-        [ -f "$ctor_secret" ] && cp "$ctor_secret" "$addr_dir/"
-        [ -f "$ctor_public" ] && cp "$ctor_public" "$addr_dir/"
-        echo "$onion_address" > "$addr_dir/hostname"
-
-        # Update ADDRESS_PREFIX in config to match restored address
-        local addr_base="${onion_address%.onion}"
-        if [ -f "$DATA_DIR/config" ]; then
-            local old_prefix
-            old_prefix=$(config_value ADDRESS_PREFIX)
-            if [ -n "$old_prefix" ]; then
-                local prefix_len=${#old_prefix}
-                local new_prefix="${addr_base:0:$prefix_len}"
-                sed -i "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$new_prefix/" "$DATA_DIR/config"
-                log "Restore: updated ADDRESS_PREFIX to $new_prefix"
-            fi
-        fi
-        log "Restore: Tor keys written for $onion_address"
-    elif [ -n "$current_address" ]; then
-        # A backup without a key (a Mac Settings page backup): the site
-        # keeps its key and address, which the settings below are held to
-        # and the Settings page shows.
-        onion_address="$current_address"
-        log "Restore: the backup holds no onion service key; this site keeps its address $onion_address"
-    else
-        log "WARNING: No Tor keys in backup — skipping key restore"
-    fi
-
-    # A healthcheck key in the backup (Linux backups through 2.5.x) is not
-    # restored: a start makes a new one, as on the Mac. A key an older
-    # restore staged for the next start goes too.
-    if [ -d "$staging/tor-keys/healthcheck" ]; then
-        log "Restore: the backup's healthcheck key left out (a start makes a new one)"
-    fi
-    rm -rf "$DATA_DIR/shared/healthcheck-keys"
-
-    # 2. Restore database
-    local sql_file="$staging/database/wordpress.sql"
-    if [ -f "$sql_file" ]; then
-        log "Restore: importing database..."
-        local db_pass="${WORDPRESS_DB_PASSWORD:-}"
-        if [ -z "$db_pass" ]; then
-            setup_db_passwords
-            db_pass="$WORDPRESS_DB_PASSWORD"
-        fi
-        db_import "$db_pass" "$sql_file" 2>>"$LOG_FILE"
-        if [ $? -ne 0 ]; then
-            log "ERROR: Database import failed"
-            return 1
-        fi
-        log "Restore: database imported"
-    else
-        log "WARNING: No database dump in backup — skipping"
-    fi
-
-    # 3. Restore wp-content
-    local wpcontent_dir="$staging/wp-content"
-    if [ -d "$wpcontent_dir" ]; then
-        log "Restore: copying wp-content (themes, plugins, uploads)..."
-        # As www-data, not docker cp + chown -R as root: both followed
-        # links www-data can plant in wp-content (wp-content itself too).
-        if ! op_py put-wp-tree --merge --src "$wpcontent_dir" \
-                --dest /var/www/html/wp-content 2>>"$LOG_FILE"; then
-            log "ERROR: could not copy wp-content into the WordPress container"
-            return 1
-        fi
-        log "Restore: wp-content restored"
-        # Resized images the backup left out (#257) are rebuilt in the
-        # background by the start that follows this restore; the marker
-        # survives interruptions until the rebuild completes.
-        date -u +%Y-%m-%dT%H:%M:%SZ > "$DATA_DIR/.regenerate-derivatives-pending"
-        log "Restore: scheduled rebuild of resized images"
-    else
-        log "WARNING: No wp-content in backup — skipping"
-    fi
-
-    # 4. Restore the backup's user preferences. The backup's config is its
-    #    author's: every other key keeps this install's value
-    #    (backup.RESTORABLE_CONFIG), never a straight copy.
-    log "Restore: restoring settings..."
-    op_py restore-config --staging "$staging" --config "$DATA_DIR/config" \
-        --address "$onion_address" 2>>"$LOG_FILE" \
-        || log "WARNING: could not restore settings from the backup"
-
-    # 5. Restore OnionHeaven registry + keys (if present in backup), through
-    #    the onionheaven container: the registry by SQLite's .restore, never
-    #    a copy over the one in use, whose -wal SQLite would apply to it
-    #    (backup.restore_hub_data, shared with the Mac). Never from the
-    #    Settings page (what passed the check above is a registry alone, as
-    #    every node's backup through 2.5.2 carries one).
-    if grep -q '"excludes_onionheaven_data": true' "$metadata_file" 2>/dev/null; then
-        log "Restore: NOTE — this backup of an OnionHeaven hub was made from the Settings page and holds neither the hub's registry nor its registrants' keys; this restore leaves the hub data as it is. Restore those from a backup made in the OnionPress app or with onionpress backup."
-    fi
-    if [ -d "$staging/onionheaven" ] && { [ -s "$staging/onionheaven/registry.db" ] || [ -d "$staging/onionheaven/keys" ]; }; then
-        if [ "$from_settings_page" = "true" ]; then
-            log "Restore: the backup's OnionHeaven data left out: the Settings page's restore never writes the hub data"
-        elif docker inspect onionheaven >/dev/null 2>&1; then
-            log "Restore: restoring OnionHeaven registry and keys..."
-            if op_py restore-hub-data --src "$staging/onionheaven" >>"$LOG_FILE" 2>&1; then
-                log "Restore: OnionHeaven data restored"
-            else
-                log "WARNING: could not restore the OnionHeaven data (see above)"
-            fi
-        else
-            log "WARNING: Backup contains OnionHeaven data but onionheaven container is not running — skipping"
-            echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2
-        fi
-    fi
-    # A hub's registry and keys sealed to its recovery key: this path has no
-    # key (onionpress restore and the app's Restore... ask for it).
-    if [ -e "$staging/onionheaven.sealed" ]; then
-        log "Restore: this backup's OnionHeaven registry and registrants' keys are sealed to the hub's recovery key and were not restored; restore them with: onionpress hub-recovery-key restore <backup file>"
-    fi
-
-    log "Restore: complete (from $onion_address)"
-    echo "$onion_address"
-}
-
-# ─── Write status (on-demand) ────────────────────────────────────────
-
-write_status() {
-    # Apply any pending config changes from the WordPress settings page
-    if [ -z "${_IN_WRITE_STATUS:-}" ]; then
-        _IN_WRITE_STATUS=1 apply_config_updates 2>/dev/null || true
-    fi
-
-    cd "$DOCKER_DIR"
-
-    # Get container states
-    local containers_json
-    containers_json=$(docker compose ps --format json 2>/dev/null | python3 -I -c "
-import sys, json
-containers = {}
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        c = json.loads(line)
-        name = c.get('Name', c.get('name', ''))
-        state = c.get('State', c.get('state', 'unknown'))
-        containers[name] = state
-    except json.JSONDecodeError:
-        pass
-print(json.dumps(containers))
-" 2>/dev/null || echo '{}')
-
-    # Get onion address
-    local onion_addr
-    onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    onion_addr=$(echo "$onion_addr" | tr -d '\n\r ')
-    # status.json's address becomes the tray's URLs and the WordPress
-    # status page's link: a whole onion address or nothing.
-    is_onion_address "$onion_addr" || onion_addr=""
-
-    # Get bootstrap percentage (use docker logs directly — compose logs needs env vars
-    # and tail 50 may miss the bootstrap message in verbose logs)
-    local bootstrap_pct=0
-    if docker logs onionpress-tor 2>&1 | grep -q -E "Bootstrapped 100%|Sufficiently bootstrapped"; then
-        bootstrap_pct=100
-    else
-        local pct_line
-        pct_line=$(docker logs --tail 200 onionpress-tor 2>&1 | grep -oE "Bootstrapped [0-9]+%" | tail -1 || echo "")
-        if [ -n "$pct_line" ]; then
-            bootstrap_pct=$(echo "$pct_line" | grep -oE "[0-9]+" || echo 0)
-        fi
-    fi
-
-    # Determine overall state
-    local state="unknown"
-    local tor_state
-    tor_state=$(echo "$containers_json" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-tor','stopped'))" 2>/dev/null || echo "stopped")
-    local wp_state
-    wp_state=$(echo "$containers_json" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-wordpress','stopped'))" 2>/dev/null || echo "stopped")
-
-    if [ "$tor_state" = "running" ] && [ "$wp_state" = "running" ] && [ "$bootstrap_pct" = "100" ]; then
-        # Verify onion service is actually reachable via Tor network
-        if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-            # The heartbeat daemon's recovery loop (onionpress.reachability)
-            # runs the dual probe every 30 s and records its verdict; use it
-            # while it is fresh and for this address. Otherwise probe here,
-            # the static /.onionpress-health first (no PHP) and the front
-            # page only for an image that answers it 404.
-            local reach_verdict reach_code=""
-            reach_verdict=$(python3 -I -c '
-import json, sys, time
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    if (0 <= time.time() - float(d["checked_at"]) <= 180
-            and d.get("onion_address") == sys.argv[2]
-            and d.get("reachable") in (True, False)):
-        print("yes" if d["reachable"] else "no")
-except Exception:
-    pass
-' "$DATA_DIR/reachability.json" "$onion_addr" 2>/dev/null || true)
-            if [ "$reach_verdict" = "yes" ]; then
-                reach_code=200
-            elif [ "$reach_verdict" = "no" ]; then
-                reach_code=000
-            else
-                reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/.onionpress-health" 2>/dev/null || echo "000")
-                if [ "$reach_code" = "404" ]; then
-                    reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
-                fi
-            fi
-            if [ "$reach_code" = "200" ] || [ "$reach_code" = "301" ] || [ "$reach_code" = "302" ]; then
-                state="running"
-            else
-                state="starting"
-            fi
-        else
-            state="starting"
-        fi
-    elif [ "$wp_state" = "running" ] || [ "$tor_state" = "running" ]; then
-        state="starting"
-    else
-        state="stopped"
-    fi
-
-    # Log state transitions — especially when the onion address first becomes reachable
-    local prev_state=""
-    local state_file="$DATA_DIR/.last_status_state"
-    if [ -f "$state_file" ]; then
-        prev_state=$(cat "$state_file" 2>/dev/null || echo "")
-    fi
-    if [ "$state" != "$prev_state" ]; then
-        if [ "$state" = "running" ]; then
-            log "Onion service is now reachable at http://${onion_addr}/"
-        elif [ "$state" = "starting" ] && [ "$prev_state" = "running" ]; then
-            log "Onion service is no longer reachable (state: starting)"
-        elif [ "$state" = "stopped" ] && [ "$prev_state" != "" ] && [ "$prev_state" != "stopped" ]; then
-            log "OnionPress stopped"
-        fi
-        echo "$state" > "$state_file"
-    fi
-
-    # One-shot WEDGE WARNING after 10+ min in "starting" without reaching
-    # "running". Mirrors src/menubar.py's wedge-recovery hint so a user
-    # whose Docker daemon or rootless socket is stuck gets actionable
-    # guidance in the log instead of an indefinitely yellow tray icon.
-    local yellow_since_file="$DATA_DIR/.yellow-since"
-    local wedge_marker="$DATA_DIR/.wedge-warning-fired"
-    if [ "$state" = "running" ]; then
-        rm -f "$yellow_since_file" "$wedge_marker" 2>/dev/null || true
-    elif [ "$state" = "starting" ]; then
-        if [ ! -f "$yellow_since_file" ]; then
-            date +%s > "$yellow_since_file"
-        elif [ ! -f "$wedge_marker" ]; then
-            local yellow_since now_epoch elapsed
-            yellow_since=$(cat "$yellow_since_file" 2>/dev/null || echo 0)
-            now_epoch=$(date +%s)
-            elapsed=$((now_epoch - yellow_since))
-            if [ "$elapsed" -ge 600 ]; then
-                log "WEDGE WARNING: WordPress unreachable for 10+ min. Try restarting the OnionPress service: \`systemctl --user restart onionpress\` (or the system equivalent). If still wedged, the Docker daemon may be stuck — restart it with \`systemctl --user restart docker\` (rootless) or \`sudo systemctl restart docker\` (system Docker)."
-                : > "$wedge_marker"
-            fi
-        fi
-    fi
-
-    # Get uptime (seconds since tor container started)
-    local uptime_seconds=0
-    local started_at
-    started_at=$(docker inspect --format '{{.State.StartedAt}}' onionpress-tor 2>/dev/null || echo "")
-    if [ -n "$started_at" ] && [ "$started_at" != "0001-01-01T00:00:00Z" ]; then
-        local started_epoch
-        started_epoch=$(date -d "$started_at" +%s 2>/dev/null || echo 0)
-        # Derived from docker's answer: only a plain number goes into
-        # bash arithmetic (issue #466).
-        [[ "$started_epoch" =~ ^[0123456789]{1,12}$ ]] || started_epoch=0
-        local now_epoch
-        now_epoch=$(date +%s)
-        if [ "$started_epoch" -gt 0 ] 2>/dev/null; then
-            uptime_seconds=$((now_epoch - started_epoch))
-        fi
-    fi
-
-    # Wayback queue count: posts not yet archived (waiting plus in flight),
-    # from the plugin's own totals. The onionpress_wayback_queue option this
-    # used to read was the v3 JSON queue, which the v4 plugin deleted, so
-    # the count was always 0.
-    local wayback_queue=0
-    wayback_queue=$(wp_cli eval 'echo json_encode(onionpress_wayback_queue_totals());' 2>/dev/null | python3 -I -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(int(data.get('remaining', 0)) + int(data.get('in_flight', 0)))
-except Exception:
-    print(0)
-" 2>/dev/null || echo 0)
-
-    local now_iso
-    now_iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-    # Gather OnionHeaven stats
-    local oh_server_active="false"
-    local oh_registered_count=0
-    local oh_online_count=0
-    local oh_taken_over_count=0
-    local oh_takeover_containers=0
-    local oh_client_registered="false"
-    local oh_client_hub=""
-    local oh_config_enabled="false"
-
-    # Read client registration state
-    if [ -f "$DATA_DIR/onionheaven-registration.json" ]; then
-        oh_client_registered=$(python3 -I -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-    print('true' if d.get('registered') else 'false')
-except: print('false')
-" "$DATA_DIR/onionheaven-registration.json" 2>/dev/null || echo "false")
-    fi
-
-    # Read config
-    if [ -f "$DATA_DIR/config" ]; then
-        oh_config_enabled=$(config_value REGISTER_WITH_ONIONHEAVEN)
-        oh_client_hub=$(config_value ONIONHEAVEN_ADDRESS)
-    fi
-    # On by default: "yes" or unset is enabled, anything else is not.
-    oh_config_enabled=${oh_config_enabled:-yes}
-    [ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no
-    oh_client_hub=${oh_client_hub:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}
-
-    # Hub or client: by the served address (is_onionheaven_hub), as the Mac
-    # daemon decides it, never by a running onionheaven container, which
-    # every node has (issue #345). The registry is queried on the hub only.
-    if is_onionheaven_hub "$onion_addr"; then
-        oh_server_active="true"
-        # Query OH server stats from registry DB
-        local oh_stats
-        oh_stats=$(docker exec onionheaven sqlite3 /var/lib/onionheaven/registry.db \
-            "SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN status='online' THEN 1 ELSE 0 END) AS online,
-                SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) AS taken_over
-            FROM registry" 2>/dev/null || echo "0|0|0")
-        oh_registered_count=$(echo "$oh_stats" | cut -d'|' -f1)
-        oh_online_count=$(echo "$oh_stats" | cut -d'|' -f2)
-        oh_taken_over_count=$(echo "$oh_stats" | cut -d'|' -f3)
-        oh_registered_count=${oh_registered_count:-0}
-        oh_online_count=${oh_online_count:-0}
-        oh_taken_over_count=${oh_taken_over_count:-0}
-        oh_takeover_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -cE '^onionheaven-takeover-[0-9]+$' 2>/dev/null || true)
-        oh_takeover_containers=${oh_takeover_containers:-0}
-    fi
-
-    # System load averages and host uptime (Linux)
-    local load_avg_json="[]"
-    if [ -f /proc/loadavg ]; then
-        load_avg_json=$(awk '{printf "[%s, %s, %s]", $1, $2, $3}' /proc/loadavg 2>/dev/null || echo "[]")
-    fi
-    local host_uptime_seconds=0
-    if [ -f /proc/uptime ]; then
-        host_uptime_seconds=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
-    fi
-
-    # Extra fields for the Linux tray. Cheap probes that don't add measurable
-    # latency to the 10s watcher tick.
-    local wp_installed_str="false"
-    if wp_is_installed 2>/dev/null; then
-        wp_installed_str="true"
-    fi
-    local onboarded="false"
-    if [ "$wp_installed_str" = "true" ]; then
-        # Read via get_site_option — same call the onionpress-onboarding
-        # mu-plugin uses to decide whether to redirect the admin. Reading
-        # wp_options here would diverge after multisite-convert: per-blog
-        # options stay set, but the network-wide table (wp_sitemeta) is
-        # what the plugin checks, and that's where install_fresh_wordpress
-        # now writes the marker.
-        local _opt
-        _opt=$(wp_cli eval 'echo (string) get_site_option("onionpress_onboarded", "");' 2>/dev/null | tr -d '\r\n ')
-        if [ -n "$_opt" ] && [ "$_opt" != "0" ] && [ "$_opt" != "false" ]; then
-            onboarded="true"
-        fi
-    fi
-    local mkp224o_available="false"
-    # Tag-only by design: pinning this to a digest would make a locally built
-    # image fail the check and silently fall back to a random .onion (the
-    # v2.4.101 regression). It follows ONIONPRESS_TOR_IMAGE so a local build
-    # is recognised; build/build-images.sh also shadow-tags the GHCR name so
-    # the default below keeps working either way.
-    if docker image inspect "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >/dev/null 2>&1; then
-        # Image presence is enough; we trust the build had mkp224o.
-        mkp224o_available="true"
-    fi
-    local wp_admin_password_file=""
-    if [ -f "$DATA_DIR/wp-admin-password" ]; then
-        wp_admin_password_file="$DATA_DIR/wp-admin-password"
-    fi
-    local vanity_in_progress="false"
-    if [ -f "$DATA_DIR/.vanity-running" ]; then
-        vanity_in_progress="true"
-    fi
-    # OnionHeaven "serving from Wayback" — for now treat this as the case
-    # where local state is not 'running' but the client is registered with
-    # a hub. A more precise signal will come from the hub heartbeat.
-    local serving_from_wayback="false"
-    if [ "$state" != "running" ] && [ "$oh_client_registered" = "true" ]; then
-        serving_from_wayback="true"
-    fi
-
-    # Both OnionHeaven roles for the OnionHeaven page (onionheaven.overview:
-    # the record, the config, and the registry's rows on a hub).
-    local oh_overview_json
-    oh_overview_json=$(op_py --data-dir "$DATA_DIR" onionheaven overview --json 2>/dev/null || echo '{}')
-
-    # Build status.json
-    local status_json
-    status_json=$(op_py --data-dir "$DATA_DIR" linux-status \
-        --field "state=$state" --field "version=$ONIONPRESS_VERSION" \
-        --field "onion_address=$onion_addr" \
-        --field "uptime_seconds=$uptime_seconds" \
-        --field "bootstrap_pct=$bootstrap_pct" \
-        --field "containers=$containers_json" \
-        --field "wayback_queue_count=$wayback_queue" \
-        --field "updated_at=$now_iso" \
-        --field "oh_server_active=$oh_server_active" \
-        --field "oh_registered_count=$oh_registered_count" \
-        --field "oh_online_count=$oh_online_count" \
-        --field "oh_taken_over_count=$oh_taken_over_count" \
-        --field "oh_takeover_containers=$oh_takeover_containers" \
-        --field "oh_client_registered=$oh_client_registered" \
-        --field "oh_client_hub=$oh_client_hub" \
-        --field "oh_client_enabled=$oh_config_enabled" \
-        --field "load_avg=$load_avg_json" \
-        --field "host_uptime_seconds=$host_uptime_seconds" \
-        --field "wp_installed=$wp_installed_str" --field "onboarded=$onboarded" \
-        --field "mkp224o_available=$mkp224o_available" \
-        --field "wp_admin_password_path=$wp_admin_password_file" \
-        --field "vanity_in_progress=$vanity_in_progress" \
-        --field "serving_from_wayback=$serving_from_wayback" \
-        --field "wp_port=${ONIONPRESS_WP_PORT:-8080}" \
-        --field "onionheaven_overview=$oh_overview_json")
-
-    # Write to shared volume (consumed by the WP settings/status page): only
-    # the fields those pages show (redact.WORDPRESS_STATUS_KEYS, shared with
-    # the Mac app) — PHP can read the file, and wp_admin_password_path is a
-    # path under $HOME. If the filter fails, leave the old copy alone rather
-    # than write the full status.
-    local wp_status_json
-    if wp_status_json=$(printf '%s' "$status_json" | op_py --data-dir "$DATA_DIR" wordpress-status 2>>"$LOG_FILE"); then
-        echo "$wp_status_json" | wp_put /var/lib/onionpress/status.json 2>>"$LOG_FILE"
-    fi
-    # Also write to the host data dir — the tray app reads this directly,
-    # without going through docker exec on every poll.
-    printf '%s\n' "$status_json" > "$DATA_DIR/status.json.tmp" 2>>"$LOG_FILE" \
-        && mv -f "$DATA_DIR/status.json.tmp" "$DATA_DIR/status.json" 2>>"$LOG_FILE"
-
-    # Write version file for the settings page update checker
-    echo "$ONIONPRESS_VERSION" | wp_put /var/lib/onionpress/version 2>>"$LOG_FILE"
-
-    # Build config-current.json from ~/.onionpress/config — allowlisted keys
-    # only (SAFE_CONFIG_KEYS, shared with the Mac app): the file is readable
-    # by WordPress/PHP and the config can hold secrets such as
-    # CLOUDFLARE_TUNNEL_TOKEN. On failure write {}, never the raw config,
-    # so an older full copy in the volume is still overwritten.
-    local config_json
-    config_json=$(op_py --data-dir "$DATA_DIR" safe-config 2>>"$LOG_FILE") || config_json="{}"
-
-    echo "$config_json" | wp_put /var/lib/onionpress/config-current.json 2>>"$LOG_FILE"
-
-    write_recent_logs
-}
-
-# The end of the log, for the status page's Recent Logs. PHP can read
-# recent-logs.txt, so it is scrubbed first (redact.scrub_for_wordpress:
-# no home path or user name, credentials or non-loopback IPs) and never
-# copied raw: if the scrub fails, a placeholder goes instead.
-write_recent_logs() {
-    [ -f "$LOG_FILE" ] || return 0
-    local logs
-    logs=$(op_py --data-dir "$DATA_DIR" wordpress-logs --log-file "$LOG_FILE" 2>/dev/null) \
-        || logs="(Recent logs unavailable: could not scrub $(basename "$LOG_FILE") for display.)"
-    printf '%s\n' "$logs" | wp_put /var/lib/onionpress/recent-logs.txt 2>/dev/null
-}
-
-# ─── Config watcher (on-demand) ──────────────────────────────────────
-
-apply_config_updates() {
-    # Check if settings page wrote config-updates.json
-    local updates result changed rejected
-    updates=$(wp_exec cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
-
-    if [ -z "$updates" ] || [ "$updates" = "{}" ]; then
-        return 0
-    fi
-
-    log "Applying config updates from settings page..."
-
-    # Anything running in WordPress can write that file, so the shared
-    # allowlist (config.SETTINGS_PAGE_KEYS, as on the Mac) applies only the
-    # settings page's own keys with valid values. It reports key names,
-    # never values.
-    if ! result=$(printf '%s' "$updates" | op_py --data-dir "$DATA_DIR" apply-settings-updates 2>>"$LOG_FILE"); then
-        log "WARNING: Could not apply config updates from settings page"
-        return 1
-    fi
-    changed=$(printf '%s\n' "$result" | sed -n 's/^changed //p' | tr '\n' ' ')
-    rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
-    [ -z "$changed" ] || log "Settings page changed: ${changed% }"
-    [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
-    # A tunnel token is never set from the page (#463): its owner would
-    # see this host's IP. Removing it is applied above.
-    if printf '%s\n' "$result" | grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'; then
-        log "WARNING: Settings page asked to set CLOUDFLARE_TUNNEL_TOKEN; not set. On this computer run: onionpress config set CLOUDFLARE_TUNNEL_TOKEN -"
-    fi
-
-    # Clear the updates file
-    wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
-
-    # A token set or removed on the page counts from the next start_containers
-    # (the page's Restart runs it in this process).
-    read_cloudflare_token
-
-    # Handle START_ON_BOOT (re-applied whenever the page sends it)
-    if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
-        local boot_val
-        boot_val=$(config_value START_ON_BOOT)
-        if [ "$boot_val" = "yes" ]; then
-            systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
-        else
-            systemctl --user disable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
-        fi
-    fi
-
-    # Write updated status
-    write_status
-
-    log "Config updates applied"
+# Before the containers go down: the daemon tells the hub /offline while
+# the tor container is still up (`daemon offline` waits for its
+# acknowledgement; no daemon, no wait).
+daemon_offline() {
+    op_py --data-dir "$DATA_DIR" daemon offline >/dev/null 2>&1 || true
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
 
-# ─── Validate OnionHeaven address ─────────────────────────────────────
-# Returns JSON: {"valid":true/false, "status":"hub"|"site"|"unreachable"|"self"|"invalid_format", "message":"..."}
-# Called by: WordPress settings page
-_validate_oh_address() {
-    local addr="$1"
-
-    # Format check: the whole value, as is_onion_address does. This was a
-    # length of 62 and `echo | grep '\.onion$'`, which tests each line on
-    # its own and passed any 62 characters ending in ".onion" (a clearnet
-    # host and path included) on to curl.
-    if ! is_onion_address "$addr"; then
-        echo '{"valid":false,"status":"invalid_format","message":"Address must be a valid 56-character .onion address."}'
-        return 1
-    fi
-
-    # Self check — compare against our own address
-    local our_address=""
-    our_address=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-    if [ -n "$our_address" ] && [ "$addr" = "$our_address" ]; then
-        echo '{"valid":false,"status":"self","message":"You cannot use your own onion address as the OnionHeaven hub."}'
-        return 1
-    fi
-
-    # Probe the OnionHeaven API endpoint (:8083/status)
-    local api_result
-    api_result=$(docker exec onionheaven curl -s --max-time 30 \
-        --socks5-hostname 127.0.0.1:9050 \
-        "http://${addr}:8083/status" 2>/dev/null) || true
-
-    if [ -n "$api_result" ] && echo "$api_result" | grep -q '"version"'; then
-        # Every node answers /status, but only a hub accepts registrations.
-        # Images from before that gate omit the field; they took them all.
-        if echo "$api_result" | grep -q '"accepting_registrations": *false'; then
-            echo '{"valid":true,"status":"site","message":"This address runs OnionPress but is not an OnionHeaven hub, so it will refuse registrations."}'
-            return 0
-        fi
-        echo '{"valid":true,"status":"hub","message":"Valid OnionHeaven hub."}'
-        return 0
-    fi
-
-    # API didn't respond — try the base address (port 80)
-    local http_code
-    http_code=$(docker exec onionheaven curl -s --max-time 30 \
-        -o /dev/null -w "%{http_code}" \
-        --socks5-hostname 127.0.0.1:9050 \
-        "http://${addr}/" 2>/dev/null) || true
-
-    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ]; then
-        echo '{"valid":true,"status":"site","message":"This address is reachable but is not running OnionHeaven yet."}'
-        return 0
-    fi
-
-    echo '{"valid":true,"status":"unreachable","message":"Could not reach this address over Tor. It may be offline or invalid."}'
-    return 0
-}
 
 # ─── `onionpress update`: a released package, checked ─────────────────
 
-# `onionpress update` installs the onionpress.deb of a GitHub release (the
-# latest, or --version X.Y.Z), and only once it matches the sha256 the
-# release publishes for it in SHA256SUMS (build/release.sh writes that file
-# and checks it before a release is published). It used to install
-# whatever a git checkout of main held, as root, with nothing checked
-# beyond TLS to GitHub; that is `update --from-checkout` now, for
-# developers. The Settings page's update button never installs on Linux:
-# code running in WordPress can write requested-action, so handle-action
-# `update` only reports what `update --check` would.
-RELEASE_REPO="brewsterkahle/onionpress"
-RELEASE_DEB="onionpress.deb"
-RELEASE_SUMS="SHA256SUMS"
-# Where the .deb installs; update refuses to put it beside another tree.
-RELEASE_INSTALL_DIR="/opt/onionpress"
+# `onionpress update` is onionpress.cli's on both platforms (cli.cmd_update
+# -> updater.py: the release lookup, the version compare, the --version /
+# --pre / --force rules, and the check of onionpress.deb against the
+# release's SHA256SUMS). This launcher keeps the Linux install leaves the
+# Python calls: update_install_deb (apt-get, then update_finish) and the
+# developer's --from-checkout below. Until 2.6.1 a bash client of its own
+# lived here (update_find_release, update_fetch_release, ...).
 
-# A release version as the tags carry it after the "v": numbers and dots.
-# The digits are spelled out because a range like 0-9 can take in other
-# characters in some locales.
-is_release_version() {
-    [[ "$1" =~ ^[0123456789]{1,9}(\.[0123456789]{1,9}){1,3}$ ]]
-}
-
-# True when release version $1 is newer than release version $2.
-version_newer() {
-    local -a a b
-    local i x y
-    IFS=. read -r -a a <<< "$1"
-    IFS=. read -r -a b <<< "$2"
-    for i in 0 1 2 3; do
-        x=$((10#${a[i]:-0}))
-        y=$((10#${b[i]:-0}))
-        if [ "$x" -gt "$y" ]; then
-            return 0
-        fi
-        if [ "$x" -lt "$y" ]; then
-            return 1
-        fi
-    done
-    return 1
-}
-
-# The version installed in $INSTALL_DIR (empty when unknown).
-installed_version() {
-    local v=""
-    if [ -f "$INSTALL_DIR/VERSION" ]; then
-        v=$(head -n 1 "$INSTALL_DIR/VERSION" 2>/dev/null | tr -d '[:space:]') || v=""
-    fi
-    printf '%s\n' "$v"
-}
-
-# curl for GitHub: HTTPS only, redirects included (release downloads
-# redirect to GitHub's asset host), failing on any HTTP error.
-release_curl() {
-    curl --fail --silent --show-error --location \
-        --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --connect-timeout 20 -H "User-Agent: onionpress" "$@"
-}
-
-# The sha256 of file $1, lowercase hex.
-sha256_of() {
-    local out
-    if command -v sha256sum >/dev/null 2>&1; then
-        out=$(sha256sum "$1") || return 1
-    else
-        out=$(shasum -a 256 "$1") || return 1
-    fi
-    printf '%s\n' "${out%% *}"
-}
-
-# Look up a release on GitHub: the latest ($1 empty), or tag v$1. With $2
-# = yes a pre-release may answer (and, without $1, the newest release that
-# is not a draft, pre-release or not). Sets UPDATE_TAG and UPDATE_VERSION,
-# and UPDATE_INSTALLABLE=yes when the release carries both onionpress.deb
-# and SHA256SUMS (else UPDATE_WHY says what is missing); or sets
-# UPDATE_ERROR and returns 1: GitHub not reached, not a release version, a
-# draft, or a pre-release without $2.
-update_find_release() {
-    local want="${1#v}" pre="$2" url json fields tag="" draft="" prerelease="" debs="" sums=""
-    UPDATE_TAG=""
-    UPDATE_VERSION=""
-    UPDATE_INSTALLABLE=no
-    UPDATE_WHY=""
-    UPDATE_ERROR=""
-    if [ -n "$1" ]; then
-        if ! is_release_version "$want"; then
-            UPDATE_ERROR="\"$1\" is not a release version (like 2.5.3)."
-            return 1
-        fi
-        url="https://api.github.com/repos/$RELEASE_REPO/releases/tags/v$want"
-    elif [ "$pre" = "yes" ]; then
-        url="https://api.github.com/repos/$RELEASE_REPO/releases?per_page=30"
-    else
-        url="https://api.github.com/repos/$RELEASE_REPO/releases/latest"
-    fi
-    if ! json=$(release_curl --max-time 30 --max-filesize 4000000 \
-            -H "Accept: application/vnd.github+json" "$url" 2>>"$LOG_FILE"); then
-        if [ -n "$1" ]; then
-            UPDATE_ERROR="could not find release v$want on GitHub (no such release, or GitHub could not be reached; see $LOG_FILE)."
-        else
-            UPDATE_ERROR="could not look up the latest release on GitHub (see $LOG_FILE)."
-        fi
-        return 1
-    fi
-    # One release (from the list: the newest that is not a draft). A
-    # missing draft or prerelease flag counts as set.
-    if ! fields=$(printf '%s' "$json" | python3 -I -c '
-import json, re, sys
-r = json.load(sys.stdin)
-if isinstance(r, list):
-    r = next((x for x in r if isinstance(x, dict) and x.get("draft") is False), None)
-if not isinstance(r, dict):
-    sys.exit(1)
-tag = r.get("tag_name")
-names = [a.get("name") for a in (r.get("assets") or []) if isinstance(a, dict)]
-print(re.sub(r"[^A-Za-z0-9._-]", "?", tag if isinstance(tag, str) else "")[:64])
-print("false" if r.get("draft") is False else "true")
-print("false" if r.get("prerelease") is False else "true")
-print(names.count(sys.argv[1]))
-print(names.count(sys.argv[2]))
-' "$RELEASE_DEB" "$RELEASE_SUMS" 2>>"$LOG_FILE"); then
-        UPDATE_ERROR="GitHub's answer did not describe a release (see $LOG_FILE)."
-        return 1
-    fi
-    { read -r tag && read -r draft && read -r prerelease && read -r debs && read -r sums; } <<< "$fields" || true
-    if [[ "$tag" != v* ]] || ! is_release_version "${tag#v}"; then
-        UPDATE_ERROR="the release's tag \"$tag\" is not a release version."
-        return 1
-    fi
-    if [ -n "$1" ] && [ "$tag" != "v$want" ]; then
-        UPDATE_ERROR="GitHub answered with $tag, not v$want."
-        return 1
-    fi
-    if [ "$draft" != "false" ]; then
-        UPDATE_ERROR="$tag is a draft, not a release."
-        return 1
-    fi
-    if [ "$prerelease" != "false" ] && [ "$pre" != "yes" ]; then
-        UPDATE_ERROR="$tag is a pre-release; add --pre to install it."
-        return 1
-    fi
-    UPDATE_TAG="$tag"
-    UPDATE_VERSION="${tag#v}"
-    if [ "$debs" != "1" ]; then
-        UPDATE_WHY="release $tag has no $RELEASE_DEB."
-    elif [ "$sums" != "1" ]; then
-        UPDATE_WHY="release $tag publishes no $RELEASE_SUMS, so its package cannot be checked."
-    else
-        UPDATE_INSTALLABLE=yes
-    fi
-    return 0
-}
-
-# Download release $UPDATE_TAG's SHA256SUMS and onionpress.deb into folder
-# $1 and check the package: its sha256 is the one SHA256SUMS gives for
-# onionpress.deb (exactly one such line), and it is the onionpress package
-# of version $UPDATE_VERSION. Sets UPDATE_SHA256, or UPDATE_ERROR and
-# returns 1.
-update_fetch_release() {
-    local dir="$1" base n line want got field
-    base="https://github.com/$RELEASE_REPO/releases/download/$UPDATE_TAG"
-    UPDATE_SHA256=""
-    UPDATE_ERROR=""
-    if ! release_curl --max-time 60 --max-filesize 65536 \
-            -o "$dir/$RELEASE_SUMS" "$base/$RELEASE_SUMS" 2>>"$LOG_FILE"; then
-        UPDATE_ERROR="could not download $RELEASE_SUMS of $UPDATE_TAG (see $LOG_FILE)."
-        return 1
-    fi
-    if ! release_curl --max-time 900 --max-filesize 268435456 \
-            -o "$dir/$RELEASE_DEB" "$base/$RELEASE_DEB" 2>>"$LOG_FILE"; then
-        UPDATE_ERROR="could not download $RELEASE_DEB of $UPDATE_TAG (see $LOG_FILE)."
-        return 1
-    fi
-    n=$(grep -cE '^[0123456789abcdefABCDEF]{64} [ *]onionpress\.deb$' "$dir/$RELEASE_SUMS" || true)
-    if [ "$n" != "1" ]; then
-        UPDATE_ERROR="$RELEASE_SUMS of $UPDATE_TAG does not give one sha256 for $RELEASE_DEB."
-        return 1
-    fi
-    line=$(grep -E '^[0123456789abcdefABCDEF]{64} [ *]onionpress\.deb$' "$dir/$RELEASE_SUMS")
-    want=$(printf '%s' "${line:0:64}" | tr 'ABCDEF' 'abcdef')
-    if ! got=$(sha256_of "$dir/$RELEASE_DEB") || [ "$got" != "$want" ]; then
-        UPDATE_ERROR="$RELEASE_DEB of $UPDATE_TAG does not match its $RELEASE_SUMS (sha256 ${got:-unreadable}, published $want)."
-        return 1
-    fi
-    field=$(dpkg-deb --field "$dir/$RELEASE_DEB" Package 2>>"$LOG_FILE") || field=""
-    if [ "$field" != "onionpress" ]; then
-        UPDATE_ERROR="$RELEASE_DEB of $UPDATE_TAG is not the onionpress package."
-        return 1
-    fi
-    field=$(dpkg-deb --field "$dir/$RELEASE_DEB" Version 2>>"$LOG_FILE") || field=""
-    if [ "$field" != "$UPDATE_VERSION" ]; then
-        UPDATE_ERROR="$RELEASE_DEB of $UPDATE_TAG is version ${field:-unknown}, not $UPDATE_VERSION."
-        return 1
-    fi
-    UPDATE_SHA256="$got"
-    return 0
-}
-
-# `onionpress update` from a release: $1 check (yes: report only), $2 the
-# version wanted (empty: the latest), $3 allow a pre-release, $4 force
-# (install even when not newer: a reinstall or a downgrade).
-update_from_release() {
-    local check="$1" want="$2" pre="$3" force="$4" current newer=no tool
+# `update-install-deb <path> [--force]`: install the package `onionpress
+# update` downloaded and checked (its sha256 is the release's SHA256SUMS
+# line, it is the onionpress package of the tag's version), then
+# update_finish. apt-get, not dpkg -i, so new dependencies come along;
+# never removing a package to make room. The package's postinst restarts
+# the user's onionpress.service and heartbeat where they run and returns
+# once the site is up on the new files (issue #357); update_finish then
+# pulls the images and restarts once more, as every update path ends. Two
+# restarts, one after the other: the second is what restarts a site the
+# user runs without the unit.
+update_install_deb() {
+    local deb="$1" force="${2:-}"
     local -a apt_opts
-    current=$(installed_version)
-    log "Checking for OnionPress updates..."
-    echo "  Checking for updates..."
-    if ! update_find_release "$want" "$pre"; then
-        log "ERROR: update: $UPDATE_ERROR"
-        echo "  ERROR: $UPDATE_ERROR Nothing was installed."
+    if [ -z "$deb" ] || [ ! -f "$deb" ]; then
+        log "ERROR: update-install-deb: no package at '${deb:-}'"
+        echo "  ERROR: update-install-deb: no package at '${deb:-}'. Nothing was installed." >&2
         return 1
     fi
-    # An install whose version cannot be read takes any release.
-    if ! is_release_version "$current" || version_newer "$UPDATE_VERSION" "$current"; then
-        newer=yes
-    fi
-
-    if [ "$check" = "yes" ]; then
-        echo "  Installed: ${current:-unknown}"
-        echo "  Release:   $UPDATE_TAG"
-        if [ "$newer" != "yes" ]; then
-            echo "  OnionPress is up to date."
-        elif [ "$UPDATE_INSTALLABLE" = "yes" ]; then
-            echo "  An update is available. Run 'onionpress update' to install it."
-        else
-            echo "  An update is available, but 'onionpress update' cannot install it: $UPDATE_WHY"
-        fi
-        return 0
-    fi
-
-    if [ "$newer" != "yes" ] && [ "$force" != "yes" ]; then
-        log "update: $current is up to date (release $UPDATE_TAG)"
-        echo "  OnionPress $current is up to date (release $UPDATE_TAG). Nothing to install."
-        echo "  To install $UPDATE_TAG anyway: onionpress update --version $UPDATE_VERSION --force"
-        return 0
-    fi
-    if [ "$UPDATE_INSTALLABLE" != "yes" ]; then
-        log "ERROR: update: $UPDATE_WHY"
-        echo "  ERROR: $UPDATE_WHY Nothing was installed."
-        return 1
-    fi
-    if [ "$INSTALL_DIR" != "$RELEASE_INSTALL_DIR" ]; then
-        log "ERROR: update: installed at $INSTALL_DIR, the package installs $RELEASE_INSTALL_DIR"
-        echo "  ERROR: this OnionPress runs from $INSTALL_DIR; the release package installs $RELEASE_INSTALL_DIR. Nothing was installed."
-        return 1
-    fi
-    for tool in dpkg-deb apt-get sudo python3; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
-            log "ERROR: update: $tool not found"
-            echo "  ERROR: $tool is not installed; it is needed to install a release. Nothing was installed."
-            return 1
-        fi
-    done
-
-    # A folder of this user's own (mktemp: mode 700) for the download.
-    if ! UPDATE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/onionpress-update.XXXXXXXX"); then
-        echo "  ERROR: could not make a temporary folder. Nothing was installed."
-        return 1
-    fi
-    trap 'rm -rf -- "$UPDATE_TMP"' EXIT
-    log "Downloading $RELEASE_DEB and $RELEASE_SUMS of $UPDATE_TAG..."
-    echo "  Downloading OnionPress $UPDATE_VERSION..."
-    if ! update_fetch_release "$UPDATE_TMP"; then
-        log "ERROR: update: $UPDATE_ERROR"
-        echo "  ERROR: $UPDATE_ERROR Nothing was installed."
-        return 1
-    fi
-    log "update: $RELEASE_DEB of $UPDATE_TAG matches its $RELEASE_SUMS (sha256 $UPDATE_SHA256)"
-    echo "  Checked: $RELEASE_DEB matches the sha256 in the release's $RELEASE_SUMS."
-
-    # apt-get, not dpkg -i, so new dependencies come along; never removing
-    # a package to make room. The package's postinst restarts the user's
-    # onionpress.service and heartbeat where they run and returns once the
-    # site is up on the new files (issue #357); update_finish then pulls
-    # the images and restarts once more, as every update path ends. Two
-    # restarts, one after the other: the second is what restarts a site
-    # the user runs without the unit.
     apt_opts=(-y --no-remove)
-    if [ "$force" = "yes" ]; then
+    if [ "$force" = "--force" ]; then
         apt_opts+=(--reinstall --allow-downgrades)
     fi
-    log "Installing $UPDATE_TAG with apt-get..."
-    echo "  Installing OnionPress $UPDATE_VERSION (sudo apt-get install)..."
-    if ! sudo apt-get install "${apt_opts[@]}" "$UPDATE_TMP/$RELEASE_DEB" >> "$LOG_FILE" 2>&1; then
-        log "ERROR: update: apt-get could not install $UPDATE_TAG"
-        echo "  ERROR: installing the package failed. Check $LOG_FILE for details."
+    log "Installing $deb with apt-get..."
+    if ! sudo apt-get install "${apt_opts[@]}" "$deb" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: update: apt-get could not install $deb"
+        echo "  ERROR: installing the package failed. Check $LOG_FILE for details." >&2
         return 1
     fi
-    rm -rf -- "$UPDATE_TMP"
     update_finish
-}
-
-# The Settings page's update button on Linux: report only. Code running in
-# WordPress can write requested-action, so this never installs anything;
-# it writes what `update --check` reports, and how to install, to
-# update-result.json for the page to show. At most one GitHub lookup per 5
-# minutes, whatever the page asks (it can ask every 10 s): GitHub allows
-# 60 an hour, and running out would leave `onionpress update` unable to
-# find a release. The answer is kept in $DATA_DIR, which no container
-# mounts.
-update_settings_page_check() {
-    local current ok=false available=false installable=false latest="" text result
-    local cache="$DATA_DIR/update-check.json"
-    if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
-        log "Settings page update check: answered with the one from the last 5 minutes"
-        update_settings_page_put_result < "$cache"
-        return 0
-    fi
-    current=$(installed_version)
-    if update_find_release "" no; then
-        ok=true
-        latest="$UPDATE_VERSION"
-        if ! is_release_version "$current" || version_newer "$UPDATE_VERSION" "$current"; then
-            available=true
-            if [ "$UPDATE_INSTALLABLE" = "yes" ]; then
-                installable=true
-                text="OnionPress $UPDATE_VERSION is available. To install it, run \`onionpress update\` on this machine."
-            else
-                text="OnionPress $UPDATE_VERSION is available, but \`onionpress update\` cannot install it: $UPDATE_WHY"
-            fi
-        else
-            text="OnionPress ${current} is up to date (latest release: $UPDATE_TAG)."
-        fi
-        log "Settings page update check: installed ${current:-unknown}, latest $UPDATE_TAG"
-    else
-        text="Could not check for updates: $UPDATE_ERROR"
-        log "Settings page update check failed: $UPDATE_ERROR"
-    fi
-    if ! result=$(python3 -I -c '
-import datetime, json, sys
-ok = sys.argv[1] == "true"
-result = {"success": ok, ("message" if ok else "error"): sys.argv[6],
-          "current": sys.argv[2], "latest": sys.argv[3] or None,
-          "update_available": sys.argv[4] == "true",
-          "installable": sys.argv[5] == "true",
-          "checked_at": datetime.datetime.now(datetime.timezone.utc)
-                        .strftime("%Y-%m-%dT%H:%M:%SZ")}
-print(json.dumps(result))
-' "$ok" "$current" "$latest" "$available" "$installable" "$text"); then
-        log "WARNING: could not write update-result.json"
-        return 0
-    fi
-    rm -f "$cache"
-    printf '%s\n' "$result" > "$cache" 2>/dev/null || true
-    printf '%s\n' "$result" | update_settings_page_put_result
-}
-
-# The check's result (stdin) to update-result.json for the page, with the
-# request's id (ONIONPRESS_REQUEST_ID, which handle-action exports) as
-# request_id, so the page's poll takes this answer and never an earlier
-# one (issue #356). The id is echoed only as [A-Za-z0-9_-], 1-64
-# characters (handle_action.REQUEST_ID_RE): the page wrote it.
-update_settings_page_put_result() {
-    local out
-    if ! out=$(python3 -I -c '
-import json, os, re, sys
-result = json.load(sys.stdin)
-rid = os.environ.get("ONIONPRESS_REQUEST_ID", "")
-if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rid):
-    result["request_id"] = rid
-print(json.dumps(result))
-'); then
-        log "WARNING: could not write update-result.json"
-        return 0
-    fi
-    printf '%s\n' "$out" | wp_put /var/lib/onionpress/update-result.json 2>/dev/null \
-        || log "WARNING: could not write update-result.json"
-}
-
-update_usage() {
-    cat <<EOF
-Usage: onionpress update [--check] [--version X.Y.Z] [--pre] [--force]
-       onionpress update --from-checkout
-
-Installs the onionpress.deb of the latest OnionPress release on GitHub (or
-of release X.Y.Z) with sudo apt-get, once it matches the sha256 published
-in that release's SHA256SUMS, then restarts OnionPress.
-
-  --check          say whether a newer release is available; install nothing
-  --version X.Y.Z  that release instead of the latest
-  --pre            allow a pre-release (without --version: the newest
-                   release, pre-release or not)
-  --force          install even when the release is not newer
-                   (a reinstall or a downgrade)
-  --from-checkout  for developers: install a git checkout instead of a
-                   release (\$HOME/tmp/onionpress, \$HOME/onionpress or
-                   /opt/onionpress-src), unchecked beyond git
-EOF
-}
-
-# `onionpress update [options]` (see update_usage).
-update_cmd() {
-    local check=no force=no pre=no from_checkout=no want=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --check) check=yes ;;
-            --force) force=yes ;;
-            --pre) pre=yes ;;
-            --from-checkout) from_checkout=yes ;;
-            --version)
-                if [ $# -lt 2 ] || [ -z "$2" ]; then
-                    update_usage >&2
-                    return 1
-                fi
-                want="$2"
-                shift
-                ;;
-            --version=*) want="${1#--version=}" ;;
-            -h|--help) update_usage; return 0 ;;
-            *)
-                echo "Unknown option for update: $1" >&2
-                update_usage >&2
-                return 1
-                ;;
-        esac
-        shift
-    done
-    if [ "$from_checkout" = "yes" ]; then
-        if [ "$check" = "yes" ] || [ "$force" = "yes" ] || [ "$pre" = "yes" ] || [ -n "$want" ]; then
-            echo "--from-checkout takes no other option." >&2
-            return 1
-        fi
-        update_from_checkout
-        return 0
-    fi
-    update_from_release "$check" "$want" "$pre" "$force"
 }
 
 # ─── `onionpress update --from-checkout`: a developer's git checkout ──
@@ -3325,7 +1046,7 @@ update_from_checkout() {
 
 # After an update installed new files (a release's package or a checkout):
 # the new plugins into the running WordPress, the images pulled, and
-# OnionPress restarted, the heartbeat client too.
+# OnionPress restarted, the daemon too (its code was replaced).
 update_finish() {
     local new_version plugin
     new_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
@@ -3339,42 +1060,39 @@ update_finish() {
         log "Updated plugins deployed to WordPress container"
     fi
 
-    # Pull latest docker images. Unlike the start path this has no
-    # --policy guard, so it would clobber a local build outright.
+    # Pull the release's images: every pin is a digest, so `--policy
+    # missing` fetches exactly what the new release moved (as the start
+    # does) and never clobbers a local build.
     cd "$INSTALL_DIR/docker"
     setup_db_passwords
     if using_local_images; then
         log "Skipping image pull: running locally built images"
         echo "  Skipping image pull (running locally built images)"
     else
-        log "Pulling latest Docker images..."
-        echo "  Pulling latest Docker images..."
-        docker compose "${CF_COMPOSE[@]}" pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+        log "Pulling the release's Docker images..."
+        echo "  Pulling the release's Docker images..."
+        docker compose "${CF_COMPOSE[@]}" pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
     fi
 
-    # Restart, the heartbeat client too (its script was replaced):
-    # stopped first, so it sends /offline while the site goes down.
+    # Restart: the hub hears /offline while the site goes down; the daemon
+    # is stopped without a second /offline (it comes right back on the
+    # new code) and started again with the stack.
     log "Restarting OnionPress..."
     echo "  Restarting OnionPress..."
-    stop_heartbeat_client
+    daemon_offline
+    op_py --data-dir "$DATA_DIR" daemon stop --no-offline >> "$LOG_FILE" 2>&1 || true
     stop_containers || log "WARNING: update: the stop failed; starting the containers anyway"
     start_containers
     wait_for_services
-    write_status
-    start_heartbeat_client
+    start_daemon
 
     log "Update complete: $new_version"
     echo "  Update complete! Now running OnionPress $new_version."
 }
 
-usage() {
-    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|check-docker|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
-    echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
-    echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME;"
-    echo "  onionheaven enable|disable|status|overview [--json]; config get|set|unset|list"
-}
 
 main() {
+    launcher_environment
     case "${1:-start}" in
         start)
             # PID lock
@@ -3411,61 +1129,47 @@ main() {
             setup_db_passwords
             start_containers
             wait_for_services
-            start_container_log_capture
+            # The daemon (status, probe, heartbeat, the page's requests,
+            # log capture): the user unit, where there is one.
+            start_daemon
 
-            # Write initial status
-            write_status
-
+            address_line=$(onion_address_line)
             log "OnionPress is running!"
-            log "$(onion_address_line)"
+            log "$address_line"
             log "Local access: $(wp_access_url)"
 
             echo ""
             echo "OnionPress is running!"
-            echo "  $(onion_address_line)"
+            echo "  $address_line"
             echo "  Local access:  $(wp_access_url)"
             echo "  Status page:   $(wp_access_url)/onionpress-status"
             echo "  Logs:          $LOG_FILE"
-
-            # Keep main process alive so systemd (KillMode=control-group)
-            # doesn't kill our background monitors (farm, activation watcher).
-            # Signal readiness to systemd, then poll status every 30s so the
-            # tray icon and reachability state stay current.
-            if [ "${NOTIFY_SOCKET:-}" ]; then
-                systemd-notify --ready 2>/dev/null || true
-            fi
-            _status_poll_loop &
-            wait
+            # Done: onionpress.service is a oneshot that stays active
+            # (RemainAfterExit); the daemon unit carries on (issue #407:
+            # until then this process stayed in a 30 s status loop).
             ;;
 
         stop)
             setup_db_passwords
-            # Stop heartbeat client first (sends /offline before containers
-            # go down): the user unit current installs run, or an old
-            # install's system unit (stop_heartbeat_client). This used to
-            # stop the system unit only, so a user unit kept beating.
-            stop_heartbeat_client
+            # The hub hears /offline before the containers go down (the
+            # daemon's, while the tor container is still up).
+            daemon_offline
             stop_containers
             ;;
 
         restart)
             setup_db_passwords
-            # Stop heartbeat client first (sends /offline before containers go down)
-            stop_heartbeat_client
+            daemon_offline
             stop_containers || log "WARNING: restart: the stop failed; starting the containers anyway"
             start_containers
             wait_for_services
-            # The `start` process's tailers ended with the old containers
-            # (and stop_containers above kills only this process's), so
-            # without this a restart left no container log capture (#203).
-            start_container_log_capture
-            write_status
-            # Start it again where its unit is enabled
-            start_heartbeat_client
+            # The daemon sees the stack come back and registers again; a
+            # terminal's restart with no daemon running starts one.
+            start_daemon
             ;;
 
         status)
-            get_status
+            op_py --data-dir "$DATA_DIR" status
             ;;
 
         address)
@@ -3512,44 +1216,36 @@ main() {
             run_setup "$@" || setup_rc=$?
             case "$setup_rc" in
                 0)
-                    # The site is set up: the tunnel, if there is a token.
-                    start_cloudflare_tunnel true
+                    # The site is set up: the tunnel, if there is a token
+                    # (its lines on stderr, after `setup --json`'s answer).
+                    start_cloudflare_tunnel true >&2
                     ;;
                 2) exit 0 ;;
                 10)
                     stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
                     start_containers
                     wait_for_services
-                    start_heartbeat_client
                     ;;
                 *) exit 1 ;;
             esac
-            write_status
-            echo ""
-            echo "  Setup complete! Your site is now running."
-            echo "  Admin panel: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/wp-admin"
-            echo "  Status page: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status"
+            # On stderr: `setup --json`'s answer stays the last line of stdout.
+            echo "" >&2
+            echo "  Setup complete! Your site is now running." >&2
+            echo "  Admin panel: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/wp-admin" >&2
+            echo "  Status page: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status" >&2
             ;;
 
         provision)
-            # Provision an already-installed WordPress with user-chosen
-            # site title, username, and password.  Used in headless / SSH
-            # installs after the auto-install bootstrap (systemd path where
-            # the container auto-installs WP with a random admin password).
-            # Unlike `setup`, this works when WP is already installed.
-            #
-            # Usage: onionpress provision [--adopt-existing]
-            #   → interactive terminal prompts
+            # Provision a WordPress the start installed (headless / SSH
+            # installs where the container auto-installed it): `onionpress
+            # provision` (setup_logic, issue #527): asked at the terminal,
+            # or --user/--title/--language with the password in
+            # ONIONPRESS_SETUP_PASSWORD (the tray's way); --json for a UI.
             # An installed WordPress is adopted only when OnionPress
             # installed it (the .wordpress-installed-by-onionpress marker),
             # else refused: whoever reached wp-admin/install.php first
             # chose its admin (issue #464). --adopt-existing keeps it anyway.
-            PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -I -B -c "
-import sys
-sys.path[:0] = sys.argv.pop(1).split(':')
-from onionpress.setup_logic import provision_interactive
-sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.argv[1:]) else 1)
-" "$ONIONPRESS_PYTHONPATH" "${@:2}"
+            op_py --data-dir "$DATA_DIR" provision "${@:2}"
             ;;
 
         provision-post-install)
@@ -3573,7 +1269,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                 --plugins-dir "$PLUGINS_DIR"
             # Every setup ends here (setup_logic.install_fresh_wordpress
             # runs this subcommand): WordPress's port goes where the config
-            # says and the heartbeat client is released (issue #464).
+            # says (issue #464; the daemon's hub gate opens on its own).
             # The tunnel too, when there is a token (start_cloudflare_tunnel).
             if wp_is_installed; then
                 after_wordpress_installed
@@ -3594,25 +1290,6 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # warns about every missing one (issue #507).
             setup_db_passwords
             import_key "${@:2}"
-            ;;
-
-        sleep-pre|sleep-post)
-            # Called by /usr/lib/systemd/system-sleep/onionpress around
-            # suspend. As of v2.4.99, all real work happens in the heartbeat
-            # daemon's DBus delay-inhibitor (see SleepInhibitor in
-            # onionpress-heartbeat.py): /offline POST on suspend and
-            # DEL_ONION / ADD_ONION watchdog signals on both sides, all
-            # while the inhibitor lock is still held — when docker is
-            # still responsive (not throttled by NM teardown).
-            #
-            # This hook is kept as a no-op fallback so the system-sleep
-            # contract still has something to call, and so its presence
-            # in the journal proves the OnionPress install is wired in.
-            # If the heartbeat daemon isn't running for some reason,
-            # there's nothing useful we can do from here anyway —
-            # docker exec is too slow at this point in the suspend flow.
-            phase="${1#sleep-}"
-            log "system-sleep $phase: hook called (no-op; daemon does the work)"
             ;;
 
         # ── Vanity + admin-password — thin wrappers around the Python CLI
@@ -3652,149 +1329,29 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         backup)
-            # backup [-o|--output <path>] [--check] [--json] [--user <login>];
-            # the password comes from read_backup_password. The old `backup
-            # <password> [output_path]` is refused (issue #504). --check is the
-            # check/confirm protocol's (onionpress.confirm, issue #375): the
-            # shared CLI verifies the password as the owner's and names the
-            # file, making no backup; the tray asks that first and then runs
-            # the backup at the named path. The backup itself stays
-            # create_backup's (bash); --json adds its answer's last line.
-            setup_db_passwords
-            shift
-            local backup_path="" backup_check=no backup_json=no
-            local -a backup_pos=() backup_check_flags=()
-            while [ $# -gt 0 ]; do
-                case "$1" in
-                    -o|--output)
-                        backup_path="${2:-}"
-                        shift
-                        if [ $# -gt 0 ]; then shift; fi
-                        ;;
-                    --output=*) backup_path="${1#--output=}"; shift ;;
-                    --check) backup_check=yes; shift ;;
-                    --json) backup_json=yes; backup_check_flags+=(--json); shift ;;
-                    --user)
-                        backup_check_flags+=(--user "${2:-}")
-                        shift
-                        if [ $# -gt 0 ]; then shift; fi
-                        ;;
-                    --user=*) backup_check_flags+=(--user "${1#--user=}"); shift ;;
-                    # An unknown flag must not become the legacy password.
-                    -?*) echo "ERROR: backup: unknown option $1" >&2; exit 2 ;;
-                    *) backup_pos+=("$1"); shift ;;
-                esac
-            done
-            if [ "${#backup_pos[@]}" -gt 2 ]; then
-                echo "ERROR: backup: too many arguments" >&2
-                exit 2
-            fi
-            if [ -n "${backup_pos[1]:-}" ]; then
-                backup_path="${backup_pos[1]}"
-            fi
-            read_backup_password "${backup_pos[0]:-}"
-            if [ "$backup_check" = yes ]; then
-                # Changes nothing: the CLI's answer is the whole result
-                # ({"ok": true, "filename", "output", ...} or {"error"}).
-                if [ -n "$backup_path" ]; then
-                    backup_check_flags+=(-o "$backup_path")
-                fi
-                ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" backup --check "${backup_check_flags[@]}"
-                exit $?
-            fi
-            if [ -z "$BACKUP_PASS" ]; then
-                echo "Usage: $0 backup [-o|--output <path>] [--check] [--json] [--user <login>]"
-                echo "Creates a password-protected backup of your OnionPress site."
-                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
-                exit 1
-            fi
-            if [ -z "$backup_path" ]; then
-                mkdir -p "$HOME/OnionPress/backups"
-                backup_path="$HOME/OnionPress/backups/onionpress-$(date +%Y-%m-%d)-$$.zip"
-            fi
-            create_backup "$BACKUP_PASS" "$backup_path"
-            echo "Backup saved to: $backup_path"
-            if [ "$backup_json" = yes ]; then
-                python3 -I -c 'import json, sys; print(json.dumps({"ok": True, "output": sys.argv[1]}))' "$backup_path"
-            fi
+            # backup [-o|--output <path>] [--check] [--json] [--user <login>].
+            # The shared CLI (cli.cmd_backup → backup.create_backup, the
+            # Mac's) reads the password (must match a WordPress administrator)
+            # from ONIONPRESS_BACKUP_PASSWORD, stdin or a no-echo prompt and
+            # refuses the old `backup <password> [output_path]` (issue #504);
+            # --check verifies the password and names the file, making no
+            # backup (the tray asks that first). Issue #406.
+            shift  # drop "backup"
+            op_py --data-dir "$DATA_DIR" backup "$@"
             ;;
 
         restore)
-            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
-            # the password comes from read_backup_password and goes on to
-            # Python in the environment. The old `restore <password>
-            # <backup_file.zip>` is refused. The flags are the check/confirm
-            # protocol's (onionpress.confirm): --check answers what the
-            # backup is, or {"ask": "password"} without one.
+            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]:
+            # onionpress.cli's argparse (#529). The password comes from
+            # ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt (cli.read_backup_password;
+            # the old `restore <password> <backup_file.zip>` is refused there,
+            # issue #504); --check answers what the backup is, or {"ask":
+            # "password"} without one; a hub's recovery key goes along in the
+            # environment. The exit status is the CLI's, the caller's only
+            # sign of a refused or failed restore (the tray and the menubar
+            # check it); the CLI's own lines say what happened.
             setup_db_passwords
-            local restore_legacy_pass="" restore_path="" restore_check=no restore_what=no
-            local -a restore_flags=() restore_pos=()
-            local restore_arg
-            for restore_arg in "${@:2}"; do
-                if [ "$restore_what" = yes ]; then
-                    restore_flags+=("$restore_arg")
-                    restore_what=no
-                    continue
-                fi
-                case "$restore_arg" in
-                    --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
-                    --json) restore_flags+=("$restore_arg") ;;
-                    --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
-                    --confirmed=?*) restore_flags+=("$restore_arg") ;;
-                    # An unknown flag must not become the legacy password.
-                    -?*) echo "ERROR: restore: unknown option $restore_arg" >&2; exit 2 ;;
-                    *) restore_pos+=("$restore_arg") ;;
-                esac
-            done
-            if [ "$restore_what" = yes ]; then
-                echo "ERROR: restore: --confirmed needs a value" >&2
-                exit 2
-            fi
-            if [ "${#restore_pos[@]}" -gt 2 ]; then
-                echo "ERROR: restore: too many arguments" >&2
-                exit 2
-            fi
-            restore_path="${restore_pos[0]:-}"
-            if [ -n "${restore_pos[1]:-}" ]; then
-                restore_legacy_pass="${restore_pos[0]}"
-                restore_path="${restore_pos[1]}"
-            fi
-            if [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]"
-                echo "Restores from an OnionPress backup. Containers must be running."
-                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
-                echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
-                echo "ONIONPRESS_HUB_RECOVERY_KEY, or a prompt (see: $0 hub-recovery-key)."
-                exit 1
-            fi
-            read_backup_password "$restore_legacy_pass"
-            if [ -z "$BACKUP_PASS" ] && [ "$restore_check" != yes ]; then
-                echo "ERROR: Password is required." >&2
-                exit 1
-            fi
-            if [ "$restore_check" = yes ]; then
-                # Changes nothing: the CLI's answer is the whole result.
-                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"
-                exit $?
-            fi
-            # install-from-backup: the shared Python CLI tears the install down
-            # and rebuilds it from the backup (seeded key + imported DB/content),
-            # replacing the in-place overwrite + key-volume swap churn (no
-            # .import-key-pending, no manual stop/start).
-            # The exit status is the caller's only sign of a refused or
-            # failed restore (the tray and the menubar check it).
-            # The heartbeat client holds the current key: it is stopped
-            # before the restore asks the OnionHeaven hubs to delete their
-            # copy (a backup of another address replaces the key), and
-            # started again after, with the restored one.
-            stop_heartbeat_client
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
-                start_heartbeat_client
-                echo "ERROR: Restore failed — see $LOG_FILE" >&2
-                exit 1
-            fi
-            start_heartbeat_client
-            echo "Done! OnionPress rebuilt from backup."
+            ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" op_py --data-dir "$DATA_DIR" restore "${@:2}"
             ;;
 
         hub-recovery-key)
@@ -3810,19 +1367,35 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         update)
-            # A released package, checked against the release's SHA256SUMS
-            # (update_cmd); a git checkout only with --from-checkout.
-            update_cmd "${@:2}"
+            # One updater on both platforms (onionpress.cli update ->
+            # updater.py): the release lookup and the check of its
+            # onionpress.deb against SHA256SUMS; the install comes back to
+            # this launcher's leaves (update-install-deb, or
+            # update-from-checkout with --from-checkout).
+            # ONIONPRESS_YES=true (the global -y filter above) still means --yes.
+            update_args=("${@:2}")
+            [ "$ONIONPRESS_YES" != "true" ] || update_args+=(--yes)
+            op_py --data-dir "$DATA_DIR" update --launcher "$INSTALL_DIR/onionpress" "${update_args[@]}"
             ;;
 
-        write-status)
-            setup_db_passwords
-            write_status
+        update-install-deb)
+            # Internal, run by `onionpress update` with a checked package:
+            # sudo apt-get installs it, then update_finish restarts the site.
+            update_install_deb "${@:2}"
+            ;;
+
+        update-from-checkout)
+            # Internal, run by `onionpress update --from-checkout`: a
+            # developer's git checkout, through linux/install-tree.sh.
+            update_from_checkout
             ;;
 
         apply-config)
-            setup_db_passwords
-            apply_config_updates
+            # The Settings page's config-updates.json, through the allowlist
+            # (config.SETTINGS_PAGE_KEYS) and config.apply_side_effects
+            # (START_ON_BOOT's units): onionpress.handle_action.apply_config,
+            # as on the Mac. handle-action applies it on every run too.
+            op_py --data-dir "$DATA_DIR" apply-config
             ;;
 
         onionheaven)
@@ -3841,157 +1414,75 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
 
         handle-action)
             # The WordPress Settings page's requests, handled once for both
-            # platforms (onionpress.handle_action, issue #366). Its actions
-            # run through this launcher: start, restart, stop, apply-config,
-            # write-status, settings-page-backup, settings-page-restore,
-            # settings-page-update-check (the bash bodies below). This runs
-            # as onionpress-watcher.service, a oneshot: whatever must
-            # outlive it goes through run_detached, which ONIONPRESS_IN_WATCHER
-            # tells (inherited by the launcher runs under the handler).
+            # platforms (onionpress.handle_action, issue #366): the daemon
+            # runs this on its status loop. Its actions run through this
+            # launcher: start, restart, stop, apply-config,
+            # settings-page-backup, settings-page-restore (the bash bodies
+            # below), update --check --json (onionpress.cli). The daemon's
+            # unit cgroup ends with the daemon (an update restarts it):
+            # whatever must outlive this run goes through a transient unit
+            # (start.run_detached_cli's systemd-run), which
+            # ONIONPRESS_IN_WATCHER tells (inherited by the launcher runs
+            # under the handler).
             ONIONPRESS_IN_WATCHER=true op_py --data-dir "$DATA_DIR" handle-action --launcher "$INSTALL_DIR/onionpress" "${@:2}"
             ;;
 
         settings-page-backup)
-            # The Settings page's backup (handle-action create-backup):
-            # handed to WordPress, and the password came from there
+            # The Settings page's backup (handle-action create-backup), the
+            # shared CLI's (cli.cmd_settings_page_backup, the Mac's; issue
+            # #406): handed to WordPress, and the password came from there
             # (ONIONPRESS_BACKUP_PASSWORD), so never a hub's registry or
-            # registrants' keys (--without-hub-data), nor the Cloudflare
-            # tunnel token or any other config WordPress is not shown
-            # (--without-host-secrets); refused on an OnionHeaven hub or
-            # OnionHome, or a node that could not be checked (exit 3, the
-            # reason on stdout). Usage: settings-page-backup <output.zip>
+            # registrants' keys, the Cloudflare tunnel token or any other
+            # config WordPress is not shown, nor the site's own onion
+            # service key; refused on an OnionHeaven hub or OnionHome, or a
+            # node that could not be checked (exit 3, the reason in the
+            # answer). Usage: settings-page-backup <output.zip> [--json]
             setup_db_passwords
-            read_backup_password
-            if [ -z "$BACKUP_PASS" ] || [ -z "${2:-}" ]; then
-                echo "ERROR: settings-page-backup <output.zip>, the password in ONIONPRESS_BACKUP_PASSWORD" >&2
-                exit 1
-            fi
-            spb_rc=0
-            create_backup "$BACKUP_PASS" "$2" --without-hub-data --without-host-secrets 2>>"$LOG_FILE" || spb_rc=$?
-            if [ "$spb_rc" -eq 3 ]; then
-                printf '%s\n' "$BACKUP_REFUSAL"
-                exit 3
-            fi
-            exit "$spb_rc"
+            op_py --data-dir "$DATA_DIR" settings-page-backup "${@:2}"
             ;;
 
         settings-page-restore)
-            # The Settings page's restore (handle-action restore-backup):
-            # restore_backup --from-settings-page, in place, on the copy the
-            # handler made of the upload. The file and its password
-            # (ONIONPRESS_BACKUP_PASSWORD) came through WordPress: a backup
-            # holding an OnionHeaven hub's keys or OnionHome's name registry
-            # is refused, the hub data is never written, and a backup of
-            # another address is refused (no one at this host to ask; the
-            # Mac asks). Exit 3 with the reason as the last line of stdout;
-            # the handler restarts OnionPress after a success. The handler's
-            # --json and --confirmed are the Mac's: ignored here.
+            # The Settings page's restore (handle-action restore-backup), the
+            # shared CLI's (cli.cmd_settings_page_restore, the Mac's; issue
+            # #406): backup.restore_from_backup in place with
+            # through_wordpress=True, never the install-from-backup
+            # `restore`. The file and its password (ONIONPRESS_BACKUP_PASSWORD)
+            # came through WordPress: a backup holding an OnionHeaven hub's
+            # keys or OnionHome's name registry is refused, the hub data is
+            # never written, and on Linux a backup of another address is
+            # refused (no one at this host to ask; the Mac asks). Exit 3
+            # with the reason in the answer; the handler restarts OnionPress
+            # after a success.
             setup_db_passwords
-            read_backup_password
-            if [ -z "$BACKUP_PASS" ] || [ -z "${2:-}" ]; then
-                echo "ERROR: settings-page-restore <backup.zip>, the password in ONIONPRESS_BACKUP_PASSWORD" >&2
-                exit 1
-            fi
-            spr_rc=0
-            spr_out=$(restore_backup "$BACKUP_PASS" "$2" --from-settings-page 2>>"$LOG_FILE") || spr_rc=$?
-            if [ "$spr_rc" -ne 0 ]; then
-                # restore_backup stopped it (it held the old key)
-                start_heartbeat_client
-                [ "$spr_rc" -ne 3 ] || printf '%s\n' "$spr_out" | tail -n 1
-                exit "$spr_rc"
-            fi
-            printf '%s\n' "$spr_out" | tail -n 1
-            ;;
-
-        settings-page-update-check)
-            # The Settings page's update button (handle-action update):
-            # report only, never an install (update_settings_page_check
-            # writes update-result.json).
-            update_settings_page_check
+            op_py --data-dir "$DATA_DIR" settings-page-restore "${@:2}"
             ;;
 
         reset)
-            # Wipe everything: WordPress, database, Tor state, keys, config, secrets.
-            # After reset + start + setup, restore from backup to get data back.
-            if [ "$ONIONPRESS_YES" != "true" ]; then
-                echo ""
-                echo "  This will ERASE everything: WordPress, database, Tor state,"
-                echo "  onion address keys, config, and secrets."
-                echo ""
-                echo "  To preserve your data, run 'onionpress backup' first."
-                echo ""
-                echo "  Press Enter to continue or Ctrl+C to cancel..."
-                read -r
-            fi
-
-            # The onion service key goes with the reset: OnionHeaven hubs
-            # that may hold a copy are asked to delete it first, while it
-            # can still sign the request (this also stops the heartbeat
-            # client, which holds the key).
-            if ! onionheaven_release reset; then
-                echo "Cancelled."
-                exit 1
-            fi
-
-            log "Resetting OnionPress (full wipe)..."
-
-            # Stop everything
+            # Wipe everything: WordPress, database, Tor state, keys, config,
+            # secrets (onionpress.cli reset, issue #366: it asks first, with
+            # --check --json / --confirmed for a UI and --yes for scripts,
+            # and asks the OnionHeaven hubs that may hold the key to delete
+            # it while the key can still sign), then on Linux (#529) this
+            # launcher's start and the hub state's reset, as this case did
+            # in bash. ONIONPRESS_YES=true (the global -y) still means --yes.
             setup_db_passwords 2>/dev/null || true
-            stop_heartbeat_client
-            stop_containers 2>/dev/null || true
-
-            # Remove all Docker volumes
-            cd "$DOCKER_DIR"
-            log "Removing Docker volumes..."
-            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
-                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 && log "Removed volume: $vol" || log "WARNING: Failed to remove volume: $vol"
-            done
-
-            # Wipe data directory (keep directory structure). The
-            # OnionHeaven registration record stays when a hub may still
-            # hold a key: it is what says what remains on which hub.
-            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
-            rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
-            if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then
-                rm -f "$DATA_DIR/onionheaven-registration.json"
-            fi
-            rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
-            rm -rf "$DATA_DIR/shared/vanity-keys/"
-            log "Removed keys, config, secrets, and logs"
-
-            echo ""
-            echo "  Reset complete. Everything wiped. Starting fresh containers..."
-            echo ""
-
-            # Start fresh containers
-            setup_db_passwords
-            start_containers
-            wait_for_services
-            write_status
-
-            # Clean OnionHeaven state in the shared persistent volume
-            if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
-                log "Resetting OnionHeaven..."
-                reset_onionheaven_in_container >> "$LOG_FILE" || true
-            fi
-            # With the new key (and a fresh config, which says yes).
-            start_heartbeat_client
-
-            log "OnionPress reset and restarted"
-            echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
+            reset_args=("${@:2}")
+            [ "${ONIONPRESS_YES:-}" != "true" ] || reset_args+=(--yes)
+            op_py --data-dir "$DATA_DIR" reset "${reset_args[@]}"
             ;;
 
         validate-oh-address)
-            _validate_oh_address "$2"
+            # The Settings dialog's hub check (onionheaven.validate_hub_address,
+            # issue #529): JSON on stdout, exit 1 for a malformed or own address.
+            op_py --data-dir "$DATA_DIR" validate-oh-address "${2:-}"
             ;;
 
         upload-analytics)
             # Upload the diagnostic logs to OnionHome now (Share Now from
             # the command line): one implementation for both platforms,
             # onionpress.analytics_sharing.request_upload (issue #351). It
-            # refuses while sharing is off or the heartbeat client is not
-            # running, else leaves the marker the client takes in its next
-            # cycle.
+            # refuses while sharing is off or the daemon is not running,
+            # else leaves the marker the daemon takes in its next cycle.
             op_py --data-dir "$DATA_DIR" upload-analytics
             ;;
 
@@ -3999,7 +1490,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Full lifecycle test — backup, uninstall, install, restore,
             # verify. Ported from ~300 lines of bash to src/onionpress/
             # scrub.py for the phase orchestration + structured verify
-            # checks. Heavy phases (create_backup, restore_backup, the
+            # checks. Heavy phases (the backup, the restore, the
             # install.sh run) still go through bash subcommands; the
             # Python module is the orchestration glue, sudo keep-alive,
             # and verify checks.
@@ -4007,180 +1498,20 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Args forwarded verbatim — "${@:2}" skips this case label
             # itself. Supports: `onionpress scrub [--clean]` (the password
             # from the environment, stdin or a prompt; one on argv is refused).
-            op_py scrub "${@:2}"
+            op_py --data-dir "$DATA_DIR" scrub "${@:2}"
             ;;
 
         uninstall)
-            echo ""
-            echo "OnionPress Uninstaller"
-            echo "======================"
-            echo ""
-            echo "CRITICAL WARNING"
-            echo ""
-            echo "Uninstalling will PERMANENTLY DELETE:"
-            echo "  - Your onion address and private key"
-            echo "  - All WordPress content and data"
-            echo "  - Database and configuration"
-            echo "  - Systemd services"
-            echo "  - /opt/onionpress installation"
-            echo ""
-            echo "Your site CANNOT BE RECOVERED unless you have a backup."
-            echo ""
-
-            if [ "$ONIONPRESS_YES" != "true" ]; then
-                # Offer backup first (like Mac version)
-                read -r -p "Create a backup before uninstalling? [Y/n] " backup_choice
-                if [ "$backup_choice" != "n" ] && [ "$backup_choice" != "N" ]; then
-                    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
-                        # Pre-validate the WP admin password BEFORE any
-                        # destructive work. Without this, a typo'd password
-                        # makes create_backup error out mid-script, leaving
-                        # the user in a "Fix it or Ctrl-C" limbo. Three
-                        # tries; abort cleanly on failure — install stays
-                        # intact.
-                        if ! prompt_and_validate_wp_password \
-                                "WordPress admin password (for backup): "; then
-                            echo "Cancelled — install untouched."
-                            exit 1
-                        fi
-                        mkdir -p "$HOME/OnionPress/backups"
-                        bp_path="$HOME/OnionPress/backups/OnionPress-backup-$(date +%Y-%m-%d-%H-%M).zip"
-                        if create_backup "$PROMPTED_WP_PASS" "$bp_path"; then
-                            echo "Backup saved to: $bp_path"
-                            echo ""
-                            echo "IMPORTANT: Copy this file somewhere safe before continuing!"
-                            echo "  e.g.: scp $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}'):$bp_path ."
-                            echo ""
-                        else
-                            # Password was already validated, so this is
-                            # a different kind of failure (disk full,
-                            # docker hiccup). Bail rather than risk an
-                            # uninstall without a backup.
-                            echo "Backup failed. Aborting uninstall — install untouched."
-                            exit 1
-                        fi
-                    else
-                        echo "Containers are not running — cannot create backup."
-                        echo "Start OnionPress first, or skip backup."
-                        echo ""
-                        read -r -p "Continue without backup? [y/N] " skip_backup
-                        if [ "$skip_backup" != "y" ] && [ "$skip_backup" != "Y" ]; then
-                            echo "Cancelled."
-                            exit 0
-                        fi
-                    fi
-                fi
-                # No separate "type DELETE" gate — the sudo password
-                # prompt that comes next is the actual "are you sure"
-                # moment. Mac's uninstall doesn't have a DELETE prompt
-                # either.
-            fi
-
-            echo ""
-
-            # OnionHeaven hubs that may hold a copy of the onion service key
-            # are asked to delete it before anything is removed: the key in
-            # the tor container signs the request. onionheaven_release
-            # stops the heartbeat client first, so no /online follows the
-            # /unregister, and says what happened.
-            if ! onionheaven_release uninstall; then
-                echo "Cancelled — install untouched."
-                exit 1
-            fi
-
-            USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
-            AUTOSTART_DIR="$HOME/.config/autostart"
-            APPS_DIR="$HOME/.local/share/applications"
-            ICONS_DIR="$HOME/.local/share/icons"
-
-            echo "Stopping user services..."
-            # Current installs use user-level systemd; legacy installs used
-            # system-level. Stop both — whichever doesn't exist is a no-op.
-            systemctl --user stop onionpress-heartbeat 2>/dev/null || true
-            systemctl --user stop onionpress-watcher.timer 2>/dev/null || true
-            systemctl --user stop onionpress 2>/dev/null || true
-            sudo systemctl stop onionpress-heartbeat 2>/dev/null || true
-            sudo systemctl stop onionpress-watcher.timer 2>/dev/null || true
-            sudo systemctl stop onionpress 2>/dev/null || true
-
-            echo "Killing tray process..."
-            # The tray runs in the user session, not via systemd — it has
-            # to be killed explicitly or the icon stays until logout.
-            pkill -u "$(whoami)" -f onionpress-tray 2>/dev/null || true
-            # Also kill any orphaned systemd-inhibit / dbus-monitor children
-            # left behind if the service was force-killed earlier.
-            pkill -u "$(whoami)" -f "systemd-inhibit.*OnionPress" 2>/dev/null || true
-            pkill -u "$(whoami)" -f "dbus-monitor.*PrepareForSleep" 2>/dev/null || true
-
-            echo "Removing containers and volumes..."
-            setup_db_passwords 2>/dev/null || true
-            cd "$DOCKER_DIR" 2>/dev/null && docker compose "${COMPOSE_WITH_CF[@]}" down -v 2>/dev/null || true
-
-            # `compose down -v` only removes volumes Compose created.
-            # Volumes pre-created by the launcher via `docker volume
-            # create` (onion-keys, tor-state, and the older arti-state and
-            # tor-keys names) are treated as
-            # external and skipped — leaving the onion private key
-            # behind across a supposed "PERMANENTLY DELETE" uninstall.
-            # Sweep all onionpress-* volumes by name filter.
-            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
-                docker volume rm "$vol" 2>/dev/null || true
-            done
-
-            echo "Disabling user services..."
-            systemctl --user disable onionpress 2>/dev/null || true
-            systemctl --user disable onionpress-heartbeat 2>/dev/null || true
-            systemctl --user disable onionpress-watcher.timer 2>/dev/null || true
-            rm -f "$USER_SYSTEMD_DIR/onionpress.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-heartbeat.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-watcher.service" \
-                  "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
-            systemctl --user daemon-reload 2>/dev/null || true
-
-            echo "Disabling and removing legacy system services..."
-            sudo systemctl disable onionpress 2>/dev/null || true
-            sudo systemctl disable onionpress-heartbeat 2>/dev/null || true
-            sudo systemctl disable onionpress-watcher.timer 2>/dev/null || true
-            sudo rm -f /etc/systemd/system/onionpress.service \
-                       /etc/systemd/system/onionpress-heartbeat.service \
-                       /etc/systemd/system/onionpress-watcher.service \
-                       /etc/systemd/system/onionpress-watcher.timer
-            sudo systemctl daemon-reload
-
-            echo "Removing /opt/onionpress..."
-            sudo rm -rf /opt/onionpress
-
-            echo "Removing /usr/local/bin symlinks..."
-            sudo rm -f /usr/local/bin/onionpress /usr/local/bin/onionpress-tray
-
-            echo "Removing per-user desktop entries, icons, and autostart..."
-            rm -f "$AUTOSTART_DIR/onionpress-tray.desktop"
-            rm -f "$APPS_DIR/onionpress.desktop" "$APPS_DIR/onionpress-tray.desktop"
-            # Hicolor icons may live under several size dirs (512x512, scalable).
-            find "$ICONS_DIR/hicolor" -type f -name 'onionpress*' \
-                -delete 2>/dev/null || true
-            # Refresh caches so the launcher / icon theme drop stale entries.
-            command -v gtk-update-icon-cache >/dev/null 2>&1 && \
-                gtk-update-icon-cache -t -f "$ICONS_DIR/hicolor" >/dev/null 2>&1 || true
-            command -v update-desktop-database >/dev/null 2>&1 && \
-                update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
-
-            echo "Removing data directory ($DATA_DIR)..."
-            rm -rf "$DATA_DIR"
-
-            echo ""
-            echo "OnionPress has been uninstalled."
-            if [ "${ONIONHEAVEN_RELEASE_RC:-0}" -ne 0 ]; then
-                echo ""
-                echo "Note: an OnionHeaven hub may still hold a copy of your onion service"
-                echo "key (see the warning above). Ask the hub's operator to remove it if"
-                echo "you need it gone."
-            fi
-            if [ -n "${bp_path:-}" ] && [ -f "${bp_path:-}" ]; then
-                echo ""
-                echo "Your backup is at: $bp_path"
-                echo "Use it to restore: onionpress restore $bp_path"
-            fi
+            # Remove OnionPress (onionpress.uninstall's Linux branch, #529):
+            # asks first (--check --json and --confirmed for the tray, or at
+            # this terminal: the hub that may hold the key, then DELETE),
+            # offers a backup, takes the key back off the OnionHeaven hubs,
+            # stops the units and the tray, removes the containers and
+            # volumes, /opt/onionpress and the symlinks (sudo), the desktop
+            # entries and ~/.onionpress. ONIONPRESS_YES=true (-y; scrub's
+            # uninstall) answers every question and skips the backup offer.
+            [ "${ONIONPRESS_YES:-}" != "true" ] || export ONIONPRESS_CONFIRMED="hub-holds-key uninstall"
+            op_py --data-dir "$DATA_DIR" uninstall "${@:2}"
             ;;
 
         reset-onionheaven)
@@ -4200,13 +1531,17 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         help|-h|--help)
-            usage
+            # One text for both platforms (cli.launcher_help, #529).
+            op_py --data-dir "$DATA_DIR" launcher-help
+            exit 0
             ;;
 
         *)
-            echo "onionpress: unknown command: $1" >&2
-            usage >&2
-            exit 1
+            # Every other verb is onionpress.cli's: a subcommand with no
+            # case of its own reaches it here (check-for-update,
+            # ensure-archive-s3-keys, ...), and one the CLI does not have
+            # either gets the CLI's usage and exit status.
+            op_py --data-dir "$DATA_DIR" "$@"
             ;;
     esac
 }

@@ -738,28 +738,23 @@ echo "restored dropped=$d"
 """
 
 
-def hub_data_state():
+def hub_data_state(docker):
     """"hub" if the OnionHeaven volume holds a hub's data (registrants'
     keys, or a registry with a row), "none" if it is known not to, None if
     the onionheaven container did not answer or could not tell (a registry
-    sqlite3 could not read: HUB_DATA_STATE_SH)."""
-    try:
-        r = subprocess.run(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_STATE_SH],
-                           capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    state = r.stdout.strip() if r.returncode == 0 else ""
+    sqlite3 could not read: HUB_DATA_STATE_SH). Asked through *docker*."""
+    r = docker.run(['exec', 'onionheaven', 'sh', '-c', HUB_DATA_STATE_SH],
+                   timeout=30, quiet=True)
+    state = r.stdout.strip() if r.ok else ""
     return state if state in ("hub", "none") else None
 
 
-def stage_hub_data(dest, log_func):
+def stage_hub_data(dest, log_func, *, docker):
     """Copy the hub's registry (a consistent copy, HUB_DATA_TAR_SH) and
-    keys/ out of the onionheaven container into *dest*, as plain files and
-    folders (unpack_plain_tar), then scrub_staged_tree. The Linux
-    launcher's create_backup runs this through `onionpress.cli
-    stage-hub-data`."""
+    keys/ out of the onionheaven container (through *docker*) into *dest*,
+    as plain files and folders (unpack_plain_tar), then scrub_staged_tree."""
     os.makedirs(dest, exist_ok=True)
-    _stage_container_tar(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
+    _stage_container_tar(docker, ['exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
                          dest, log_func, 'onionheaven')
     scrub_staged_tree(dest, log_func, 'onionheaven')
     keys = os.path.join(dest, 'keys')
@@ -767,13 +762,14 @@ def stage_hub_data(dest, log_func):
     log_func(f"Backup: OnionHeaven registry and {count} registrants' key directories copied")
 
 
-def read_hub_data(log_func):
+def read_hub_data(log_func, *, docker):
     """The hub's registry (a consistent copy, HUB_DATA_TAR_SH) and its
-    registrants' keys, read out of the onionheaven container into memory
-    (read_tar: plain files of the expected names only, bounded).
-    For a sealed backup: none of it is written to a file in the clear."""
-    proc = subprocess.Popen(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+    registrants' keys, read out of the onionheaven container (through
+    *docker*) into memory (read_tar: plain files of the expected names
+    only, bounded). For a sealed backup: none of it is written to a file in
+    the clear."""
+    proc = docker.popen(['exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
     killer = threading.Timer(_STAGE_COPY_FLOOR_S, proc.kill)
     killer.daemon = True
     killer.start()
@@ -797,7 +793,7 @@ def read_hub_data(log_func):
     return hub
 
 
-def stage_hub_backup(staging, log_func, *, data_dir=None):
+def stage_hub_backup(staging, log_func, *, data_dir=None, docker):
     """Put this hub's registry and registrants' keys into the staged backup
     *staging*; return the metadata.json fields that say how.
 
@@ -807,15 +803,15 @@ def stage_hub_backup(staging, log_func, *, data_dir=None):
     (stage_hub_data) under the backup's password only, as before, with a
     loud warning every time. A recovery key file that is there but cannot
     be read fails the backup (RecoveryKeyError) rather than
-    leave the keys unsealed. Shared by create_backup and, through
-    `onionpress.cli stage-hub-backup`, the Linux launcher's."""
+    leave the keys unsealed. create_backup's, on both platforms; the
+    container is read through *docker*."""
     _data_dir = data_dir if data_dir is not None else _default_data_dir()
     public_raw = load_public_key(_data_dir)
     if public_raw is None:
         log_func(HUB_DATA_UNSEALED_WARNING)
-        stage_hub_data(os.path.join(staging, 'onionheaven'), log_func)
+        stage_hub_data(os.path.join(staging, 'onionheaven'), log_func, docker=docker)
         return {'onionheaven_data': 'unsealed'}
-    hub = read_hub_data(log_func)
+    hub = read_hub_data(log_func, docker=docker)
     sealed = seal(pack(hub), public_raw)
     fd = os.open(os.path.join(staging, SEALED_MEMBER),
                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -848,7 +844,7 @@ def _keys_tar(keys):
     return buf.getvalue()
 
 
-def write_hub_data(hub, log_func):
+def write_hub_data(hub, log_func, *, docker):
     """Put checked hub data (check) onto the hub data volume,
     through the onionheaven container; nothing passes through a host file.
 
@@ -858,22 +854,20 @@ def write_hub_data(hub, log_func):
     restores it with SQLite's .restore, under its locks; a registry it
     refuses is left out and logged, and the keys stay restored.
     HUB_DATA_RESTORED_LOG is logged only when something was written.
+    Everything goes in through *docker* (the caller's runner).
     """
     wrote = False
     if hub.keys:
-        subprocess.run(['docker', 'exec', 'onionheaven', 'mkdir', '-p',
-                        f'{ONIONHEAVEN_DATA_DIR}/keys'],
-                       capture_output=True, timeout=30, check=True)
-        subprocess.run(['docker', 'cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'],
-                       input=_keys_tar(hub.keys), capture_output=True, timeout=120,
-                       check=True)
+        docker.run(['exec', 'onionheaven', 'mkdir', '-p', f'{ONIONHEAVEN_DATA_DIR}/keys'],
+                   timeout=30, check=True, quiet=True)
+        docker.run(['cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'],
+                   input=_keys_tar(hub.keys), timeout=120, check=True, quiet=True)
         log_func(f"Restore: {len(hub.keys)} registrants' keys restored")
         wrote = True
     if hub.registry is not None:
-        r = subprocess.run(['docker', 'exec', '-i', 'onionheaven', 'sh', '-c',
-                            REGISTRY_RESTORE_SH],
-                           input=hub.registry, capture_output=True, timeout=120)
-        lines = r.stdout.decode('utf-8', errors='replace').strip().splitlines()
+        r = docker.run(['exec', '-i', 'onionheaven', 'sh', '-c', REGISTRY_RESTORE_SH],
+                       input=hub.registry, timeout=120, quiet=True)
+        lines = r.stdout.strip().splitlines()
         last = ''.join(ch for ch in (lines[-1] if lines else '') if ch.isprintable())[:200]
         if r.returncode == 3:
             log_func(f"Restore: the backup's OnionHeaven registry was not restored: "
@@ -893,7 +887,7 @@ def write_hub_data(hub, log_func):
                  "checks; the hub data volume was not written")
 
 
-def restore_hub_data(src, log_func):
+def restore_hub_data(src, log_func, *, docker):
     """Put a backup's plain OnionHeaven registry and keys (*src*, its
     onionheaven/ folder) onto the hub data volume: read within bounds
     (load_dir), checked (check: each key must be its
@@ -901,7 +895,7 @@ def restore_hub_data(src, log_func):
     goes there (an older backup's master-key files, logs, the move's kept
     copies, a hostname of the backup's)."""
     write_hub_data(check(load_dir(src, log_func), log_func),
-                   log_func)
+                   log_func, docker=docker)
 
 
 def open_sealed_hub_data(staging, metadata, private_raw, log_func):

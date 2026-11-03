@@ -38,6 +38,8 @@ sys.path.insert(0, SRC)
 
 from onionpress import multisite, wp_files  # noqa: E402
 from onionpress.docker import Docker  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker, over_binary  # noqa: E402
 
 ADDR = "op2" + "a" * 53 + ".onion"
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
@@ -265,7 +267,7 @@ exit 1
     def test_replaces_the_folder_whole(self):
         dest = "/var/www/html/wp-content/themes/onionpress"
         self._file("container" + dest + "/old.php", b"<?php // stale")
-        r = wp_files.put_tree(self.src, dest, docker_bin=self.docker, timeout=60)
+        r = wp_files.put_tree(self.src, dest, docker=over_binary(self.docker), timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._tree(dest[1:]), {"style.css": b"body {}",
                                                 "inc/functions.php": b"<?php // new"})
@@ -283,7 +285,7 @@ exit 1
     def test_merge_keeps_what_is_there(self):
         dest = "/var/www/html/wp-content"
         self._file("container" + dest + "/uploads/kept.jpg", b"jpg")
-        r = wp_files.put_tree(self.src, dest, merge=True, docker_bin=self.docker,
+        r = wp_files.put_tree(self.src, dest, merge=True, docker=over_binary(self.docker),
                               timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         tree = self._tree(dest[1:])
@@ -297,7 +299,7 @@ exit 1
         self._file("theme-src/creations/mine.txt", b"host's")
         self._file("theme-src/creations.txt", b"a file")
         self._file("theme-src/uploads/creations/kept.txt", b"nested")
-        r = wp_files.put_tree(self.src, dest, merge=True, docker_bin=self.docker,
+        r = wp_files.put_tree(self.src, dest, merge=True, docker=over_binary(self.docker),
                               timeout=60, skip=("creations",))
         self.assertEqual(r.returncode, 0, r.stderr)
         tree = self._tree(dest[1:])
@@ -313,7 +315,7 @@ exit 1
         logs = []
         with mock.patch.object(wp_files, "put_tree",
                                return_value=subprocess.CompletedProcess([], 0, "", "")) as put:
-            backup.put_wp_content(self.src, logs.append)
+            backup.put_wp_content(self.src, logs.append, docker=FakeDocker())
         self.assertEqual(put.call_args.kwargs["skip"], backup.WP_CONTENT_NEVER_RESTORED)
         self.assertEqual(backup.WP_CONTENT_NEVER_RESTORED, ("creations",))
         self.assertTrue([m for m in logs if "wp-content/creations is left out" in m], logs)
@@ -321,7 +323,7 @@ exit 1
         os.rename(os.path.join(self.src, "creations"), os.path.join(self.src, "uploads"))
         with mock.patch.object(wp_files, "put_tree",
                                return_value=subprocess.CompletedProcess([], 0, "", "")):
-            backup.put_wp_content(self.src, logs.append)
+            backup.put_wp_content(self.src, logs.append, docker=FakeDocker())
         self.assertEqual(logs, [])
 
     def test_the_launchers_cli_helper(self):
@@ -334,13 +336,18 @@ exit 1
         os.makedirs(bin_dir)
         os.rename(os.path.join(self.tmp, "bin-docker"), os.path.join(bin_dir, "docker"))
         dest = "/var/www/html/wp-content/plugins/cache-enabler"
-        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}):
-            rc = cli.main(["put-wp-tree", "--src", self.src, "--dest", dest])
+        data_dir = os.path.join(self.tmp, "data")
+        # No app bundle: the Docker the command builds runs the stub on
+        # PATH, never an installed OnionPress.app's docker.
+        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}), \
+                mock.patch("onionpress.platform.find_app_bundle", return_value=None):
+            rc = cli.main(["--data-dir", data_dir, "put-wp-tree", "--src", self.src, "--dest", dest])
             self.assertEqual(rc, 0)
             self.assertEqual(self._tree(dest[1:])["style.css"], b"body {}")
             os.symlink("/etc/passwd", os.path.join(self.src, "passwd.css"))
             with mock.patch("sys.stderr"):
-                rc = cli.main(["put-wp-tree", "--src", self.src, "--dest", dest])
+                rc = cli.main(["--data-dir", data_dir, "put-wp-tree", "--src", self.src,
+                               "--dest", dest])
             self.assertEqual(rc, 1)
 
     def test_a_link_in_the_source_is_refused_and_nothing_replaced(self):
@@ -348,7 +355,7 @@ exit 1
         self._file("container" + dest + "/old.php", b"<?php // stale")
         os.symlink("/etc/passwd", os.path.join(self.src, "passwd.css"))
         with self.assertRaises(ValueError):
-            wp_files.put_tree(self.src, dest, docker_bin=self.docker, timeout=60)
+            wp_files.put_tree(self.src, dest, docker=over_binary(self.docker), timeout=60)
         self.assertEqual(self._tree(dest[1:]), {"old.php": b"<?php // stale"})
         self.assertEqual(os.listdir(os.path.dirname(os.path.join(self.box, dest[1:]))),
                          ["onionpress"])
@@ -366,18 +373,13 @@ class TestLaunchersShareThePutScript(unittest.TestCase):
                 self.assertIsNotNone(m, body)
                 self.assertEqual(m.group(1), wp_files.PUT_FILE_SCRIPT)
 
-    def test_linux_wp_exec_is_www_data(self):
-        text = _read("linux/onionpress")
-        start = text.index("\nwp_exec() {\n")
-        self.assertIn('docker exec -u www-data onionpress-wordpress "$@"',
-                      text[start:text.index("\n}\n", start)])
 
 
 class TestNoRootWritesIntoWwwDataFolders(unittest.TestCase):
     """The sources, scanned: nothing writes, chowns or copies into the
     WordPress container's www-data folders as root again."""
 
-    PY = ("src/menubar.py", "linux/onionpress-heartbeat.py",
+    PY = ("src/menubar.py", "src/onionpress/daemon.py",
           "src/onionpress/reachability.py",
           "src/onionpress/multisite.py", "src/onionpress/onion_proxy.py",
           "src/onionpress/derivatives.py", "src/onionpress/backup.py",
@@ -465,8 +467,7 @@ class TestSharedOnionAddress(unittest.TestCase):
             calls.append((list(argv), kw.get("input")))
             out = hostname_out if argv[1:3] == ["exec", "onionpress-tor"] else ""
             return subprocess.CompletedProcess(argv, 0, out, "")
-        with mock.patch.object(multisite.subprocess, "run", fake_run):
-            ok = multisite.write_shared_onion_address()
+        ok = multisite.write_shared_onion_address(docker=FakeDocker(fake_run))
         return ok, calls
 
     def test_read_from_tor_written_by_www_data(self):
@@ -475,7 +476,7 @@ class TestSharedOnionAddress(unittest.TestCase):
         self.assertEqual(calls[0][0], ["docker", "exec", "onionpress-tor", "cat",
                                        "/var/lib/tor/hidden_service/wordpress/hostname"])
         self.assertEqual(calls[1], (["docker"] + wp_files.put_file_args(
-            "/var/lib/onionpress/onion_address", "644"), ADDR + "\n"))
+            "/var/lib/onionpress/onion_address", "644"), (ADDR + "\n").encode()))
 
     def test_anything_but_one_address_is_not_written(self):
         for out in ("", "Generating...", ADDR + "\nSIGNAL HALT\n", ADDR.upper()):
@@ -500,7 +501,9 @@ class TestDockerExecUser(unittest.TestCase):
 class TestSecurityAuditReport(_Sandbox):
     """onionpress-security-audit.sh runs as root in the WordPress container
     at every start and wrote its report through whatever www-data had put
-    at /var/lib/onionpress/security-report.txt."""
+    at /var/lib/onionpress/security-report.txt. Since issue #528 it writes
+    no report at all (nothing read it): findings are its log lines, and an
+    old report is only removed (rm -f takes a link, never its target)."""
 
     SCRIPT = "app/Resources/docker/wordpress/onionpress-security-audit.sh"
 
@@ -508,12 +511,12 @@ class TestSecurityAuditReport(_Sandbox):
         super().setUp()
         self.text = _read(self.SCRIPT)
 
-    def test_nothing_writes_the_published_name_directly(self):
+    def test_nothing_writes_in_the_volume(self):
         code = "\n".join(line for _, line in _code_lines(self.text))
-        self.assertNotRegex(code, r'>>? *"\$REPORT"')
-        self.assertIn('rm -f "$REPORT"', code)
-        self.assertIn('dd if="$report_tmp" of="$REPORT" conv=excl', code)
-        self.assertIn("trap publish_report EXIT", code)
+        self.assertNotRegex(code, r'>>? *"?/var/lib/onionpress/')
+        self.assertNotIn("report_tmp", code)
+        self.assertNotIn("publish_report", code)
+        self.assertIn('rm -f "$OLD_REPORT"', code)
 
     def test_quarantine_is_out_of_www_data_reach(self):
         m = re.search(r"^QUARANTINE=(\S+)$", self.text, re.M)
@@ -524,40 +527,18 @@ class TestSecurityAuditReport(_Sandbox):
         self.assertIn('cd -P -- "$dir"', body)
         self.assertIn('[ "$(pwd -P)" = "$dir" ]', body)
 
-    def test_publish_replaces_a_planted_link(self):
-        """Run publish_report with a dd that has GNU's conv=excl (O_EXCL),
-        which this Mac's dd lacks."""
-        fn = self.text[self.text.index("\npublish_report() {"):]
-        fn = fn[:fn.index("\n}\n") + 3]
-        bin_dir = os.path.join(self.tmp, "bin")
-        os.makedirs(bin_dir)
-        with open(os.path.join(bin_dir, "dd"), "w") as f:
-            f.write(f"""#!{sys.executable}
-import os, sys
-a = dict(x.split("=", 1) for x in sys.argv[1:])
-assert a["conv"] == "excl"
-fd = os.open(a["of"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-with open(a["if"], "rb") as src:
-    os.write(fd, src.read())
-""")
-        os.chmod(os.path.join(bin_dir, "dd"), 0o755)
+    def test_an_old_report_link_is_removed_not_followed(self):
         target = self._file("outside/docker-entrypoint.sh", b"#!/bin/sh\n", 0o755)
         report = os.path.join(self.tmp, "volume", "security-report.txt")
         os.makedirs(os.path.dirname(report))
         os.symlink(target, report)
-        tmp_report = self._file("report-tmp", b"No indicators of compromise found.\n")
-        r = subprocess.run(
-            ["bash", "-c", "warn() { echo \"$*\" >&2; }\n" + fn + "publish_report\n"],
-            env=dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"],
-                     REPORT=report, report_tmp=tmp_report),
-            capture_output=True, text=True, timeout=30)
+        line = next(ln for ln in self.text.splitlines() if ln.startswith('rm -f "$OLD_REPORT"'))
+        r = subprocess.run(["bash", "-c", line], env=dict(os.environ, OLD_REPORT=report),
+                           capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(os.path.islink(report))
-        with open(report, "rb") as f:
-            self.assertEqual(f.read(), b"No indicators of compromise found.\n")
+        self.assertFalse(os.path.lexists(report))
         with open(target, "rb") as f:
             self.assertEqual(f.read(), b"#!/bin/sh\n")
-        self.assertFalse(os.path.exists(tmp_report))
 
 
 class TestWatchdogSharedAddress(_Sandbox):

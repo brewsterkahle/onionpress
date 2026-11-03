@@ -2,9 +2,9 @@
 """wayback_smoke (src/onionpress/wayback_smoke.py): `onionpress
 smoke-test-wayback` publishes a throwaway post, drives the Wayback sweep
 cron until the post's `_op_wayback_*` meta says archived, and deletes the
-post. wp-cli is faked here (subprocess.run), so nothing reaches Docker;
-the census in test_wp_cli_as_www_data.py holds the real calls to
-www-data."""
+post. wp-cli is faked here (a FakeDocker over a subprocess.run stand-in),
+so nothing reaches Docker; the census in test_wp_cli_as_www_data.py holds
+the real calls to www-data."""
 
 import os
 import subprocess
@@ -13,8 +13,10 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import wayback_smoke as ws  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 SITES = '[{"blog_id": 1, "path": "/", "url": "http://x.onion/"},' \
         ' {"blog_id": 2, "path": "/me/", "url": "http://x.onion/me/"}]'
@@ -53,8 +55,8 @@ class FakeWp:
 
 class TestWpArgv(unittest.TestCase):
     def test_runs_wp_cli_as_www_data_with_the_path_and_url(self):
-        with mock.patch.object(subprocess, "run", return_value=_completed("")) as run:
-            ws._wp(["site", "list"], url="http://x.onion/me/", timeout=15)
+        run = mock.Mock(return_value=_completed(""))
+        ws._wp(FakeDocker(run), ["site", "list"], url="http://x.onion/me/", timeout=15)
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["docker", "exec"])
         self.assertIn("-u", argv)
@@ -66,18 +68,18 @@ class TestWpArgv(unittest.TestCase):
 
 class TestPickSite(unittest.TestCase):
     def test_prefers_a_subsite(self):
-        with mock.patch.object(subprocess, "run", return_value=_completed(SITES)):
-            self.assertEqual(ws._pick_test_site()["blog_id"], 2)
+        docker = FakeDocker(mock.Mock(return_value=_completed(SITES)))
+        self.assertEqual(ws._pick_test_site(docker)["blog_id"], 2)
 
     def test_the_main_site_when_there_is_no_other(self):
-        with mock.patch.object(subprocess, "run",
-                               return_value=_completed('[{"blog_id": 1, "path": "/", "url": "u"}]')):
-            self.assertEqual(ws._pick_test_site()["blog_id"], 1)
+        docker = FakeDocker(mock.Mock(
+            return_value=_completed('[{"blog_id": 1, "path": "/", "url": "u"}]')))
+        self.assertEqual(ws._pick_test_site(docker)["blog_id"], 1)
 
     def test_a_failed_listing_raises(self):
-        with mock.patch.object(subprocess, "run", return_value=_completed("", rc=1, stderr="boom")):
-            with self.assertRaisesRegex(RuntimeError, "boom"):
-                ws._pick_test_site()
+        docker = FakeDocker(mock.Mock(return_value=_completed("", rc=1, stderr="boom")))
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            ws._pick_test_site(docker)
 
 
 class TestMetaState(unittest.TestCase):
@@ -87,8 +89,7 @@ class TestMetaState(unittest.TestCase):
             if key == "_op_wayback_job_id":
                 return _completed('"spn2-abc"\n')
             return _completed("", rc=1)
-        with mock.patch.object(subprocess, "run", side_effect=run):
-            state = ws._get_post_wayback_state("42", "http://x.onion/me/")
+        state = ws._get_post_wayback_state(FakeDocker(run), "42", "http://x.onion/me/")
         self.assertEqual(state["_op_wayback_job_id"], '"spn2-abc"')
         self.assertEqual(state["_op_wayback_archived_at"], "")
         self.assertEqual(len(state), 6)
@@ -107,8 +108,7 @@ class TestSmokeTest(unittest.TestCase):
             {"_op_wayback_job_id": "j1", "_op_wayback_submitted_at": "1"},
             {"_op_wayback_job_id": "j1", "_op_wayback_archived_at": "2", "_op_wayback_snapshot_ts": "20260101"},
         ])
-        with mock.patch.object(subprocess, "run", side_effect=wp):
-            self.assertEqual(ws.smoke_test_wayback(self.log.append), 0)
+        self.assertEqual(ws.smoke_test_wayback(FakeDocker(wp), self.log.append), 0)
         self.assertEqual(wp.ticks, 3)
         self.assertTrue(any(m.startswith("PASS: post archived (snapshot_ts=20260101)") for m in self.log))
         self.assertEqual(wp.calls[-1][-6:-3], ["post", "delete", "42"])
@@ -122,22 +122,20 @@ class TestSmokeTest(unittest.TestCase):
     def test_a_timeout_fails_and_still_deletes(self):
         wp = FakeWp([{"_op_wayback_last_error_ext": "SPN 429"}])
         clock = iter([0.0, 1.0, 1000.0])
-        with mock.patch.object(subprocess, "run", side_effect=wp), \
-                mock.patch.object(ws.time, "monotonic", side_effect=clock):
-            self.assertEqual(ws.smoke_test_wayback(self.log.append), 1)
+        with mock.patch.object(ws.time, "monotonic", side_effect=clock):
+            self.assertEqual(ws.smoke_test_wayback(FakeDocker(wp), self.log.append), 1)
         self.assertTrue(any(m.startswith("FAIL: timed out") and "SPN 429" in m for m in self.log))
         self.assertEqual(wp.calls[-1][-6:-3], ["post", "delete", "42"])
 
     def test_a_failed_publish_is_a_failure_with_no_post_to_delete(self):
         wp = FakeWp([{}], publish="Error: nope\n")
-        with mock.patch.object(subprocess, "run", side_effect=wp):
-            self.assertEqual(ws.smoke_test_wayback(self.log.append), 1)
+        self.assertEqual(ws.smoke_test_wayback(FakeDocker(wp), self.log.append), 1)
         self.assertTrue(any(m.startswith("FAIL: publish failed") for m in self.log))
         self.assertFalse(any("delete" in c for c in wp.calls))
 
     def test_no_site_is_a_failure(self):
-        with mock.patch.object(subprocess, "run", return_value=_completed("", rc=1, stderr="down")):
-            self.assertEqual(ws.smoke_test_wayback(self.log.append), 1)
+        docker = FakeDocker(mock.Mock(return_value=_completed("", rc=1, stderr="down")))
+        self.assertEqual(ws.smoke_test_wayback(docker, self.log.append), 1)
         self.assertEqual(self.log, ["FAIL: wp site list failed: down"])
 
 

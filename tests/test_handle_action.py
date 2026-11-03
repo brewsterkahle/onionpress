@@ -79,7 +79,8 @@ class FakeDocker:
         self.calls = []
         self.cp_target = None          # what `docker cp` leaves at the copy
         self.head_limits = []          # (file, bytes) of every bounded read
-        # The hand-off runs `docker exec -i` itself, on this binary.
+        # The hand-off runs `docker exec -i` through the runner's popen, on
+        # this binary.
         self.docker_bin = os.path.join(sandbox, "docker")
         with open(self.docker_bin, "w") as f:
             f.write('#!/bin/bash\n'
@@ -112,7 +113,14 @@ class FakeDocker:
         return self.run(["exec"] + (["-u", user] if user else []) + [container, *command],
                         timeout=timeout, check=check, quiet=quiet)
 
-    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False):
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """The backup hand-off: a real Popen on the stub binary above."""
+        self.calls.append([str(a) for a in args])
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
+
+    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
+            binary=False):
         args = [str(a) for a in args]
         self.calls.append(args)
         if args[:4] == ["exec", "-u", "www-data", "onionpress-wordpress"]:
@@ -146,6 +154,16 @@ class FakeDocker:
                 f.write(input or "")
             return DockerResult(0, "", "")
         if args[:3] == ["exec", "onionpress-tor", "cat"]:
+            tor_fs = getattr(self, "tor_fs", None)
+            if tor_fs is not None:      # the tor container's files (a key import's reads)
+                path = tor_fs + args[3]
+                if os.path.isfile(path):
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    return DockerResult(0, data if binary else data.decode("utf-8", "replace"),
+                                        b"" if binary else "")
+                return DockerResult(1, b"" if binary else "",
+                                    b"no such file" if binary else "no such file")
             return (DockerResult(0, self.address + "\n", "") if self.address
                     else DockerResult(1, "", "no such file"))
         if args[:3] == ["exec", "onionheaven", "curl"]:
@@ -235,14 +253,15 @@ class TestQuietTick(_Case):
         self.assertEqual(ha.handle(self.host()), {"handled": None})
         self.assertEqual(self.argvs(), [])
 
-    def test_linux_refreshes_the_logs(self):
+    def test_no_request_writes_nothing_on_linux_either(self):
+        # recent-logs.txt has one writer, the status pass (#523,
+        # onionpress.status_writer); the quiet tick no longer republishes it.
         log_file = os.path.join(self.data_dir, "onionpress.log")
         with open(log_file, "w") as f:
             f.write(f"[2026-10-22 12:00:00] started for {os.path.expanduser('~')}/x\n")
         self.assertEqual(ha.handle(self.host("linux")), {"handled": None})
-        text = self.docker.get("recent-logs.txt")
-        self.assertIn("started for", text)
-        self.assertNotIn(os.path.expanduser("~"), text)
+        self.assertIsNone(self.docker.get("recent-logs.txt"))
+        self.assertEqual(self.argvs(), [])
 
     def test_unknown_action_is_dropped_and_logged_by_size_only(self):
         # Issue #396: the log goes back to WordPress (recent-logs.txt) and
@@ -262,7 +281,8 @@ class TestQuietTick(_Case):
     def test_every_verb_is_known(self):
         self.assertEqual(ha.ACTIONS, ("start", "restart", "stop", "check-reachability",
                                       "import-key-file", "create-backup", "restore-backup",
-                                      "refresh-status", "update"))
+                                      "refresh-status", "update", "upload-analytics",
+                                      "archive-login"))
 
 
 class TestStartStop(_Case):
@@ -275,10 +295,9 @@ class TestStartStop(_Case):
                 self.request("restart")
                 result = ha.handle(self.host(os_name))
                 self.assertEqual(result["handled"], "restart")
-                want = [["apply-config"], ["restart"]]
-                if os_name == "linux":
-                    want.append(["write-status"])
-                self.assertEqual(self.argvs(), want)
+                # No write-status after it on either platform (#407): the
+                # daemon writes the status after every handled action.
+                self.assertEqual(self.argvs(), [["apply-config"], ["restart"]])
                 res = self.docker.result("service-result.json")
                 self.assertTrue(res["success"])
                 self.assertEqual(res["action"], "restart")
@@ -301,12 +320,13 @@ class TestStartStop(_Case):
         self.assertEqual(self.docker.result("service-result.json")["message"], "OnionPress stopped")
 
     def test_refresh_status(self):
-        self.request("refresh-status")
-        self.assertEqual(ha.handle(self.host("linux"))["handled"], "refresh-status")
-        self.assertEqual(self.argvs(), [["write-status"]])
-        self.request("refresh-status")
-        ha.handle(self.host("macos"))
-        self.assertEqual(self.argvs(), [["write-status"]])     # the menubar writes it
+        # Handled, and nothing run: the daemon writes status.json after
+        # every handled action on both platforms (#407).
+        for os_name in ("linux", "macos"):
+            with self.subTest(os_name=os_name):
+                self.request("refresh-status")
+                self.assertEqual(ha.handle(self.host(os_name))["handled"], "refresh-status")
+                self.assertEqual(self.argvs(), [])
 
 
 class TestReachability(_Case):
@@ -660,10 +680,107 @@ class TestRestoreBackup(_Case):
 
 class TestUpdate(_Case):
 
+    def _answer(self, **fields):
+        doc = {"update_available": False, "current": "2.5.6", "latest": "2.5.6",
+               "installable": False, "install_problem": None}
+        doc.update(fields)
+        self.script({"update --check --json": {"stdout": json.dumps(doc) + "\n"}})
+
     def test_linux_only_checks(self):
+        self._answer(update_available=True, installable=True, latest="2.6.0")
         self.request("update")
         ha.handle(self.host("linux"))
-        self.assertEqual(self.argvs(), [["settings-page-update-check"]])
+        self.assertEqual(self.argvs(), [["update", "--check", "--json"]])
+        res = self.docker.result("update-result.json")
+        self.assertEqual((res["success"], res["update_available"], res["installable"]),
+                         (True, True, True))
+        self.assertEqual(res["message"], ha.LINUX_UPDATE_AVAILABLE_MSG.format(latest="2.6.0"))
+        self.assertIn("run `onionpress update` on this machine", res["message"])
+        self.assertNotIn("Check for Updates", res["message"])
+        self.assertRegex(res["checked_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_release_the_update_cannot_install(self):
+        self._answer(update_available=True, installable=False, latest="2.6.0",
+                     install_problem="release v2.6.0 publishes no SHA256SUMS, so its package cannot be checked.")
+        self.request("update")
+        ha.handle(self.host("linux"))
+        res = self.docker.result("update-result.json")
+        self.assertEqual((res["success"], res["update_available"], res["installable"]),
+                         (True, True, False))
+        self.assertIn("cannot install it: release v2.6.0 publishes no SHA256SUMS", res["message"])
+
+    def test_one_github_lookup_per_five_minutes(self):
+        # GitHub allows 60 an hour and the page can ask every 10 s: the
+        # answer is kept five minutes in the data dir (no container
+        # mounts it), each request's id on its own copy.
+        self._answer(update_available=True, installable=True, latest="2.6.0")
+        self.docker.put("request-id", "Req_1-a\n")
+        self.request("update")
+        ha.handle(self.host("linux"))
+        first = self.docker.result("update-result.json")
+        self.assertEqual(first["request_id"], "Req_1-a")
+        self.assertEqual(len(self.argvs()), 1)
+        cache = os.path.join(self.data_dir, ha.UPDATE_CHECK_CACHE)
+        with open(cache) as f:
+            kept = json.load(f)
+        self.assertNotIn("request_id", kept)
+        self.assertEqual(oct(os.stat(cache).st_mode & 0o777), "0o600")
+        # Asked again at once: the same answer, without asking GitHub.
+        self.docker.put("request-id", "Req_2\n")
+        self.request("update")
+        ha.handle(self.host("linux"))
+        again = self.docker.result("update-result.json")
+        self.assertEqual(again["request_id"], "Req_2")
+        self.assertEqual({k: v for k, v in again.items() if k != "request_id"},
+                         {k: v for k, v in first.items() if k != "request_id"})
+        self.assertEqual(len(self.argvs()), 1)
+        self.assertTrue(any("from the last 5 minutes" in m for m in self.logs))
+        # Six minutes later, GitHub again.
+        old = os.stat(cache).st_mtime - 360
+        os.utime(cache, (old, old))
+        self.request("update")
+        ha.handle(self.host())
+        self.assertEqual(len(self.argvs()), 2)
+
+    def test_a_stale_link_or_broken_cache_is_not_an_answer(self):
+        self._answer()
+        cache = os.path.join(self.data_dir, ha.UPDATE_CHECK_CACHE)
+        for make in (lambda: os.symlink("/etc/hostname", cache),
+                     lambda: open(cache, "w").write("{not json"),
+                     lambda: os.mkdir(cache)):
+            with self.subTest(make):
+                shutil.rmtree(cache, ignore_errors=True)
+                if os.path.lexists(cache):
+                    os.unlink(cache)
+                make()
+                before = len(self.argvs())
+                self.request("update")
+                ha.handle(self.host("linux"))
+                self.assertEqual(len(self.argvs()), before + 1)
+
+    def test_a_failed_check_is_kept_too(self):
+        # A rate-limited GitHub answers failures: asking again at once
+        # would only spend more of the hour.
+        self._answer(error="Update check curl failed: exit=6", update_available=False)
+        self.request("update")
+        ha.handle(self.host("linux"))
+        res = self.docker.result("update-result.json")
+        self.assertFalse(res["success"])
+        self.assertFalse(res["installable"])
+        self.request("update")
+        ha.handle(self.host("linux"))
+        self.assertEqual(len(self.argvs()), 1)
+
+    def test_a_cache_that_cannot_be_written_is_a_warning(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes anywhere")
+        self._answer()
+        self.request("update")
+        os.chmod(self.data_dir, 0o500)
+        self.addCleanup(os.chmod, self.data_dir, 0o700)
+        ha.handle(self.host("linux"))
+        self.assertTrue(any("could not keep the update check" in m for m in self.logs))
+        self.assertTrue(self.docker.result("update-result.json")["success"])
 
     def test_mac_up_to_date_is_a_success(self):
         self.script({"update --check --json": {"stdout": json.dumps(
@@ -767,21 +884,21 @@ class TestRequestId(_Case):
                 self.assertTrue(all(c[4] == "head" for c in before),
                                 f"the removal comes right after the request is read: {before}")
                 res = self.docker.result(name)
-                if res is not None:        # Linux's update: the launcher writes it
-                    self.assertNotIn("stale", res)
-                    self.assertEqual(res["request_id"], "req1")
+                self.assertNotIn("stale", res)
+                self.assertEqual(res["request_id"], "req1")
 
     def test_every_result_file_is_known(self):
         self.assertEqual(set(ha.RESULT_FILES), set(ha.ACTIONS) - {"refresh-status"})
         written = set(re.findall(r'write_result\("([a-z-]+\.json)"', open(ha.__file__).read()))
         self.assertEqual(written, set(ha.RESULT_FILES.values()))
 
-    def test_linux_update_check_hands_the_id_to_the_launcher(self):
+    def test_linux_update_check_carries_the_id(self):
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": False, "current": "2.5.6", "latest": "2.5.6"}) + "\n"}})
         self.request_with_id("update", "upd-1")
         ha.handle(self.host("linux"))
-        calls = self.launcher_calls()
-        self.assertEqual(calls[-1]["argv"], ["settings-page-update-check"])
-        self.assertEqual(calls[-1]["env"].get("ONIONPRESS_REQUEST_ID"), "upd-1")
+        self.assertEqual(self.launcher_calls()[-1]["argv"], ["update", "--check", "--json"])
+        self.assertEqual(self.docker.result("update-result.json")["request_id"], "upd-1")
 
     def test_a_pending_question_keeps_the_id_for_its_answer(self):
         self.script(TestKeyImport._confirm_answer(self))
@@ -863,26 +980,28 @@ class TestApplyConfig(_Case):
             self.assertIsNone(ha.apply_config(self.host(), out=devnull))
         self.assertEqual(self.docker.get("config-updates.json"), '{"SHARE_ANALYTICS_WITH_ONIONHOME": "n')
 
-    def test_the_mac_tick_applies_pending_settings(self):
+    def test_every_run_applies_pending_settings(self):
         """QA on 2026-10-22: config-updates.json sat unapplied while the
-        menubar ran handle-action every tick. Every Mac run applies it,
-        request or not, and says which keys so the menubar applies what it
-        owes at once; Linux's launcher does it itself (write_status)."""
+        menubar ran handle-action every tick. Every run applies it, request
+        or not, on both platforms (Linux's launcher did it itself in
+        write_status until 2026-10-31), and says which keys so the menubar
+        applies what it owes at once."""
         from onionpress import config as op_config
         config = os.path.join(self.data_dir, "config")
-        with open(config, "w") as f:
-            f.write("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
-        self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "no"}))
-        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
-            result = ha.handle(self.host("linux"))
-        self.assertEqual(result, {"handled": None})
-        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "yes")
-        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
-            result = ha.handle(self.host("macos"))
-        self.assertEqual(result, {"handled": None, "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
-        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "no")
-        self.assertIsNone(self.docker.get("config-updates.json"))
-        self.assertEqual(op_config.take_config_changes(self.data_dir), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
+        for os_name in ("linux", "macos"):
+            with self.subTest(os_name=os_name):
+                with open(config, "w") as f:
+                    f.write("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+                self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "no"}))
+                with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+                    result = ha.handle(self.host(os_name))
+                self.assertEqual(result, {"handled": None, "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
+                self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "no")
+                self.assertIsNone(self.docker.get("config-updates.json"))
+                self.assertEqual(op_config.take_config_changes(self.data_dir), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
+                # Nothing left: the next run applies nothing and says so.
+                with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+                    self.assertEqual(ha.handle(self.host(os_name)), {"handled": None})
         # With a request in the same tick, both happen
         self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "yes"}))
         self.request("check-reachability")
@@ -890,6 +1009,166 @@ class TestApplyConfig(_Case):
             result = ha.handle(self.host("macos"))
         self.assertEqual(result, {"handled": "check-reachability", "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
         self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "yes")
+
+
+class TestUploadAnalytics(_Case):
+    """Share Now (issue #528): a handle-action verb over
+    analytics_sharing.request_upload, the data dir's marker the daemon
+    takes; nothing in the volume."""
+
+    def config(self, text):
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write(text)
+
+    def marker(self):
+        return os.path.exists(os.path.join(self.data_dir, ".upload-analytics"))
+
+    def test_sharing_off_is_said_and_nothing_requested(self):
+        self.config("SHARE_ANALYTICS_WITH_ONIONHOME=no\n")
+        self.docker.put("request-id", "R1\n")
+        self.request("upload-analytics")
+        ha.handle(self.host("linux"))
+        res = self.docker.result("analytics-result.json")
+        self.assertEqual((res["success"], res["error"], res["request_id"]),
+                         (False, ha.SHARING_OFF_PAGE_MSG, "R1"))
+        self.assertFalse(self.marker())
+        self.assertEqual(self.argvs(), [])
+
+    def test_requested_leaves_the_marker(self):
+        self.config("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+        self.request("upload-analytics")
+        with mock.patch("onionpress.analytics_sharing.daemon_running", return_value=True):
+            ha.handle(self.host("macos"))
+        res = self.docker.result("analytics-result.json")
+        self.assertTrue(res["success"])
+        self.assertIn("Upload queued", res["message"])
+        self.assertTrue(self.marker())
+
+    def test_no_daemon_is_a_failure(self):
+        self.config("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+        self.request("upload-analytics")
+        with mock.patch("onionpress.analytics_sharing.daemon_running", return_value=False):
+            ha.handle(self.host("linux"))
+        res = self.docker.result("analytics-result.json")
+        self.assertFalse(res["success"])
+        self.assertIn("not running", res["error"])
+        self.assertFalse(self.marker())
+
+    def test_throttled_like_the_others(self):
+        self.assertEqual(ha.RESULT_FILES["upload-analytics"], "analytics-result.json")
+        self.assertIn("upload-analytics", ha.MIN_INTERVAL)
+
+
+class TestArchiveLogin(_Case):
+    """The page's archive.org login is the host's (issue #528): the
+    account and password come in one request file, read once and removed
+    before the login, through multisite.fetch_archive_s3_keys; neither is
+    logged or echoed in the result."""
+
+    EMAIL = "owner@example.org"
+    PASSWORD = "s3cret-pass phrase"
+
+    def login_request(self, data=None):
+        self.docker.put(ha.ARCHIVE_LOGIN_FILE, json.dumps(
+            data if data is not None else {"email": self.EMAIL, "password": self.PASSWORD}))
+        self.docker.put("request-id", "AL1\n")
+        self.request("archive-login")
+
+    def run_login(self, keys=None, reason=None, saved=True):
+        seen = {}
+
+        def fetch(email, password, *, docker, log_func):
+            seen["at_fetch"] = self.docker.get(ha.ARCHIVE_LOGIN_FILE)
+            seen["login"] = (email, password)
+            if reason:
+                log_func(f"WARNING: archive.org login failed: {reason}")
+            return keys
+
+        with mock.patch("onionpress.multisite.fetch_archive_s3_keys", side_effect=fetch), \
+                mock.patch("onionpress.multisite.save_archive_s3_keys",
+                           return_value=saved) as save:
+            ha.handle(self.host("linux"))
+        return seen, save
+
+    def assert_never_said(self):
+        text = "\n".join(self.logs) + json.dumps(self.docker.result("archive-login-result.json"))
+        self.assertNotIn(self.PASSWORD, text)
+        self.assertNotIn(self.EMAIL, text)
+
+    def test_logged_in_keys_saved_file_gone_before_the_login(self):
+        self.login_request()
+        seen, save = self.run_login(keys={"access": "A", "secret": "S"})
+        self.assertEqual(seen["login"], (self.EMAIL, self.PASSWORD))
+        self.assertIsNone(seen["at_fetch"], "the request file is removed before the login")
+        save.assert_called_once_with({"access": "A", "secret": "S"}, docker=self.docker)
+        res = self.docker.result("archive-login-result.json")
+        self.assertEqual((res["success"], res["message"], res["request_id"]),
+                         (True, ha.ARCHIVE_LOGIN_SAVED_MSG, "AL1"))
+        self.assertIsNone(self.docker.get(ha.ARCHIVE_LOGIN_FILE))
+        self.assertEqual(self.argvs(), [])
+        self.assert_never_said()
+
+    def test_a_failure_says_why_without_the_password(self):
+        self.login_request()
+        self.run_login(reason=f"bad password {self.PASSWORD} for {self.EMAIL}")
+        res = self.docker.result("archive-login-result.json")
+        self.assertFalse(res["success"])
+        self.assertTrue(res["error"].startswith(ha.ARCHIVE_LOGIN_FAILED_MSG + ": "))
+        self.assertIn("[hidden]", res["error"])
+        self.assert_never_said()
+
+    def test_keys_not_saved_is_a_failure(self):
+        self.login_request()
+        self.run_login(keys={"access": "A", "secret": "S"}, saved=False)
+        res = self.docker.result("archive-login-result.json")
+        self.assertEqual((res["success"], res["error"]), (False, ha.ARCHIVE_KEYS_UNSAVED_MSG))
+
+    def test_a_bad_request_logs_in_nowhere(self):
+        for data in ({}, {"email": "a b@x", "password": "p"}, {"email": "x@y", "password": ""},
+                     {"email": "x@y", "password": "a\0b"}, ["x", "y"], {"email": 1, "password": "p"}):
+            with self.subTest(data=data):
+                self.login_request(data)
+                seen, _save = self.run_login(keys={"access": "A", "secret": "S"})
+                self.assertNotIn("login", seen)
+                res = self.docker.result("archive-login-result.json")
+                self.assertEqual((res["success"], res["error"]), (False, ha.ARCHIVE_LOGIN_MISSING_MSG))
+                self.assertIsNone(self.docker.get(ha.ARCHIVE_LOGIN_FILE))
+
+    def test_not_json_is_refused(self):
+        self.assertIsNone(ha.read_archive_login("email=x&password=y"))
+        self.assertIsNone(ha.read_archive_login(""))
+        self.assertEqual(ha.read_archive_login('{"email": "x@y", "password": "p"}'), ("x@y", "p"))
+
+    def test_a_throttled_login_removes_the_password(self):
+        with mock.patch.dict(ha.MIN_INTERVAL, REAL_INTERVALS):
+            self.login_request()
+            self.run_login(keys={"access": "A", "secret": "S"})
+            self.login_request()
+            seen, _save = self.run_login(keys={"access": "A", "secret": "S"})
+        self.assertNotIn("login", seen)
+        self.assertIsNone(self.docker.get(ha.ARCHIVE_LOGIN_FILE))
+        self.assertFalse(self.docker.result("archive-login-result.json")["success"])
+
+    def test_the_file_is_read_with_its_limit(self):
+        self.assertEqual(ha.READ_LIMITS[ha.ARCHIVE_LOGIN_FILE], 4096)
+        self.assertEqual(ha.INPUT_FILES["archive-login"], (ha.ARCHIVE_LOGIN_FILE,))
+
+
+class TestCheckRelease(_Case):
+    """check_release keeps the answer the status writer shows the page
+    (status.json's "release", issue #528)."""
+
+    def test_the_answer_is_kept_for_the_status_writer(self):
+        from onionpress import status_writer
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": True, "current": "2.6.1", "latest": "2.6.2",
+             "installable": True}) + "\n"}})
+        result = ha.check_release(self.host("linux"))
+        self.assertTrue(result["update_available"])
+        release = status_writer.release_status(self.data_dir)
+        self.assertEqual((release["latest"], release["update_available"]), ("2.6.2", True))
+        self.assertEqual(self.docker.result("update-result.json"), None,
+                         "the check alone answers no request")
 
 
 class TestTunnelToken(_Case):
@@ -978,10 +1257,10 @@ class TestTunnelToken(_Case):
         self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN})
         self.assertEqual(list(applied.accepted), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
         self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+        # Linux applies the page's channel through apply_config too (no
+        # bash twin since 2026-10-31): the refusal below is the one it logs.
         with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
-            launcher = f.read()
-        self.assertIn("grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'", launcher)
-        self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", launcher)
+            self.assertNotIn("apply_config_updates", f.read())
         ha._hold_tunnel_token(self.host("linux"), self.TOKEN)
         self.assertFalse(os.path.exists(os.path.join(self.data_dir, ha.PENDING_DIR)))
         self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", self.logs[-1])
@@ -1103,7 +1382,7 @@ class TestThrottle(_Case):
         for _ in range(3):
             self.request("refresh-status")
             self.assertEqual(ha.handle(self.host("linux"))["handled"], "refresh-status")
-        self.assertEqual(self.argvs(), [["write-status"]] * 3)
+        self.assertEqual(self.argvs(), [])
 
 
 class TestLaunchers(unittest.TestCase):
@@ -1120,15 +1399,17 @@ class TestLaunchers(unittest.TestCase):
                                 r'            ONIONPRESS_IN_WATCHER=true op_py --data-dir "\$DATA_DIR" '
                                 r'handle-action --launcher "\$INSTALL_DIR/onionpress" "\$\{@:2\}"\n'
                                 r'            ;;\n')
-        for case, body in (("settings-page-backup", 'create_backup "$BACKUP_PASS" "$2" --without-hub-data --without-host-secrets'),
-                           ("settings-page-restore", 'restore_backup "$BACKUP_PASS" "$2" --from-settings-page'),
-                           ("settings-page-update-check", "update_settings_page_check")):
+        for case, body in (("settings-page-backup", 'op_py --data-dir "$DATA_DIR" settings-page-backup "${@:2}"'),
+                           ("settings-page-restore", 'op_py --data-dir "$DATA_DIR" settings-page-restore "${@:2}"')):
             with self.subTest(case=case):
                 start = linux.index(f"\n        {case})\n")
                 branch = linux[start:linux.index("\n            ;;\n", start)]
                 self.assertIn(body, branch)
         self.assertNotIn("                create-backup)\n", linux)
-        self.assertIn("|handle-action|", linux)
+        # The update check is the shared handler's (`update --check --json`).
+        self.assertNotIn("settings-page-update-check", linux)
+        from onionpress import cli
+        self.assertIn("handle-action (the WordPress Settings page's requests)", cli.launcher_help("linux"))
         self.assertEqual(linux.count('umask 077; cat > "$1"'), 0)
 
     def test_mac_cases_delegate(self):
@@ -1154,9 +1435,14 @@ class TestLaunchers(unittest.TestCase):
         self.assertEqual(found, ["src/onionpress/handle_action.py"])
         self.assertNotIn('umask 077; cat > "$1"', self._read("src/menubar.py"))
 
-    def test_the_watcher_unit_runs_it(self):
-        self.assertIn("ExecStart=/opt/onionpress/onionpress handle-action",
-                      self._read("linux/onionpress-watcher.service"))
+    def test_the_daemon_runs_it_on_linux_too(self):
+        # The daemon's status loop runs handle-action on both platforms
+        # (#407; until then onionpress-watcher.timer ran it every 10 s).
+        self.assertIn("ExecStart=/opt/onionpress/onionpress daemon",
+                      self._read("linux/onionpress-daemon.service"))
+        self.assertFalse(os.path.exists(os.path.join(PROJECT_ROOT, "linux", "onionpress-watcher.service")))
+        daemon = self._read("src/onionpress/daemon.py")
+        self.assertIn('rc, out = self.run_launcher(["handle-action", "--json", *args], timeout=None)', daemon)
 
     def test_the_mac_filename_pattern(self):
         """tests/test_backup_download.py's pattern must match what the

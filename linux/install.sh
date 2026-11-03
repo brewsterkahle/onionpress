@@ -258,25 +258,15 @@ if ! python3 -c "import nacl.pwhash.argon2id; from nacl.bindings import crypto_s
     $SUDO apt-get install -y -qq python3-nacl
 fi
 
-# Heartbeat daemon takes a systemd-logind delay inhibitor so /offline lands
-# before suspend (NetworkManager tears down WiFi before any system-sleep
-# hook can fire — only the DBus PrepareForSleep path beats it). Requires
+# The daemon takes a systemd-logind delay inhibitor so /offline lands
+# before suspend (NetworkManager tears down WiFi on the same signal; the
+# DBus PrepareForSleep path is the only one that runs before it). Requires
 # python3-dbus + python3-gi (GLib). Both are usually pre-installed on
 # desktop images; ensure them here for headless boxes too.
 if ! python3 -c "import dbus; from gi.repository import GLib" >/dev/null 2>&1; then
-    echo "  Installing python3-dbus + python3-gi (for sleep-inhibitor)..."
+    echo "  Installing python3-dbus + python3-gi (for the sleep inhibitor)..."
     $SUDO apt-get install -y -qq python3-dbus python3-gi \
-        || echo "  (python3-dbus/gi install failed — sleep-inhibitor will be skipped, heartbeat-timeout fallback still works)"
-fi
-
-# python3-socks lets the inhibitor POST /offline direct from the host
-# through Tor's SOCKS5 port, skipping docker exec startup (~200ms).
-# That's the margin we need to win the race against NetworkManager's
-# WiFi teardown on suspend.
-if ! python3 -c "import socks" >/dev/null 2>&1; then
-    echo "  Installing python3-socks (for fast suspend /offline)..."
-    $SUDO apt-get install -y -qq python3-socks \
-        || echo "  (python3-socks install failed — sleep-inhibitor will fall back to docker exec)"
+        || echo "  (python3-dbus/gi install failed — the daemon notices a suspend by its clock gap only)"
 fi
 
 # Ensure unzip and zip are available (needed for plugin installs and backups)
@@ -302,6 +292,8 @@ fi
 if run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user is-active --quiet onionpress 2>/dev/null; then
     echo "  Stopping existing OnionPress service..."
+    run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user stop onionpress-daemon 2>/dev/null || true
     run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
         systemctl --user stop onionpress-heartbeat 2>/dev/null || true
     run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
@@ -390,14 +382,10 @@ if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
     echo "  Tray icon launched — use it to view logs during install."
 fi
 
-# system-sleep hook so the suspend/resume cycle notifies the hub +
-# DEL_ONION/ADD_ONION. Without this, a laptop close-lid leaves a stale
-# descriptor on the DHT for minutes until missed heartbeats finally
-# trigger the hub takeover. See linux/onionpress-sleep-hook for details.
-# -D creates /usr/lib/systemd/system-sleep/, which does not exist on a
-# fresh Debian 13 (issue #264).
-$SUDO install -D -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
-    /usr/lib/systemd/system-sleep/onionpress
+# Sleep and wake are the daemon's (its logind delay inhibitor); the
+# system-sleep hook an earlier install.sh put in place was a no-op since
+# 2.4.99 and goes (issue #407).
+$SUDO rm -f /usr/lib/systemd/system-sleep/onionpress
 
 # LAN bind: the compose file publishes WordPress on
 # ${ONIONPRESS_BIND_HOST:-127.0.0.1}, and the Linux launcher exports 0.0.0.0
@@ -521,9 +509,14 @@ fi
 
 # Copy service files to user systemd directory (from install dir, not repo — repo may be cleaned up)
 cp "$INSTALL_DIR/onionpress.service" "$USER_SYSTEMD_DIR/onionpress.service"
-cp "$INSTALL_DIR/onionpress-heartbeat.service" "$USER_SYSTEMD_DIR/onionpress-heartbeat.service"
-cp "$INSTALL_DIR/onionpress-watcher.service" "$USER_SYSTEMD_DIR/onionpress-watcher.service"
-cp "$INSTALL_DIR/onionpress-watcher.timer" "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
+cp "$INSTALL_DIR/onionpress-daemon.service" "$USER_SYSTEMD_DIR/onionpress-daemon.service"
+# An earlier install's heartbeat and watcher units (before #407): disabled
+# and removed, so nothing of them starts at the next login.
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user disable onionpress-heartbeat onionpress-watcher.timer 2>/dev/null || true
+rm -f "$USER_SYSTEMD_DIR/onionpress-heartbeat.service" \
+      "$USER_SYSTEMD_DIR/onionpress-watcher.service" \
+      "$USER_SYSTEMD_DIR/onionpress-watcher.timer"
 
 # Ensure owned by user
 if [ -n "$SUDO_USER" ]; then
@@ -538,15 +531,13 @@ run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user daemon-reload
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user enable onionpress
-run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-    systemctl --user enable --now onionpress-watcher.timer
-# A runtime mask of the heartbeat unit from an install removed in this boot
-# (the launcher's hold until WordPress is installed) would fail its enable
-# (issue #506); the first start holds it again while the site is not set up.
+# A runtime mask of an earlier install's heartbeat unit (its hold until
+# WordPress was installed, issue #506) lingers in the manager until a
+# reboot: lifted, so nothing of it is left.
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user unmask --runtime onionpress-heartbeat 2>/dev/null || true
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-    systemctl --user enable onionpress-heartbeat
+    systemctl --user enable onionpress-daemon
 echo "  Systemd user services installed and enabled (starts on boot)"
 
 # ─── Start OnionPress ─────────────────────────────────────────────────
@@ -573,10 +564,10 @@ JOURNAL_PID=$!   # cleanup (the EXIT trap at the top) kills it
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user --no-block restart onionpress
 
-# Heartbeat client waits for containers anyway; --no-block keeps it from
-# stalling install.sh in lockstep with onionpress.service.
+# The daemon polls the stack; --no-block keeps it from stalling
+# install.sh in lockstep with onionpress.service.
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-    systemctl --user --no-block restart onionpress-heartbeat
+    systemctl --user --no-block restart onionpress-daemon
 
 # Wait for WordPress container to respond. This is the real "are we up"
 # signal — `systemctl is-active` races against Type=notify when the

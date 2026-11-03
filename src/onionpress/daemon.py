@@ -1,6 +1,5 @@
-"""`onionpress daemon`: the Mac's long-running loops, out of the menubar
-(issue #367, CLI-first phase 3; the Mac counterpart of
-linux/onionpress-heartbeat.py).
+"""`onionpress daemon`: the one long-running process on both platforms
+(issue #367, CLI-first phase 3, the Mac; issue #407, Linux).
 
 Until this module the menubar process (src/menubar.py) was both the view
 and the service: the status loop with the dual probe and the
@@ -10,7 +9,21 @@ captures, caffeinate, the My Creations thumbnails and the browser
 extension's HTTP proxy all ran as threads inside the rumps app. They run
 here now, in one per-user launchd agent
 (~/Library/LaunchAgents/org.onionpress.daemon.plist, KeepAlive), and the
-menubar reads what this process writes:
+menubar reads what this process writes. On Linux the same process runs
+as the onionpress-daemon.service user unit (until #407 a heartbeat
+client of its own, linux/onionpress-heartbeat.py, a bash status loop
+forked from the launcher's `start` and a 10 s watcher timer for the
+Settings page), and the tray reads the same state file. What differs
+between the platforms is a `detect_os()` seam here (self.os_name):
+sleep and wake (onionpress.mac_power / onionpress.power's
+LogindPowerHandler, one interface), the sleep inhibitor (caffeinate /
+systemd-inhibit), the Docker environment (Colima's socket / the
+rootless or system socket), runtime readiness, the start of Tor after
+the first run's setup (the Mac's start-tor; Linux's start brings Tor up
+itself), the hub gate until WordPress is installed (Linux: Tor runs
+before setup), the rootless Docker namespace watch (Linux), and what
+only a Mac has: the My Creations thumbnails (QuickLook), the VM's
+clearnet dmesg capture and the browser extension's proxy. The files:
 
   ~/.onionpress/daemon-state.json   what the menu shows (address, state,
                                     ports, the pending question),
@@ -45,11 +58,9 @@ Mac and the CLI's HubContext share one implementation and one lock
 (_hub_lock). The dual probe is
 onionpress.health's; the #266 recovery step on its outcome (the
 RepublishTrigger, the request to the watchdog, the wake and offline
-resets) is onionpress.reachability's RecoveryWindow, the one Linux's
-ReachabilityLoop runs too.
+resets) is onionpress.reachability's RecoveryWindow, one per daemon.
 """
 
-import json
 import os
 import plistlib
 import signal
@@ -64,13 +75,16 @@ from . import config as op_config
 from . import confirm as op_confirm
 from . import key_manager
 from . import launcher_ops
+from . import onion_auth
 from . import onion_hostname
 from . import onion_proxy
 from . import onionheaven
+from . import ports
 from . import redact
+from . import status_writer
 from . import thumbnails
-from . import wp_files
 from .docker import Docker
+from .platform import OS, detect_os
 from .health import (
     HealthChecker,
     WEDGE_LOAD_WARN,
@@ -80,7 +94,7 @@ from .health import (
 )
 from .log_rotation import RotatingLog
 from .ports import PortAttributes, port_environ
-from .power import CaffeineManager
+from .power import CaffeineManager, SystemdInhibitor
 from .reachability import RecoveryWindow
 from .reachability_stats import ReachabilityStats
 from .system_metrics import host_metrics, container_metrics
@@ -119,30 +133,21 @@ from .daemon_client import (  # noqa: F401
     state_is_fresh,
     state_path,
     stop_agent,
+    systemd_unit,
 )
 
 UPLOAD_TRIGGER_MARKER = ".upload-analytics"
 
-PLACEHOLDER_ADDRESSES = ("Starting...", "Not running", "Generating address...")
+# How long `daemon offline` holds the probe at most (Daemon._stop_hold):
+# a stop takes the containers down well inside it.
+STOP_HOLD_SECONDS = 120
 
-
-def _utc_now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# ---------------------------------------------------------------------------
-# The state file (written here; read by the menubar through daemon_client)
-# ---------------------------------------------------------------------------
-
-def write_json_atomic(path, doc):
-    """Write *doc* to *path* through a temp file and a rename, so a reader
-    never sees a half-written file. mode 0600: the state names the
-    address and the pending question's facts."""
-    tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(doc, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+# The state file and status.json are written by onionpress.status_writer
+# (one writer for both platforms, issue #523); the names stay here for
+# the CLI, the uninstaller and the tests.
+PLACEHOLDER_ADDRESSES = status_writer.PLACEHOLDER_ADDRESSES
+write_json_atomic = status_writer.write_json_atomic
+_utc_now = status_writer.utc_now
 
 
 def poll_interval(display_state):
@@ -207,8 +212,11 @@ class Daemon(PortAttributes):
     is_onionheaven = False
 
     def __init__(self, paths, version="", launcher_script="", log_func=None,
-                 docker=None, health_checker=None, data_dir=None):
+                 docker=None, health_checker=None, data_dir=None, os_name=None):
         self.paths = paths
+        # The platform seam (issue #407): every difference between the Mac
+        # and Linux below reads this, never detect_os() again.
+        self.os_name = os_name or detect_os()
         self.app_support = data_dir or paths.data_dir
         self.config_file = paths.config_file
         self.bin_dir = paths.bin_dir
@@ -246,7 +254,9 @@ class Daemon(PortAttributes):
         self.log_file = self._onionpress_log.current_path()
 
         self._docker = docker or Docker(paths, log_func=self.log)
-        self._health_checker = health_checker or HealthChecker(self._docker, log_func=self.log)
+        self._health_checker = health_checker or HealthChecker(
+            self._docker, log_func=self.log,
+            hub_reference=lambda: onionheaven.reference_hub(self))
         self._wedge_probe_next = 0.0
         self._wedge_last_episode = None
 
@@ -285,7 +295,10 @@ class Daemon(PortAttributes):
         self.web_log_process = None
         self.web_log_thread = None
         self.last_status_logged = None
-        self.caffeine = CaffeineManager(self.app_support, self.log, self.read_config_value)
+        # PREVENT_SLEEP: caffeinate on a Mac, systemd-inhibit on Linux
+        # (onionpress.power, one interface).
+        inhibitor = SystemdInhibitor if self.os_name == OS.LINUX else CaffeineManager
+        self.caffeine = inhibitor(self.app_support, self.log, self.read_config_value)
         self.proxy_server = None
         self.proxy_thread = None
         self._wp_installed = None
@@ -305,7 +318,10 @@ class Daemon(PortAttributes):
         self._onionname_collision = None
         self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
         self._quitting = False
+        # Set by `daemon offline` (the launcher's stop): no probe until the
+        # stop has taken the stack down (_stop_hold).
         self._stopping = False
+        self._stopping_since = 0.0
         self._consecutive_fail_count = 0
         self._wedge_warning_fired = False
         self._last_not_running = None
@@ -314,7 +330,15 @@ class Daemon(PortAttributes):
         self._clearnet_capture_started = False
         self._capture_supervisor_thread = None
         self._images_present = {"wordpress": False, "mariadb": False, "tor": False}
+        # Linux: rootless Docker's network namespace as /proc names it; a
+        # new one (the daemon restarted behind our back) holds none of the
+        # WordPress network's egress rules (_watch_rootless_netns).
+        self._rootless_netns = None
+        self._hub_gate_said = False
+        self._power = None
         self._last_status_payload = None
+        self._containers_seen = {}       # the last pass's {name: state}
+        self._status_fields = {}         # status_writer.gather_fields' answers
 
         self._reachability_stats = ReachabilityStats()
         # The #266 recovery step (onionpress.reachability, shared with
@@ -343,6 +367,12 @@ class Daemon(PortAttributes):
 
     # -- small helpers -----------------------------------------------------
 
+
+    @property
+    def docker(self):
+        """The one docker runner (issue #477): what onionheaven's client,
+        the analytics upload and the status writer run through."""
+        return self._docker
     def _read_bundle_version(self):
         try:
             with open(os.path.join(self.paths.app_bundle, "Contents", "Info.plist"), "rb") as f:
@@ -385,6 +415,22 @@ class Daemon(PortAttributes):
             return None, None
         return r.returncode, (r.stdout or "").strip()
 
+    def run_cli(self, args, timeout=60):
+        """`onionpress --data-dir <data dir> <args>` in this interpreter
+        (derivatives.isolated_cli_argv, never `-m`): the returncode and
+        stdout (stripped), or (None, None) when it could not run. For a
+        subcommand that is the CLI's alone, with no launcher case."""
+        from .derivatives import isolated_cli_argv
+        try:
+            r = subprocess.run(
+                isolated_cli_argv("--data-dir", self.app_support, *args),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=timeout, stdin=subprocess.DEVNULL, cwd=self.app_support)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(f"Error running onionpress {' '.join(args)}: {e}")
+            return None, None
+        return r.returncode, (r.stdout or "").strip()
+
     def _marker(self, name):
         return os.path.join(self.app_support, name)
 
@@ -408,7 +454,7 @@ class Daemon(PortAttributes):
         return f"http://localhost:{self.wp_port}"
 
     def _address_known(self):
-        return bool(self.onion_address) and self.onion_address not in PLACEHOLDER_ADDRESSES
+        return status_writer.address_known(self.onion_address)
 
     # -- the state file ----------------------------------------------------
 
@@ -422,45 +468,15 @@ class Daemon(PortAttributes):
         }
 
     def state_document(self, now=None):
-        now = time.time() if now is None else now
-        fields = self._state_fields()
-        return {
-            **fields,
-            "pid": os.getpid(),
-            "version": self.version,
-            "updated_at": now,
-            "started_at": self.startup_time,
-            "display_state": display_state_of(fields, now),
-            "runtime_ready": self.runtime_ready,
-            "port_conflict": list(self.port_conflict),
-            "ports": {"offset": self.port_offset, "wp": self.wp_port,
-                      "socks": self.socks_port, "proxy": self.proxy_port},
-            "onion_address": self.onion_address if self._address_known() else "",
-            "address_placeholder": "" if self._address_known() else self.onion_address,
-            "healthcheck_address": self.healthcheck_address or "",
-            "is_onionheaven": bool(self.is_onionheaven),
-            "bootstrap_pct": 100 if self.is_ready else self._last_bootstrap_pct,
-            "cloudflare_tunnel_enabled": self.cloudflare_tunnel_enabled,
-            "wp_installed": self._wp_installed,
-            "wordpress_up": self._wordpress_confirmed,
-            "images_present": dict(self._images_present),
-            "proxy_running": self.proxy_server is not None,
-            "sleeping": self._sleeping,
-            "onionheaven": self._onionheaven_overview,
-            "pending_question": self._pending_question,
-            "onionname_collision": self._onionname_collision,
-            "settings_page_error": self._settings_page_error,
-            "wedge_warning": self._wedge_warning_fired,
-            "probe": {"code": self._last_probe_code, "why": self._last_probe_why,
-                      "ms": self._last_probe_ms,
-                      "reachable": self._last_reachability[0]},
-        }
+        """daemon-state.json's content (status_writer.state_document: the
+        one builder, with status.json under "status")."""
+        return status_writer.state_document(self, now)
 
     def publish_state(self):
         """Rewrite daemon-state.json (where the menubar's update_menu was)."""
         try:
             with self._lock:
-                write_json_atomic(state_path(self.app_support), self.state_document())
+                status_writer.publish(self)
         except Exception as e:
             self.log(f"daemon: could not write the state file: {e}")
 
@@ -510,33 +526,43 @@ class Daemon(PortAttributes):
             self._shutdown()
 
     def _main_loop_once(self, seconds):
-        """One turn of the main run loop: IOKit's callbacks fire here."""
+        """One turn of the main run loop: on a Mac IOKit's callbacks fire
+        here (the handler turns the CFRunLoop); on Linux the handler's
+        GLib loop runs in its own thread and this just waits."""
         try:
-            from . import mac_power
-            if self._power is not None and mac_power.run_loop_once(seconds):
+            if self._power is not None and self._power.run_loop_once(seconds):
                 return
         except Exception:
             pass
         self._stop.wait(seconds)
 
+    def _power_handler_class(self):
+        """The platform's sleep/wake events, one interface: IOKit's
+        delay-inhibitor on a Mac (onionpress.mac_power), logind's on
+        Linux (onionpress.power.LogindPowerHandler)."""
+        if self.os_name == OS.LINUX:
+            from .power import LogindPowerHandler
+            return LogindPowerHandler
+        from .mac_power import MacPowerHandler
+        return MacPowerHandler
+
     def _register_power_events(self):
-        """Sleep: /offline and DEL_ONION inside IOKit's delay-inhibitor
-        window (onionpress.mac_power), wake: USR2 to the watchdogs. Without
-        IOKit (not a Mac) the clock-gap check in check_status is what
-        notices a suspend."""
+        """Sleep: /offline and DEL_ONION inside the platform's delay-
+        inhibitor window, wake: USR2 to the watchdogs (handle_sleep /
+        handle_wake, the one policy). Without a registration the
+        clock-gap check in check_status is what notices a suspend."""
         try:
-            from .mac_power import MacPowerHandler
-            handler = MacPowerHandler(
+            handler = self._power_handler_class()(
                 on_will_sleep=lambda: None if self._quitting else self.handle_sleep(),
                 on_has_powered_on=lambda: None if self._quitting else self.handle_wake(),
                 log=self.log)
             if handler.register():
                 self._power = handler
-                self.log("Registered for sleep via IOKit IORegisterForSystemPower (delay-inhibitor active)")
+                self.log(f"Registered for sleep and wake events ({type(handler).__name__})")
             else:
-                self.log("WARNING: no IOKit sleep registration; sleep is noticed by the clock gap only")
+                self.log("WARNING: no sleep registration; sleep is noticed by the clock gap only")
         except Exception as e:
-            self.log(f"WARNING: MacPowerHandler init failed: {e}")
+            self.log(f"WARNING: power handler init failed: {e}")
 
     def _write_pid(self):
         try:
@@ -574,7 +600,7 @@ class Daemon(PortAttributes):
         # The next daemon waits for this one's WordPress port to free before
         # detecting its offset (a Colima forward can outlast the process).
         try:
-            with open(self._marker(".previous-port-offset"), "w") as f:
+            with open(self._marker(ports.PREVIOUS_OFFSET_SENTINEL), "w") as f:
                 f.write(str(self.port_offset))
         except OSError:
             pass
@@ -591,13 +617,21 @@ class Daemon(PortAttributes):
         self.stop_web_log_capture()
         self.stop_container_log_capture()
         self.caffeine.stop()
+        if self._power is not None:
+            try:
+                self._power.stop()
+            except Exception:
+                pass
         self._remove_pid()
         self.log("OnionPress daemon stopped")
 
     def _offline_now(self):
         """USR1 (`onionpress daemon offline`, from the launcher's `stop`):
-        tell the hub /offline now, as the menubar's Stop did before
-        stopping the containers, and acknowledge."""
+        hold the probe (_stop_hold), tell the hub /offline now, as the
+        menubar's Stop did before stopping the containers, and
+        acknowledge."""
+        self._stopping = True
+        self._stopping_since = time.monotonic()
         try:
             if self.hub_client.registration_succeeded and not self.is_onionheaven:
                 try:
@@ -612,11 +646,40 @@ class Daemon(PortAttributes):
             except OSError:
                 pass
 
+    def _stop_hold(self):
+        """True while a stop announced by `daemon offline` is under way:
+        the containers going down make every probe fail, which is no
+        evidence about the onion service. Lifted by the first pass that
+        sees the stack down (check_status), by a wake, or after
+        STOP_HOLD_SECONDS when the stop never took the stack down (a
+        failed stop, or a restart quicker than one status pass)."""
+        if not self._stopping:
+            return False
+        if time.monotonic() - self._stopping_since < STOP_HOLD_SECONDS:
+            return True
+        self._stopping = False
+        self.log("daemon: the stack did not go down after `daemon offline`; probing again")
+        return False
+
     # -- start-up ------------------------------------------------------------
 
     def _setup_environment(self):
         """What the menubar's __init__ exported for its children: the
-        bundle's bin first on PATH, this install's Colima and Docker."""
+        bundle's bin first on PATH, this install's Colima and Docker. On
+        Linux: the Docker daemon the rest of OnionPress uses (issue #503:
+        the unit runs without the launcher, which exports DOCKER_HOST to
+        the user's rootless socket; without it plain `docker` went to
+        /var/run/docker.sock and every call failed), the rule of
+        platform.resolve_paths (the rootless socket when it exists, else
+        the system one), a preset DOCKER_HOST kept. The daemon's own
+        Docker (self._docker) is built from the same paths; this is for
+        the children that read the environment (the launcher, the
+        helpers the hub client and key_manager run)."""
+        if self.os_name == OS.LINUX:
+            if not os.environ.get("DOCKER_HOST") and os.path.exists(self.docker_socket):
+                os.environ["DOCKER_HOST"] = f"unix://{self.docker_socket}"
+            self.log(f"Docker: {os.environ.get('DOCKER_HOST') or 'docker\'s default'}")
+            return
         docker_config_dir = os.path.join(self.app_support, "docker-config")
         if self.bin_dir:
             os.environ["PATH"] = f"{self.bin_dir}:{os.environ.get('PATH', '')}"
@@ -648,37 +711,20 @@ class Daemon(PortAttributes):
             pass
 
     def _resolve_ports_at_start(self):
-        """Multi-user port offset (CLAUDE.md): wait for our previous
-        instance's port to free (.previous-port-offset), then read the
-        running stack's published port or allocate by bind-probing. A
-        Colima found running is left alone: with no daemon alive it is a
-        launchd restart after a crash, a `daemon stop` + `start` or a
-        terminal `onionpress start`, each a live site, and its port is read
-        rather than offset around. The result goes into the
-        environment (the launcher honours ONIONPRESS_PORT_OFFSET) and the
-        state file (the menubar reads its ports from there)."""
-        prev_offset_sentinel = self._marker(".previous-port-offset")
+        """Multi-user port offset (CLAUDE.md): ports.resolve_at_start, the
+        one rule (issue #405), with no preset: the daemon is the resolver
+        the launcher and the CLI take ONIONPRESS_PORT_OFFSET from. It
+        waits for our previous instance's port to free
+        (.previous-port-offset), then reads the running stack's published
+        port or allocates by bind-probing. A Colima found running is left
+        alone: with no daemon alive it is a launchd restart after a crash,
+        a `daemon stop` + `start` or a terminal `onionpress start`, each a
+        live site, and its port is read rather than offset around. The
+        result goes into the environment (the launcher honours
+        ONIONPRESS_PORT_OFFSET) and the state file (the menubar reads its
+        ports from there)."""
         try:
-            if os.path.exists(prev_offset_sentinel):
-                if time.time() - os.path.getmtime(prev_offset_sentinel) < 60:
-                    with open(prev_offset_sentinel) as f:
-                        prev_offset = int(f.read().strip())
-                    desired_port = 8080 + prev_offset
-                    import socket
-                    for _ in range(30):
-                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        try:
-                            s.bind(("127.0.0.1", desired_port))
-                            s.close()
-                            break
-                        except OSError:
-                            s.close()
-                            time.sleep(0.5)
-                os.remove(prev_offset_sentinel)
-        except (OSError, ValueError):
-            pass
-        try:
-            pc = op_config.resolve_port_offset()
+            pc = ports.resolve_at_start(self.app_support, docker=self._docker, log=self.log)
         except Exception as e:
             self.log(f"daemon: port detection failed ({e}); using the environment's offset")
             pc = op_config.PortConfig.from_offset(self.port_offset)
@@ -699,7 +745,7 @@ class Daemon(PortAttributes):
         """After the stack came up: the port Docker actually published,
         which can differ from the start-time snapshot (a stop/start that
         raced another process's allocation)."""
-        running_port = launcher_ops.get_running_wp_port()
+        running_port = launcher_ops.get_running_wp_port(self._docker)
         if running_port is None or running_port == self.wp_port:
             return
         pc = op_config.PortConfig.from_offset(running_port - 8080)
@@ -732,6 +778,16 @@ class Daemon(PortAttributes):
                 self.log(f"Onion address: {self.onion_address}")
             if os.environ.get("ONIONPRESS_DAEMON_LAUNCHD"):
                 self.log("Running under launchd (" + agent_label(self.app_support) + ")")
+            elif os.environ.get("INVOCATION_ID"):
+                self.log("Running under systemd (" + systemd_unit(self.app_support) + ")")
+            # Signing goes on without libsodium (a heartbeat that cannot
+            # be signed lets the hub take the site over), but on
+            # variable-time pure Python: say so (the Mac bundle has it;
+            # a Linux install needs python3-nacl).
+            if not onion_auth.signing_uses_libsodium():
+                self.log("WARNING: Requests are signed without libsodium (pure-Python "
+                         "ed25519, not constant-time): install python3-nacl "
+                         "(sudo apt install python3-nacl)")
         except Exception:
             pass
 
@@ -749,32 +805,53 @@ class Daemon(PortAttributes):
             self._stop.wait(poll_interval(self.display_state))
 
     def _runtime_ready(self):
-        """Docker answers (the launcher may still be initializing Colima)."""
-        if not os.path.exists(os.path.join(self.colima_home, ".initialized")):
+        """Docker answers (on a Mac the launcher may still be initializing
+        Colima: its .initialized marker first)."""
+        if (self.os_name != OS.LINUX
+                and not os.path.exists(os.path.join(self.colima_home, ".initialized"))):
             return False
         r = self._docker.run(["info"], timeout=5, quiet=True)
         return r.ok
 
+    # -- Linux: rootless Docker's network namespace --------------------------
+
+    def _read_rootless_netns(self):
+        """Rootless Docker's network namespace, as /proc names it ("" under
+        system Docker or when it cannot be read): the bash status loop's
+        rootless_netns."""
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        try:
+            with open(os.path.join(runtime, "dockerd-rootless", "child_pid"), encoding="utf-8") as f:
+                pid = int(f.read().strip())
+            return os.readlink(f"/proc/{pid}/ns/net")
+        except (OSError, ValueError):
+            return ""
+
+    def _watch_rootless_netns(self):
+        """A rootless daemon that restarts behind our back (a crash, a
+        manual `systemctl --user restart docker`) brings the containers
+        back in a new namespace without the WordPress network's egress
+        rules (issue #144): put them back, once per namespace, through
+        `onionpress wordpress-egress` (the start's own step)."""
+        if self.os_name != OS.LINUX:
+            return
+        now = self._read_rootless_netns()
+        if self._rootless_netns is None:
+            self._rootless_netns = now
+            return
+        if now and now != self._rootless_netns:
+            self.log("Rootless Docker's network namespace changed (daemon restarted); "
+                     "re-applying the WordPress network's egress block")
+            self._rootless_netns = now
+            threading.Thread(
+                target=lambda: self.run_cli(["wordpress-egress", "--wp-port", str(self.wp_port)],
+                                            timeout=300),
+                daemon=True, name="wordpress-egress").start()
+
     def _containers(self):
-        """[(name, state)] of this install's containers, from `docker ps
-        -a` by compose project label: cheaper than the launcher's `status`
-        (bash + compose + jq per tick, the way the menubar did it)."""
-        r = self._docker.run(
-            ["ps", "-a", "--filter", "label=com.docker.compose.project",
-             "--format", "{{.Names}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}"],
-            timeout=10, quiet=True)
-        if not r.ok:
-            return None
-        out = []
-        for line in r.output.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and (parts[0].startswith("onionpress-") or parts[0] in (
-                    "onionheaven", "onionheaven-farm", "onionpress-autoheal",
-                    "onionpress-autoheal-proxy") or parts[0].startswith("onionheaven-")):
-                if parts[0].startswith("onionheaven-takeover") or parts[0].startswith("onionheaven-poll"):
-                    continue        # workers come and go; not the stack's health
-                out.append((parts[0], parts[1]))
-        return out
+        """[(name, state)] of this install's containers
+        (status_writer.list_containers), None when docker did not answer."""
+        return status_writer.list_containers(self._docker)
 
     def _check_images_present(self):
         """Which of the stack's images are here (the first-run setup
@@ -818,16 +895,9 @@ class Daemon(PortAttributes):
                 if self.runtime_ready:
                     self.log("Container runtime is ready")
 
-            # The Share Now button / `onionpress upload-analytics`
-            trigger_found = self._take_marker(UPLOAD_TRIGGER_MARKER)
-            if not trigger_found and self.is_running:
-                r = self._docker.exec(
-                    "onionpress-wordpress",
-                    ["sh", "-c", "test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics"],
-                    timeout=5, quiet=True, user=wp_files.WP_USER)
-                if r.ok:
-                    trigger_found = True
-            if trigger_found:
+            # The Share Now button (handle-action's upload-analytics, #528)
+            # and `onionpress upload-analytics`: the data dir's marker
+            if self._take_marker(UPLOAD_TRIGGER_MARKER):
                 self.log("Upload-analytics trigger detected")
                 threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
 
@@ -842,8 +912,11 @@ class Daemon(PortAttributes):
 
             if self.runtime_ready and not all(self._images_present.values()):
                 self._check_images_present()
+            if self.runtime_ready:
+                self._watch_rootless_netns()
 
             containers = self._containers() if self.runtime_ready else None
+            self._containers_seen = dict(containers or [])
             not_running = []
             if containers:
                 self.is_running = all(state.lower() == "running" for _, state in containers)
@@ -905,7 +978,9 @@ class Daemon(PortAttributes):
                     threading.Thread(target=self.start_web_log_capture, daemon=True).start()
                 if not self._container_log_processes:
                     threading.Thread(target=self.start_container_log_capture, daemon=True).start()
-                if not self._clearnet_capture_started:
+                if not self._clearnet_capture_started and self.os_name != OS.LINUX:
+                    # The Colima VM's dmesg; Linux's egress rules log to
+                    # the host's kernel log, which the daemon does not read.
                     self._clearnet_capture_started = True
                     threading.Thread(target=self.start_clearnet_log_capture, daemon=True).start()
 
@@ -928,9 +1003,10 @@ class Daemon(PortAttributes):
 
                 self.write_status_to_volume()
                 self.poll_settings_page()
-                self._hub_loops()
                 self._check_wordpress_installed()
+                self._hub_loops()
             else:
+                self._stopping = False
                 if was_running or self.is_ready:
                     self.log("Service stopped")
                     self.last_status_logged = None
@@ -958,6 +1034,9 @@ class Daemon(PortAttributes):
                 # would otherwise hold its own port against the conflict
                 # check below and answer for a stopped site).
                 self.stop_onion_proxy()
+                # The stopped status (the host copy, the state file's
+                # "status"); nothing goes into a volume that is down.
+                self.write_status_to_volume()
                 if self.runtime_ready:
                     self.port_conflict = self.check_port_conflict()
                     if self.port_conflict and not self._port_conflict_logged:
@@ -985,6 +1064,12 @@ class Daemon(PortAttributes):
     def _full_health_pass(self):
         """Internet is there: WordPress, then the dual probe and the #266
         recovery step (RecoveryWindow, shared with Linux)."""
+        if self._stop_hold():
+            # A stop is taking the stack down: no probe, so no failure
+            # path (reference onions, wedge classification) and nothing
+            # towards a republish.
+            self._recovery.note_offline()
+            return
         current_status = (self.is_running, self.onion_address)
         should_log = (current_status != self.last_status_logged) or not self.is_ready
         if not self._wordpress_confirmed:
@@ -994,6 +1079,11 @@ class Daemon(PortAttributes):
         else:
             wordpress_ready = True
         tor_reachable = self.check_tor_reachability(log_result=should_log)
+        if self._stop_hold():
+            # The stop began while this probe ran: its failure is the
+            # stop's.
+            self._recovery.note_offline()
+            return
         self._reachability_stats.record_probe(tor_reachable, self._last_probe_code, self._last_probe_ms)
         self._recovery.step(self._tor_internally_ready, tor_reachable,
                             self._last_probe_code, self._last_probe_why)
@@ -1088,7 +1178,9 @@ class Daemon(PortAttributes):
         tor_bootstrapped = self._last_bootstrap_pct >= 100 or self.is_ready
         # The heartbeat on "yes" (or unset), the opt-out's /unregister on
         # "no", and the record's upkeep: the client's, re-read every cycle.
-        self.hub_client.tick(tor_bootstrapped, self._address_known())
+        # Not before WordPress is installed (hub_registration_allowed).
+        self.hub_client.tick(tor_bootstrapped and self.hub_registration_allowed(),
+                             self._address_known())
 
         if tor_bootstrapped and self._address_known() and not self._analytics_sharing_started:
             self._analytics_sharing_started = True
@@ -1104,10 +1196,39 @@ class Daemon(PortAttributes):
                 threading.Thread(target=self._retry_pending_onionname, daemon=True,
                                  name="onionname-retry").start()
 
+    def hub_registration_allowed(self):
+        """Issue #464: nothing registers the address with the OnionHeaven
+        hub before WordPress is installed. On a Mac Tor is not started
+        before the first run's setup (start-tor below), so the question
+        does not arise; on Linux the start brings Tor up at once and a
+        headless install may wait days for `onionpress setup`, so the hub
+        loops wait for `wp core is-installed` (until #407 a runtime mask
+        of the heartbeat unit held by the launcher)."""
+        if self.os_name != OS.LINUX:
+            return True
+        return self._wp_installed is True
+
     def _check_wordpress_installed(self):
-        """First run: once WordPress is installed, start Tor (the launcher's
-        start-tor)."""
-        if self._wp_installed is True or self.proxy_server is None:
+        """First run: once WordPress is installed, on a Mac start Tor (the
+        launcher's start-tor; until then the install is reachable only
+        through the extension's proxy); on Linux open the hub gate (the
+        start brought Tor up already, behind the image's install-page
+        rule and the loopback bind)."""
+        if self._wp_installed is True:
+            return
+        if self.os_name == OS.LINUX:
+            installed = self.check_wp_installed()
+            if installed:
+                self._wp_installed = True
+                self.log("WordPress is installed: hub registration allowed")
+            elif installed is False:
+                self._wp_installed = False
+                if not self._hub_gate_said:
+                    self._hub_gate_said = True
+                    self.log("WordPress is not installed: no hub registration until "
+                             "setup has run (issue #464)")
+            return
+        if self.proxy_server is None:
             return
         wp_installed = self.check_wp_installed()
         if wp_installed:
@@ -1121,11 +1242,7 @@ class Daemon(PortAttributes):
             self._wp_installed = False
 
     def check_wp_installed(self):
-        try:
-            r = self._docker.wp("core", "is-installed", timeout=10, quiet=True)
-            return r.ok
-        except Exception:
-            return None
+        return status_writer.wp_installed(self._docker)
 
     # -- the probe (the menubar's check_tor_reachability) ----------------
 
@@ -1253,8 +1370,9 @@ class Daemon(PortAttributes):
         self.log(f"SUSPEND-RACE: /offline {'landed' if ok else 'MISSED'} in {elapsed_ms}ms")
 
     def handle_sleep(self):
-        """Inside IOKit's delay-inhibitor: snapshot, USR1 to the watchdogs
-        (DEL_ONION), /offline to the hub (5 s), caffeinate off."""
+        """Inside the platform's delay-inhibitor window: snapshot, USR1 to
+        the watchdogs (DEL_ONION), /offline to the hub (the handler's
+        budget), the sleep inhibitor off."""
         self.log("System going to sleep")
         self._maybe_emit_snapshot(force=True, fast=True)
         self._sleeping = True
@@ -1268,8 +1386,11 @@ class Daemon(PortAttributes):
             if self.is_ready and self.hub_client.registration_succeeded:
                 t0 = time.monotonic()
                 ok = False
+                # Within the platform's delay window: IOKit allows ~30 s,
+                # logind 5 s by default (the handler's OFFLINE_MAX_TIME).
+                budget = getattr(self._power, "OFFLINE_MAX_TIME", 5)
                 try:
-                    ok = bool(self.hub_client.notify_offline(max_time=5))
+                    ok = bool(self.hub_client.notify_offline(max_time=budget))
                 except Exception:
                     ok = False
                 self._record_suspend_offline(ok, int((time.monotonic() - t0) * 1000))
@@ -1285,6 +1406,7 @@ class Daemon(PortAttributes):
         self._maybe_emit_snapshot(force=True)
         self._reachability_stats.reset_session(time.time())
         self._recovery.note_wake()
+        self._stopping = False
         self._sleeping = False
         self.startup_time = time.time()
         self.caffeine.start()
@@ -1363,9 +1485,11 @@ class Daemon(PortAttributes):
 
     def _reconcile_archive_s3_keys(self):
         """Once per run when the site is up: archive.org keys for the
-        Wayback sweep (`onionpress ensure-archive-s3-keys`)."""
+        Wayback sweep (`onionpress ensure-archive-s3-keys`, the CLI's own
+        subcommand: no launcher case has it, and run through the launcher
+        it only ever answered usage and exit 1)."""
         try:
-            rc, out = self.run_launcher(["ensure-archive-s3-keys"], timeout=300)
+            rc, out = self.run_cli(["ensure-archive-s3-keys"], timeout=300)
             if rc is None:
                 return
             if rc != 0:
@@ -1416,91 +1540,12 @@ class Daemon(PortAttributes):
     # -- status.json (the menubar's write_status_to_volume) ----------------
 
     def write_status_to_volume(self):
-        """status.json, version, config-current.json and recent-logs.txt in
-        the shared volume, written as www-data (wp_files), for the
-        WordPress pages."""
-        try:
-            state = display_state_of(self._state_fields(), time.time())
-            state = {"available": "running", "stalled": "starting"}.get(state, state)
-            containers = {}
-            r = self._docker.run(["ps", "--format", "{{.Names}}\t{{.State}}", "--filter", "name=onionpress"],
-                                 timeout=5, quiet=True)
-            if r.ok:
-                for line in r.output.splitlines():
-                    parts = line.split("\t", 1)
-                    if len(parts) == 2:
-                        containers[parts[0]] = parts[1]
-            uptime_seconds = int(time.time() - self.startup_time) if self.is_running else 0
-            bootstrap_pct = 100 if self.is_ready else self._last_bootstrap_pct
-            onion_reachable, onion_http_code = self._last_reachability
-            # Both OnionHeaven roles, for the OnionHeaven screen (the Mac
-            # dialog reads it from the state file, the WordPress page from
-            # status.json): the registry is asked only on a hub.
-            try:
-                oh_overview = onionheaven.overview(self)
-            except Exception as e:
-                self.log(f"OnionHeaven: overview error: {e}")
-                oh_overview = onionheaven.overview(self, hub=False)
-            self._onionheaven_overview = oh_overview
-            # status.json's server_active stays the Mac's rule: the node
-            # serving the hub's address (tests/test_linux_hub_mode.py).
-            oh_server_active = bool(self.is_onionheaven)
-            oh_stats = onionheaven.status_block(oh_overview, server_active=oh_server_active)
-            onion_addr = self.onion_address if key_manager.is_valid_onion_address(self.onion_address) else ""
-            load_avg = list(os.getloadavg())
-            host_uptime = int(time.time() - self._host_boot_time())
-            safe_config = op_config.redact_config(op_config.read_config(self.config_file))
-            status = {
-                "state": state,
-                "version": self.version,
-                "onion_address": onion_addr,
-                "onionname": self.read_config_value("ONIONNAME", ""),
-                "tor_impl": "tor",
-                "uptime_seconds": uptime_seconds,
-                "bootstrap_pct": bootstrap_pct,
-                "onion_reachable": onion_reachable,
-                "onion_http_code": onion_http_code,
-                "containers": containers,
-                "updated_at": _utc_now(),
-                "platform": "macos",
-                "load_avg": load_avg,
-                "host_uptime_seconds": host_uptime,
-                "onionheaven": oh_stats,
-                "config": safe_config,
-            }
-            self._last_status_payload = status
-            status_json = json.dumps(redact.status_for_wordpress(status), indent=2)
-            self._docker.run(wp_files.put_file_args("/var/lib/onionpress/status.json"),
-                             input=status_json, timeout=5, quiet=True)
-            self._docker.run(wp_files.put_file_args("/var/lib/onionpress/version"),
-                             input=self.version, timeout=5, quiet=True)
-            self._docker.run(wp_files.put_file_args("/var/lib/onionpress/config-current.json"),
-                             input=json.dumps(safe_config, indent=2), timeout=5, quiet=True)
-            log_file = os.path.join(self.app_support, "onionpress.log")
-            try:
-                recent = redact.wordpress_log_excerpt(log_file, self.app_support)
-                self._docker.run(wp_files.put_file_args("/var/lib/onionpress/recent-logs.txt"),
-                                 input=recent, timeout=5, quiet=True)
-            except (OSError, IOError):
-                pass
-        except Exception:
-            pass
-
-    _boot_time = None
-
-    def _host_boot_time(self):
-        if self._boot_time is None:
-            try:
-                r = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True,
-                                   text=True, timeout=2)
-                import re
-                m = re.search(r"sec\s*=\s*(\d+)", r.stdout)
-                self._boot_time = int(m.group(1)) if m else time.time()
-            except Exception:
-                self._boot_time = time.time()
-        return self._boot_time
-
-    # -- the Settings page's requests (handle-action) ---------------------
+        """The status document from this pass (onionpress.status_writer,
+        the one writer for both platforms, issue #523): status.json,
+        version, config-current.json and recent-logs.txt in the shared
+        volume as www-data while the stack runs, the host copy always,
+        and the payload the analytics upload and the state file carry."""
+        status_writer.write(self)
 
     def poll_settings_page(self):
         """`onionpress handle-action --json` once per tick, one run at a
@@ -1585,7 +1630,7 @@ class Daemon(PortAttributes):
             except Exception as e:
                 self.log(f"onionname: retry cannot import registrar: {e}")
                 return
-            reg = Registrar(docker_bin=self._docker.docker_bin, log=self.log)
+            reg = Registrar(self._docker, log=self.log)
             result = reg.register(name, onionaddress)
             if result.ok:
                 self._save_onionname(name, onionaddress, registered=True)
@@ -1608,10 +1653,10 @@ class Daemon(PortAttributes):
     # -- the extension's proxy ------------------------------------------
 
     def start_onion_proxy(self):
-        if self.proxy_server is not None or self._quitting:
+        if self.proxy_server is not None or self._quitting or self.os_name == OS.LINUX:
+            # Linux has no browser extension host (issue #318: the
+            # extension is the Mac's); nothing listens.
             return
-        docker_bin = self._docker.docker_bin
-        docker_env = self._docker.env
         php_script = ""
         for candidate in (os.path.join(self.resources_dir, "MenubarApp", "Contents", "Resources", "onion-forward.php"),
                           os.path.join(self.resources_dir, "onion-forward.php")):
@@ -1619,15 +1664,14 @@ class Daemon(PortAttributes):
                 php_script = candidate
                 break
         if php_script:
-            onion_proxy.install_php_proxy(docker_bin, docker_env, php_script, log_func=self.log)
+            onion_proxy.install_php_proxy(self._docker, php_script, log_func=self.log)
 
         def run_proxy():
             try:
                 server = onion_proxy.ThreadingHTTPServer(("127.0.0.1", self.proxy_port),
                                                          onion_proxy.OnionProxyHandler,
                                                          ports=lambda: self.ports)
-                server.docker_bin = docker_bin
-                server.docker_env = docker_env
+                server.docker = self._docker
                 server.onion_address = self.onion_address
                 server.healthcheck_address = self.healthcheck_address
                 server.version = self.version
@@ -1671,10 +1715,10 @@ class Daemon(PortAttributes):
         if self.web_log_process is not None:
             return
         try:
-            self.web_log_process = subprocess.Popen(
-                [self._docker.docker_bin, "logs", "-f", "--tail", "100", "onionpress-wordpress"],
+            self.web_log_process = self._docker.popen(
+                ["logs", "-f", "--tail", "100", "onionpress-wordpress"],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                encoding="utf-8", errors="replace", env=self._docker.env)
+                encoding="utf-8", errors="replace")
             self.web_log_thread = threading.Thread(
                 target=self._web_log_reader_thread, args=(self.web_log_process,), daemon=True)
             self.web_log_thread.start()
@@ -1718,12 +1762,10 @@ class Daemon(PortAttributes):
         self._capture_supervisor_thread.start()
 
     def _capture_supervisor_loop(self):
-        docker_bin = self._docker.docker_bin
-        docker_env = self._docker.env
         logs_dir = os.path.join(self.app_support, "logs")
         while not self._capture_shutdown.is_set():
             try:
-                running = self._docker_ps_names(docker_bin, docker_env)
+                running = self._docker_ps_names()
                 desired = {}
                 specs = self._capture_specs()
                 for name in running:
@@ -1740,43 +1782,43 @@ class Daemon(PortAttributes):
                     entry = self._container_log_processes.get(container_name)
                     if entry is not None and entry["thread"].is_alive():
                         continue
-                    self._launch_capture_worker(container_name, rotating_log, docker_bin, docker_env)
+                    self._launch_capture_worker(container_name, rotating_log)
             except Exception as e:
                 self.log(f"Capture supervisor: {e}")
             self._capture_shutdown.wait(60)
 
-    def _docker_ps_names(self, docker_bin, docker_env):
+    def _docker_ps_names(self):
+        """The names `docker ps` shows (through the runner), or an empty
+        set when it did not answer."""
         try:
-            result = subprocess.run([docker_bin, "ps", "--format", "{{.Names}}"],
-                                    capture_output=True, text=True, encoding="utf-8",
-                                    errors="replace", timeout=10, env=docker_env)
+            result = self._docker.run(["ps", "--format", "{{.Names}}"], timeout=10, quiet=True)
         except Exception:
             return set()
-        if result.returncode != 0:
+        if not result.ok:
             return set()
         return {n.strip() for n in result.stdout.split() if n.strip()}
 
-    def _launch_capture_worker(self, container_name, rotating_log, docker_bin, docker_env):
+    def _launch_capture_worker(self, container_name, rotating_log):
         entry = {"thread": None, "proc": None, "last_ts": None}
         self._container_log_processes[container_name] = entry
         worker = threading.Thread(target=self._capture_worker,
-                                  args=(container_name, rotating_log, docker_bin, docker_env),
+                                  args=(container_name, rotating_log),
                                   daemon=True, name=f"capture-{container_name}")
         entry["thread"] = worker
         worker.start()
 
-    def _capture_worker(self, container_name, rotating_log, docker_bin, docker_env):
+    def _capture_worker(self, container_name, rotating_log):
         while not self._capture_shutdown.is_set():
             entry = self._container_log_processes.get(container_name)
             if entry is None:
                 return
             last_ts = entry.get("last_ts")
-            cmd = [docker_bin, "logs", "-f"]
+            cmd = ["logs", "-f"]
             cmd += ["--since", last_ts] if last_ts else ["--tail", "100"]
             cmd.append(container_name)
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                        text=True, encoding="utf-8", errors="replace", env=docker_env)
+                proc = self._docker.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          text=True, encoding="utf-8", errors="replace")
             except Exception:
                 time.sleep(10)
                 continue
@@ -1794,13 +1836,16 @@ class Daemon(PortAttributes):
                     proc.kill()
                 except Exception:
                     pass
-            if container_name not in self._docker_ps_names(docker_bin, docker_env):
+            if container_name not in self._docker_ps_names():
                 self._container_log_processes.pop(container_name, None)
                 return
             time.sleep(5)
 
     def start_clearnet_log_capture(self):
-        """The VM's dmesg CLEARNET lines (the egress rules' LOG targets)."""
+        """The VM's dmesg CLEARNET lines (the egress rules' LOG targets);
+        a Mac's only (Colima)."""
+        if self.os_name == OS.LINUX:
+            return
         limactl = os.path.join(self.bin_dir, "limactl") if self.bin_dir else "limactl"
         lima_env = os.environ.copy()
         lima_env["COLIMA_HOME"] = self.colima_home
@@ -1850,6 +1895,8 @@ class Daemon(PortAttributes):
         if getattr(self, "_thumbnail_generator_started", False):
             return
         self._thumbnail_generator_started = True
+        if self.os_name == OS.LINUX:
+            return  # qlmanage is QuickLook's: a Mac feature
         creations_dir = os.path.expanduser("~/OnionPress/Creations/My Creations")
 
         def generator():

@@ -255,10 +255,13 @@ marked *(Mac)* or *(Linux)*.
 
 - Fresh install (DMG mounted and copied on Mac; `.deb` on Linux), first
   start, WordPress set up, admin password works.
+- Installer owner-only (#464): before setup `install.php` answers the
+  published port and refuses the tor container (403, `setup-config.php`
+  too); after setup both are 403 over Tor.
 - Site served locally (`http_local /`) and over Tor from the visitor
   (`/.onionpress-health` body marker, then `/`).
 - `onionpress status`/`address` agree with what Tor serves.
-- Stop, start, restart: same address, site back, no new key minted
+- Stop then start, and `onionpress restart`: same address, site back, no new key minted
   (`replaced-keys/` empty, key files unchanged).
 - Tripwire clean.
 

@@ -288,6 +288,10 @@ WORDPRESS_STATUS_KEYS = frozenset({
     "containers", "wayback_queue_count",
     "load_avg", "host_uptime_seconds",
     "onionheaven",
+    # The last release check (status_writer.release_status, issue #528).
+    "release",
+    # handle_action.ACTIONS: what the page may ask this host (issue #528).
+    "page_actions",
 })
 
 # recent-logs.txt: this many lines from the end of the log, read from at

@@ -102,6 +102,15 @@ REMOTE_ZIP="${REMOTE_DIR}/plugin.zip"
 # download alone; measured first-byte through either proxy is ~3s, so 30s is
 # roughly 10x headroom. --max-time stays as the outer bound for a download
 # that crawls the whole way.
+#
+# A proxy the start has just (re)created opens its SOCKS port a moment
+# later, and a refused connection fails at once ("Failed to connect after
+# 0 ms"): wait up to 30 s for either port to take a connection first. A
+# port still closed after that is tried anyway, and fails as before.
+SOCKS_WAIT='for i in {1..30}; do for h in onionheaven onionpress-tor; do (exec 3<>"/dev/tcp/$h/9050") 2>/dev/null && exit 0; done; sleep 1; done; exit 1'
+if ! docker exec "$CONTAINER" bash -c "$SOCKS_WAIT" 2>/dev/null; then
+    echo "No Tor SOCKS port answered within 30 s; trying anyway"
+fi
 downloaded=0
 for proxy in onionheaven onionpress-tor; do
     if docker exec "$CONTAINER" curl -sSL -f --max-time 300 \

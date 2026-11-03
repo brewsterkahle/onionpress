@@ -32,7 +32,6 @@ MENUBAR = os.path.join(PROJECT_ROOT, "src", "menubar.py")
 # action (a backup, a restore, an update, a key, an upload).
 ALLOWED = {
     "key_manager": {"is_valid_onion_address"},
-    "wp_files": {"WP_USER", "put_file_args", "wp_cli_args"},
 }
 NEVER_IMPORTED = ("backup", "hub_backup", "updater")
 
@@ -56,6 +55,11 @@ ACTIONS = (
     'self.launcher.wait("stop")',
     'self.launcher.wait("restart")',
     'self.launcher.run("quit", "--leave-menubar"',
+    # Issue #527: the first-run install, the onionname, the browser.
+    'self.launcher.run_json(\n                "setup", "--user", name, "--title", sw.site_title,',
+    'self.launcher.run_json(\n                "onionname", "set", new_name, "--rename-admin", "--json"',
+    'self.launcher.run_json("open", "onion", "--json"',
+    'self.launcher.run_async("open", "site")',
 )
 
 

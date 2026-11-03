@@ -30,6 +30,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import cli, login_item, onionheaven  # noqa: E402
 from onionpress import config as op_config  # noqa: E402
@@ -396,7 +397,7 @@ class TestSideEffects(unittest.TestCase):
         self._write("START_ON_BOOT=no\n")
         out = self._apply(["START_ON_BOOT"], "linux")
         self.assertEqual(self.runs, [["systemctl", "--user", "disable",
-                                      "onionpress.service", "onionpress-heartbeat.service"]])
+                                      "onionpress.service", "onionpress-daemon.service"]])
         self.assertIn("Start on boot disabled.", out)
         self._write("START_ON_BOOT=yes\n")
         self._apply(["START_ON_BOOT"], "linux")
@@ -537,13 +538,14 @@ class TestCallers(unittest.TestCase):
         self.assertNotIn("onionheaven_explain", linux)
 
     def test_launcher_help_names_them(self):
-        mac = _read("app/MacOS/onionpress")
-        help_text = mac[mac.index("help|-h|--help)"):mac.index("Your WordPress site will be available at")]
-        self.assertIn("  config        ", help_text)
-        self.assertIn("  onionheaven   ", help_text)
-        self.assertIn("set KEY - with the", help_text)
-        linux = _read("linux/onionpress")
-        self.assertIn("|config|onionname|onionheaven|", linux)
+        # One text for both platforms (cli.launcher_help, #529).
+        from onionpress import cli
+        for os_name in ("macos", "linux"):
+            help_text = cli.launcher_help(os_name)
+            self.assertIn("  config        ", help_text, os_name)
+            self.assertIn("  onionheaven   ", help_text, os_name)
+            self.assertIn("  onionname     ", help_text, os_name)
+            self.assertIn("set KEY - with the", help_text, os_name)
 
     def test_guis_write_config_only_through_the_cli(self):
         for rel in ("src/onionpress/settings_ui.py", "linux/onionpress-tray"):
@@ -753,28 +755,32 @@ class TestAdminUsernameIsAReadUnlessAsked(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="op-admin-name-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.cfg = os.path.join(self.dir, "config")
-        done = mock.Mock(returncode=0, stdout="owner\nother\n")
-        p = mock.patch("onionpress.backup.subprocess.run", return_value=done)
-        self.run = p.start()
-        self.addCleanup(p.stop)
+        from fake_docker import FakeDocker
+        done = mock.Mock(returncode=0, stdout="owner\nother\n", stderr="")
+        self.run = mock.Mock(return_value=done)
+        self.docker = FakeDocker(self.run)
 
     def test_a_plain_call_writes_nothing(self):
-        self.assertEqual(self.backup.find_admin_username(self.dir), ("owner", True))
-        self.assertEqual(self.backup.get_admin_username(self.dir), "owner")
+        self.assertEqual(self.backup.find_admin_username(self.dir, docker=self.docker),
+                         ("owner", True))
+        self.assertEqual(self.backup.get_admin_username(self.dir, docker=self.docker), "owner")
         self.assertFalse(os.path.exists(self.cfg))
 
     def test_with_a_log_the_login_is_recorded_once(self):
         logged = []
-        self.assertEqual(self.backup.get_admin_username(self.dir, log=logged.append), "owner")
+        self.assertEqual(self.backup.get_admin_username(self.dir, log=logged.append,
+                                                        docker=self.docker), "owner")
         self.assertEqual(op_config.read_value(self.cfg, "ONIONNAME"), "owner")
         self.assertEqual(op_config.take_config_changes(self.dir), ["ONIONNAME"])
         self.run.reset_mock()
-        self.assertEqual(self.backup.find_admin_username(self.dir), ("owner", False))
+        self.assertEqual(self.backup.find_admin_username(self.dir, docker=self.docker),
+                         ("owner", False))
         self.run.assert_not_called()
 
     def test_the_fallback_is_never_recorded(self):
-        self.run.return_value = mock.Mock(returncode=1, stdout="")
-        self.assertEqual(self.backup.get_admin_username(self.dir, log=lambda m: None), "admin")
+        self.run.return_value = mock.Mock(returncode=1, stdout="", stderr="")
+        self.assertEqual(self.backup.get_admin_username(self.dir, log=lambda m: None,
+                                                        docker=self.docker), "admin")
         self.assertFalse(os.path.exists(self.cfg))
 
 

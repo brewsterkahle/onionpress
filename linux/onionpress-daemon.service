@@ -1,0 +1,23 @@
+[Unit]
+Description=OnionPress daemon (status, probe, OnionHeaven heartbeat, Settings page, log capture)
+# Ordered before the site's unit, as the Mac's `start` starts the daemon
+# before the containers: the site's ExecStop (`onionpress stop`) then asks
+# this daemon for /offline while the tor container is still up, and a
+# `try-restart` of both stops the site first and starts the daemon first.
+Before=onionpress.service
+Wants=onionpress.service
+
+[Service]
+Type=simple
+ExecStart=/opt/onionpress/onionpress daemon
+# A crash or a kill comes back; `systemctl --user stop` (an uninstall, a
+# `daemon stop`) does not restart it.
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+
+[Install]
+WantedBy=default.target

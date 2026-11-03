@@ -955,7 +955,7 @@ class TestModuleShape(unittest.TestCase):
         for call in ("ui_client.plan_backup(", "ui_client.run_backup(", "ui_client.plan_restore(",
                      "ui_client.run_restore(", "ui_client.restore_summary(", "ui_client.update_outcome(",
                      "ui_client.question_text(", "ui_client.about_comments(", "ui_client.site_url(",
-                     "ui_client.short_onion(", "ui_client.uninstall_warning("):
+                     "ui_client.short_onion(", "ui_client.run_confirmed("):
             with self.subTest(call=call):
                 self.assertIn(call, src)
         # The package is installed beside the tray: hard imports, no
@@ -968,7 +968,8 @@ class TestModuleShape(unittest.TestCase):
                      "class UpdateCheckOutcome", "_UNLOGGED_ARGS", "xdg-open\", base"):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, src)
-        self.assertIn("from onionpress import launcher_ops  # noqa: E402", src)
+        # Browsers are the CLI's (`open … --json`, issue #527).
+        self.assertNotIn("launcher_ops", src)
         self.assertIn("from onionpress import setup_logic as _setup_logic  # noqa: E402", src)
 
     def test_every_question_dialog_in_the_tray_defaults_to_cancel_and_times_out(self):

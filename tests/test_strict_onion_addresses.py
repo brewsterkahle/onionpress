@@ -2,8 +2,8 @@
 """Onion addresses are checked whole, not by "ends in .onion".
 
 An address that ends up in a URL, a path, a command or a registry has to be
-a well-formed v3 address and nothing else (key_manager.is_valid_onion_address
-and the launchers' is_onion_address). `x.endswith(".onion")` and
+a well-formed v3 address and nothing else (key_manager.is_valid_onion_address,
+which start.vanity_key_dir uses too). `x.endswith(".onion")` and
 `".onion" in x` accept "evil.example/" + 39 characters + ".onion": as the
 hub address, that is a URL path on a clearnet host, and the heartbeat POSTs
 the site's onion private key to it through a Tor exit. Covered here:
@@ -47,6 +47,7 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
@@ -56,6 +57,7 @@ from onionpress import (  # noqa: E402
     auto_login, key_manager, native_messaging_host, onion_auth, onion_hostname,
     onion_proxy, onionheaven, setup_logic,
 )
+from fake_docker import FakeDocker, answering  # noqa: E402
 
 PHP = shutil.which("php")
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
@@ -108,8 +110,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -245,7 +246,7 @@ class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
     def test_a_well_formed_hub_is_posted_to(self):
         rec = _Recorder('{"online": true}')
         with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", OTHER_HUB), \
-                mock.patch.object(onionheaven.subprocess, "run", rec):
+                answering(self.app, rec):
             self.assertTrue(onionheaven._send_heartbeat(self.app))
         self.assertEqual(rec.calls[0][-1], f"http://{OTHER_HUB}:8083/online")
 
@@ -254,7 +255,7 @@ class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
             with self.subTest(hub=hub):
                 rec = _Recorder('{"online": true}')
                 with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", hub), \
-                        mock.patch.object(onionheaven.subprocess, "run", rec):
+                        answering(self.app, rec):
                     self.assertFalse(fn())
                 self.assertEqual(rec.calls, [])
 
@@ -303,7 +304,7 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
                     app = _FakeApp(self.tmpdir, onion_address=site)
                     setattr(app, field, value)
                     rec = _Recorder('{"online": true}')
-                    with mock.patch.object(onionheaven.subprocess, "run", rec):
+                    with answering(app, rec):
                         self.assertFalse(onionheaven._send_heartbeat(app))
                         self.assertFalse(onionheaven._send_onionheaven_notification(
                             app, "offline", "offline"))
@@ -312,114 +313,10 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
     def test_unregister_takes_no_malformed_cached_address(self):
         app = _FakeApp(self.tmpdir, onion_address="Starting...")
         rec = _Recorder('{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             onionheaven.unregister_from_onionheaven(app)
         self.assertEqual(rec.calls, [])
         self.assertIn("OnionHeaven: no content address for unregister", app.logs)
-
-
-# ─── Linux heartbeat ────────────────────────────────────────────────────
-
-_HB_HOME = tempfile.mkdtemp(prefix="op-hb-strict-test-")
-
-
-def _load_linux_heartbeat():
-    os.makedirs(os.path.join(_HB_HOME, ".onionpress"), exist_ok=True)
-    saved = os.environ.get("HOME")
-    os.environ["HOME"] = _HB_HOME
-    sys.modules.setdefault("key_manager", key_manager)
-    sys.modules.setdefault("onion_auth", onion_auth)
-    try:
-        return _load("linux/onionpress-heartbeat.py", "onionpress_heartbeat_strict_test")
-    finally:
-        if saved is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = saved
-
-
-class TestLinuxHeartbeat(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        cls.hb = _load_linux_heartbeat()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(_HB_HOME, ignore_errors=True)
-
-    def test_hub_from_config(self):
-        hb = self.hb
-        self.assertEqual(hb._hub_address({}), hb.DEFAULT_HUB)
-        self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": ""}), hb.DEFAULT_HUB)
-        self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": OTHER_HUB}), OTHER_HUB)
-        for value in LOOSE:
-            with self.subTest(value=value), self.assertLogs(hb.log, "WARNING") as cm:
-                hb._bad_hub_value_logged = None
-                self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": value}),
-                                 hb.DEFAULT_HUB)
-            self.assertTrue(all("evil" not in line for line in cm.output))
-            self.assertTrue(any(hb.DEFAULT_HUB in line for line in cm.output))
-
-    def test_register_warns_again_for_a_rejected_hub(self):
-        hb = self.hb
-        priv = os.urandom(64)
-        pub = onion_auth.derive_public_key(priv)
-        hb._bad_hub_value_logged = None
-        for value, warned in ((LOOSE[0], True), (OTHER_HUB, False)):
-            with self.subTest(value=value):
-                with self.assertLogs(hb.log, "WARNING"):
-                    hb._hub_address({"ONIONHEAVEN_ADDRESS": value})
-                    hb.log.warning("marker")
-                hub = hb._hub_address({"ONIONHEAVEN_ADDRESS": value})
-                with self.assertLogs(hb.log, "DEBUG") as cm, \
-                        mock.patch.object(hb, "read_config",
-                                          return_value={"REGISTER_WITH_ONIONHEAVEN": "no"}), \
-                        mock.patch.object(hb, "_is_onionheaven_server", return_value=False):
-                    self.assertFalse(hb.register(hub, SITE, HC, priv, pub))
-                hits = [l for l in cm.output if "WARNING" in l and hb.DEFAULT_HUB in l]
-                self.assertEqual(bool(hits), warned, cm.output)
-
-    def test_every_config_read_goes_through_it(self):
-        src = _read("linux/onionpress-heartbeat.py")
-        self.assertNotIn('config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)', src)
-        self.assertEqual(src.count("= _hub_address(config)"), 3)
-
-    def test_sign_and_post_refuses_a_malformed_hub(self):
-        priv, pub = os.urandom(64), os.urandom(32)
-        for hub in LOOSE:
-            with self.subTest(hub=hub):
-                rec = _Recorder('{"online": true}')
-                with mock.patch.object(self.hb, "_hub_conn", None), \
-                        mock.patch.object(self.hb.subprocess, "run", rec):
-                    self.assertEqual(
-                        self.hb.sign_and_post("online", hub, SITE, HC, priv, pub),
-                        (False, None))
-                self.assertEqual(rec.calls, [])
-
-    def test_offline_once_takes_no_malformed_cached_address(self):
-        hb = self.hb
-        p = mock.patch.object(hb.key_manager, "extract_keys",
-                              return_value=(os.urandom(64), os.urandom(32)))
-        p.start()
-        self.addCleanup(p.stop)
-        state = os.path.join(_HB_HOME, "state.json")
-        hc_cache = os.path.join(hb.DATA_DIR, "healthcheck-address")
-        self.addCleanup(lambda: os.path.exists(hc_cache) and os.remove(hc_cache))
-        for content, hc in ((LOOSE[0], HC), (SITE, LOOSE[0])):
-            with self.subTest(content=content, hc=hc):
-                with open(state, "w") as f:
-                    json.dump({"content_address": content}, f)
-                with open(hc_cache, "w") as f:
-                    f.write(hc + "\n")
-                rec = _Recorder("")   # the hostname files are empty too
-                with mock.patch.object(hb, "STATE_PATH", state), \
-                        mock.patch.object(hb, "read_config",
-                                          return_value={"REGISTER_WITH_ONIONHEAVEN": "yes"}), \
-                        mock.patch.object(hb, "sign_and_post",
-                                          side_effect=AssertionError("posted")), \
-                        mock.patch.object(hb.subprocess, "run", rec):
-                    self.assertEqual(hb.offline_once(), 1)
 
 
 # ─── Hosts that route a request ─────────────────────────────────────────
@@ -613,21 +510,23 @@ class TestSetupSiteAddress(unittest.TestCase):
     def test_install_never_takes_a_malformed_address_for_the_site_url(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
+        from fake_docker import FakeDocker
         rec = _Recorder()
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             setup_logic.install_fresh_wordpress(
                 site_title="T", onionname="alice", password="hunter22",
-                onion_addr=LOOSE[0], launcher_bin="/x/onionpress", data_dir=tmp)
+                onion_addr=LOOSE[0], docker=FakeDocker(rec), launcher_bin="/x/onionpress",
+                data_dir=tmp)
         urls = [a for argv in rec.calls for a in argv if "http://" in a]
         self.assertTrue(urls)
         self.assertTrue(all("evil" not in u for u in urls), urls)
         self.assertIn("--url=http://localhost", rec.calls[0])
 
     def test_read_onion_address(self):
+        from fake_docker import FakeDocker
         for content, want in ((SITE + "\n", SITE), (LOOSE[0] + "\n", "")):
             rec = _Recorder(content)
-            with mock.patch.object(setup_logic.subprocess, "run", rec):
-                self.assertEqual(setup_logic._read_onion_address(), want)
+            self.assertEqual(setup_logic._read_onion_address(FakeDocker(rec)), want)
 
 
 # ─── The served hostname (issue #478) ───────────────────────────────────
@@ -668,20 +567,6 @@ class TestServedHostnameReader(unittest.TestCase):
                 self.assertEqual(onion_hostname.read_hostname_text(_HostnameDocker(value)),
                                  value.strip())
 
-    def test_through_a_docker_binary(self):
-        rec = _Recorder(SITE + "\n")
-        with mock.patch.object(onion_hostname.subprocess, "run", rec):
-            self.assertEqual(onion_hostname.read_served_address_with("/x/docker"), SITE)
-        self.assertEqual(rec.calls, [["/x/docker", "exec", "onionpress-tor", "cat",
-                                      "/var/lib/tor/hidden_service/wordpress/hostname"]])
-        for value in LOOSE:
-            with self.subTest(value=value), \
-                    mock.patch.object(onion_hostname.subprocess, "run", _Recorder(value)):
-                self.assertEqual(onion_hostname.read_served_address_with(), "")
-        failed = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, SITE, "")  # noqa: E731
-        with mock.patch.object(onion_hostname.subprocess, "run", failed):
-            self.assertEqual(onion_hostname.read_served_address_with(), "")
-
     def test_the_rule_is_key_managers(self):
         self.assertIs(onion_hostname.is_valid_onion_address, key_manager.is_valid_onion_address)
 
@@ -699,8 +584,8 @@ class TestNativeMessagingHostAddress(unittest.TestCase):
     def test_get_onion_address(self):
         for content, want in [(SITE + "\n", SITE)] + [(v, None) for v in LOOSE]:
             with self.subTest(content=content), \
-                    mock.patch.object(native_messaging_host.subprocess, "run",
-                                      _Recorder(content)):
+                    mock.patch.object(native_messaging_host, "_docker",
+                                      return_value=FakeDocker(_Recorder(content))):
                 self.assertEqual(native_messaging_host.get_onion_address(), want)
 
 
@@ -851,11 +736,17 @@ class TestLaunchers(unittest.TestCase):
         text = _read(rel)
         return "".join(_bash_function(text, n) for n in names)
 
-    def test_vanity_key_dir_is_identical_in_both_launchers(self):
-        bodies = [_bash_function(_read(p), "vanity_key_dir") for p in LAUNCHERS]
-        self.assertEqual(bodies[0], bodies[1])
+    def test_no_bash_key_dir_reader_is_left(self):
+        # The launchers' vanity_key_dir / is_onion_address had no caller
+        # left once the start and the key steps moved to Python (#442,
+        # #524): start.vanity_key_dir is the one reader.
+        for rel in LAUNCHERS:
+            text = _read(rel)
+            for name in ("vanity_key_dir", "is_onion_address"):
+                self.assertNotIn(f"\n{name}() {{", text, rel)
 
     def test_vanity_key_dir_takes_only_a_whole_address(self):
+        from onionpress import start
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         keys = os.path.join(tmp, "shared", "vanity-keys")
@@ -864,52 +755,39 @@ class TestLaunchers(unittest.TestCase):
         os.makedirs(os.path.join(tmp, "elsewhere"))
         os.symlink(os.path.join(tmp, "elsewhere"),
                    os.path.join(keys, "b" * 56 + ".onion"))
-        for rel in LAUNCHERS:
-            fns = self._functions(rel, "is_onion_address", "vanity_key_dir")
-            r = _bash(fns + 'DATA_DIR="$1"; vanity_key_dir', tmp)
-            self.assertEqual((r.returncode, r.stdout), (1, ""), rel)
-            os.makedirs(os.path.join(keys, SITE), exist_ok=True)
-            r = _bash(fns + 'DATA_DIR="$1"; vanity_key_dir', tmp)
-            self.assertEqual((r.returncode, r.stdout.strip()),
-                             (0, os.path.join(keys, SITE)), rel)
-            shutil.rmtree(os.path.join(keys, SITE))
+        self.assertIsNone(start.vanity_key_dir(tmp))
+        os.makedirs(os.path.join(keys, SITE))
+        self.assertEqual(start.vanity_key_dir(tmp), os.path.join(keys, SITE))
 
     def test_no_launcher_picks_a_key_dir_by_suffix(self):
         for rel in LAUNCHERS:
             self.assertNotIn('find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion"',
                              _read(rel), rel)
 
-    def _with_fake_docker(self, rel, fn, content):
-        fns = self._functions(rel, "is_onion_address", fn)
-        script = ('docker() { printf "%s" "$FAKE_HOSTNAME"; }\n'
-                  'DOCKER_DIR="$1"; DATA_DIR="$1"\n' + fns + fn + "\n")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        r = _bash(script, tmp, env={"FAKE_HOSTNAME": content})
-        cache = os.path.join(tmp, "healthcheck-address")
-        return r, (open(cache).read() if os.path.exists(cache) else None)
-
-    def test_get_onion_address(self):
+    def test_no_bash_reader_of_the_site_address_is_left(self):
+        # get_onion_address had no callers; the readers are Python's
+        # (onion_hostname.read_served_address, containers.get_onion_address).
         for rel in LAUNCHERS:
-            r, _ = self._with_fake_docker(rel, "get_onion_address", SITE + "\n")
-            self.assertEqual((r.returncode, r.stdout), (0, SITE + "\n"), rel)
-            for value in LOOSE:
-                with self.subTest(rel=rel, value=value):
-                    r, _ = self._with_fake_docker(rel, "get_onion_address", value)
-                    self.assertEqual((r.returncode, r.stdout), (1, "Generating...\n"))
+            self.assertNotIn("\nget_onion_address() {", _read(rel), rel)
 
-    def test_get_healthcheck_address(self):
+    def test_no_bash_reader_of_the_healthcheck_address_is_left(self):
+        # The reader is start.healthcheck_address (one whole v3 address or
+        # "", cached for the daemon), run by `onionpress wait-for-services`
+        # (#529; tests/test_wait_for_services.py holds it to LOOSE's shape).
         for rel in LAUNCHERS:
-            r, cache = self._with_fake_docker(rel, "get_healthcheck_address", HC + "\n")
-            self.assertEqual((r.returncode, r.stdout, cache), (0, HC + "\n", HC + "\n"), rel)
-            for value in LOOSE:
-                with self.subTest(rel=rel, value=value):
-                    r, cache = self._with_fake_docker(rel, "get_healthcheck_address", value)
-                    self.assertEqual((r.returncode, r.stdout, cache), (1, "", None))
+            self.assertNotIn("\nget_healthcheck_address() {", _read(rel), rel)
+            self.assertNotIn("healthcheck/hostname", _read(rel), rel)
 
     def test_linux_status_carries_only_a_whole_address(self):
-        self.assertIn('is_onion_address "$onion_addr" || onion_addr=""',
-                      _bash_function(_read("linux/onionpress"), "write_status"))
+        # The status is the writer's (onionpress.status_writer, #523), fed
+        # by the daemon on both platforms (#407): the served address read
+        # by onion_hostname's rule, and status.json's address a whole v3
+        # address or nothing.
+        self.assertIn("return onion_hostname.read_served_address(self._docker)",
+                      _read("src/onionpress/daemon.py"))
+        writer = _read("src/onionpress/status_writer.py")
+        self.assertIn('addr = app.onion_address if key_manager.is_valid_onion_address(app.onion_address) else ""',
+                      writer)
 
 
 # ─── WordPress side ─────────────────────────────────────────────────────

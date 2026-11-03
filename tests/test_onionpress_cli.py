@@ -126,55 +126,14 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_regenerate_derivatives.assert_called_once_with()
 
     @mock.patch("onionpress.cli.OnionPressCLI")
-    def test_prune_image_derivatives_command(self, MockCLI):
-        """The Linux launcher's bash create_backup calls this (#257)."""
-        instance = MockCLI.return_value
-        instance.cmd_prune_image_derivatives.return_value = 0
-        self.assertEqual(
-            main(["prune-image-derivatives", "--uploads-dir", "/tmp/stage/uploads"]), 0)
-        instance.cmd_prune_image_derivatives.assert_called_once_with("/tmp/stage/uploads")
-
-    @mock.patch("onionpress.cli.OnionPressCLI")
-    def test_pack_backup_reads_the_password_from_stdin(self, MockCLI):
-        """The Linux launcher's bash create_backup pipes the password in;
-        it never appears in argv."""
-        instance = MockCLI.return_value
-        instance.cmd_pack_backup.return_value = 0
-        with mock.patch("sys.stdin", io.StringIO("s3cret pass\n")):
-            self.assertEqual(main(["pack-backup", "--staging", "/tmp/st",
-                                   "--output", "/tmp/b.zip"]), 0)
-        instance.cmd_pack_backup.assert_called_once_with(
-            "/tmp/st", "/tmp/b.zip", "s3cret pass")
-
-    @mock.patch("onionpress.cli.OnionPressCLI")
-    def test_extract_backup_reads_the_password_from_stdin(self, MockCLI):
-        instance = MockCLI.return_value
-        instance.cmd_extract_backup.return_value = 0
-        with mock.patch("sys.stdin", io.StringIO("s3cret pass")):
-            self.assertEqual(main(["extract-backup", "--archive", "/tmp/b.zip",
-                                   "--dest", "/tmp/out"]), 0)
-        instance.cmd_extract_backup.assert_called_once_with(
-            "/tmp/b.zip", "/tmp/out", "s3cret pass")
-
-    @mock.patch("onionpress.cli.OnionPressCLI")
-    def test_backup_helpers_refuse_an_empty_password(self, MockCLI):
-        instance = MockCLI.return_value
-        for argv in (["pack-backup", "--staging", "/s", "--output", "/o"],
-                     ["extract-backup", "--archive", "/a", "--dest", "/d"]):
-            with self.subTest(argv[0]), \
-                    mock.patch("sys.stdin", io.StringIO("")), \
-                    mock.patch("sys.stderr", io.StringIO()):
-                self.assertEqual(main(argv), 1)
-        instance.cmd_pack_backup.assert_not_called()
-        instance.cmd_extract_backup.assert_not_called()
-
-    @mock.patch("onionpress.cli.OnionPressCLI")
     def test_reset_with_yes(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_reset.return_value = 0
+        instance.paths = mock.Mock(app_bundle="")
         result = main(["reset", "--yes"])
         instance.cmd_reset.assert_called_once_with(
-            yes=True, check=False, json_output=False, confirmed=frozenset())
+            yes=True, check=False, json_output=False, confirmed=frozenset(),
+            os_name=mock.ANY, launcher=mock.ANY)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_check_for_update_default(self, MockCLI):
@@ -286,7 +245,7 @@ class TestCmdGet(unittest.TestCase):
 
     def _cli(self, result):
         from onionpress.config import PortConfig, Secrets
-        with mock.patch("onionpress.cli.detect_port_offset",
+        with mock.patch("onionpress.ports.resolve_at_start",
                         return_value=PortConfig(0, 8080, 9050, 9077)), \
              mock.patch("onionpress.cli.ensure_secrets",
                         return_value=Secrets("p1", "p2", "p3")), \
@@ -376,7 +335,7 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmpdir, True)
         from onionpress.config import PortConfig, Secrets
-        with mock.patch("onionpress.cli.detect_port_offset",
+        with mock.patch("onionpress.ports.resolve_at_start",
                         return_value=PortConfig(0, 8080, 9050, 9077)), \
              mock.patch("onionpress.cli.ensure_secrets",
                         return_value=Secrets("p1", "p2", "p3")), \
@@ -453,42 +412,47 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
 class TestPortOffsetFromTheLauncher(unittest.TestCase):
     """Issue #507: OnionPressCLI ran the bind probe beside this install's
     own running stack, found its ports taken and moved a restore to the
-    next offset. With the launcher's ONIONPRESS_PORT_OFFSET in the
+    next offset. Its ports are now ports.resolve_at_start's (issue #405,
+    the one rule): with the launcher's ONIONPRESS_PORT_OFFSET in the
     environment the CLI takes that, as the daemon and the start steps do;
-    without it the probe decides as before."""
+    without it the running stack's port, else the probe, decides."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-cli-ports-")
         self.addCleanup(shutil.rmtree, self.dir, True)
 
     def _cli(self, env):
-        from onionpress import cli as cli_mod
+        from onionpress import cli as cli_mod, ports
         with mock.patch.dict(os.environ, env, clear=False), \
              mock.patch.object(cli_mod, "Docker"), \
              mock.patch.object(cli_mod, "ContainerManager"), \
-             mock.patch.object(cli_mod, "detect_port_offset") as probe:
-            from onionpress.ports import PortConfig
-            probe.return_value = PortConfig.from_offset(10000)
+             mock.patch.object(ports, "detect_port_offset") as probe, \
+             mock.patch.object(ports, "get_running_wp_port", return_value=None), \
+             mock.patch.object(ports, "wait_for_previous_port") as wait:
+            probe.return_value = ports.PortConfig.from_offset(10000)
             if "ONIONPRESS_PORT_OFFSET" not in env:
                 os.environ.pop("ONIONPRESS_PORT_OFFSET", None)
             c = cli_mod.OnionPressCLI(data_dir=self.dir, app_bundle="")
-        return c, probe
+        return c, probe, wait
 
     def test_a_preset_offset_is_taken_without_the_probe(self):
-        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "35000"})
+        c, probe, wait = self._cli({"ONIONPRESS_PORT_OFFSET": "35000"})
         probe.assert_not_called()
+        wait.assert_not_called()
         self.assertEqual((c.port_config.offset, c.port_config.wp_port), (35000, 43080))
 
     def test_zero_from_the_launcher_counts(self):
-        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "0"})
+        c, probe, _wait = self._cli({"ONIONPRESS_PORT_OFFSET": "0"})
         probe.assert_not_called()
         self.assertEqual(c.port_config.wp_port, 8080)
 
-    def test_without_one_the_probe_decides(self):
-        c, probe = self._cli({})
+    def test_without_one_the_rule_decides(self):
+        c, probe, wait = self._cli({})
         probe.assert_called_once()
+        wait.assert_called_once()
+        self.assertEqual(wait.call_args.args[0], self.dir)
         self.assertEqual(c.port_config.offset, 10000)
-        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "junk"})
+        c, probe, _wait = self._cli({"ONIONPRESS_PORT_OFFSET": "junk"})
         probe.assert_called_once()
 
 

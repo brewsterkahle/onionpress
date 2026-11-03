@@ -10,8 +10,8 @@ to `x'; \\! cmd` for the ALTER USER re-set — gave a root shell in the db
 container.
 
 So the one import, backup.db_import (Phase 4, #120: what
-restore_container_artifacts runs, and what the Linux launcher's db_import
-runs as `onionpress db-import`, the password on stdin's first line), streams
+restore_container_artifacts runs on both platforms; the Linux launcher's
+own db_import went with issue #406), streams
 the dump on stdin (never docker cp'd to a fixed /tmp/wordpress.sql and
 sourced) through a client run with ``--sandbox --binary-mode
 --local-infile=0``, and the password re-set validates its value (no
@@ -34,12 +34,14 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import backup, cli, db_import, wp_files  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 MAC = os.path.join(PROJECT_DIR, "app", "MacOS", "onionpress")
 LINUX = os.path.join(PROJECT_DIR, "linux", "onionpress")
@@ -82,28 +84,15 @@ class TestNoInsecureImportInSources(unittest.TestCase):
         # No `-e 'source ...'` SQL to run a file either.
         self.assertNotRegex(text, r"source\s+/tmp/")
 
-    def test_linux_db_import_is_the_delegation(self):
-        # Phase 4 (#120): the bash body is one line, the password piped in
-        # (never on op_py's argv) and the dump named; the flags, the
-        # capability check and the stream live in backup.db_import only.
-        fn = _shell_function(_read(LINUX), "db_import")
-        self.assertEqual(
-            fn.splitlines()[1:-1],
-            ['    printf \'%s\\n\' "$1" | op_py --data-dir "$DATA_DIR" '
-             'db-import --sql-file "$2"'])
-        for word in ("mariadb", "docker", "--sandbox", "MYSQL_PWD", "cat "):
-            self.assertNotIn(word, fn)
-
-    def test_launcher_restore_calls_db_import(self):
-        self.assertRegex(_read(LINUX), r'db_import "\$db_pass" "\$sql_file"',
-                         f"{LINUX}: restore does not call db_import")
-
-    def test_mac_launcher_imports_no_dump(self):
-        # Its `restore` is onionpress.cli restore (backup.py's sandboxed
-        # import); the launcher's own restore_backup and db_import are gone.
-        text = _read(MAC)
-        self.assertNotIn("db_import", text)
-        self.assertNotRegex(text, r"\bmariadb\b(?! *--sandbox)[^\n]*wordpress\s*$")
+    def test_launchers_import_no_dump(self):
+        # Every restore is onionpress.cli's (backup.py's sandboxed import):
+        # the launchers' own restore_backup and db_import are gone (the
+        # Linux ones with issue #406).
+        for path in (MAC, LINUX):
+            with self.subTest(path):
+                text = _read(path)
+                self.assertNotIn("db_import", text)
+                self.assertNotRegex(text, r"\bmariadb\b(?! *--sandbox)[^\n]*wordpress\s*$")
 
 
 # ── backup.db_import: the one implementation ───────────────────────────────
@@ -134,8 +123,7 @@ class TestDbImport(unittest.TestCase):
 
     def test_streams_the_dump_after_the_password_into_a_sandboxed_client(self):
         runs, fake_run = self._runner()
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            backup.db_import(self.sql, self.PASSWORD)
+        backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertEqual(len(runs), 2, runs)
         probe, (argv, kw) = runs[0][0], runs[1]
         # The capability check comes first, in the db container.
@@ -162,8 +150,8 @@ class TestDbImport(unittest.TestCase):
 
     def test_user_and_database_are_the_callers(self):
         runs, fake_run = self._runner()
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            backup.db_import(self.sql, self.PASSWORD, user="wpu", name="wpdb")
+        backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run),
+                         user="wpu", name="wpdb")
         self.assertEqual(runs[1][0][-3:], ["-u", "wpu", "wpdb"])
 
     def test_timeout_grows_with_the_dump(self):
@@ -171,175 +159,32 @@ class TestDbImport(unittest.TestCase):
         with open(big, "wb") as f:
             f.truncate(64 << 20)
         runs, fake_run = self._runner()
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            backup.db_import(big, self.PASSWORD)
+        backup.db_import(big, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertEqual(runs[1][1]["timeout"],
                          backup._DB_IMPORT_FLOOR_S + (64 << 20) // backup._DB_IMPORT_BYTES_PER_S)
         self.assertGreater(runs[1][1]["timeout"], backup._DB_IMPORT_FLOOR_S)
 
     def test_old_client_is_refused_before_anything_is_sent(self):
         runs, fake_run = self._runner(probe_rc=1)
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            with self.assertRaises(Exception) as cm:
-                backup.db_import(self.sql, self.PASSWORD)
+        with self.assertRaises(Exception) as cm:
+            backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertIn("too old", str(cm.exception).lower())
         self.assertEqual(len(runs), 1, "the import ran against an old client")
 
     def test_a_failed_import_raises_with_the_clients_words(self):
         runs, fake_run = self._runner(import_rc=1, stderr=b"ERROR 1064 near 'x'")
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            with self.assertRaises(Exception) as cm:
-                backup.db_import(self.sql, self.PASSWORD)
+        with self.assertRaises(Exception) as cm:
+            backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertIn("Database import failed", str(cm.exception))
         self.assertIn("ERROR 1064", str(cm.exception))
 
     def test_a_password_that_is_not_one_stdin_line_is_refused(self):
         runs, fake_run = self._runner()
         for bad in ("", "a\nb", "a\rb", "x\n"):
-            with self.subTest(password=bad), \
-                    mock.patch.object(backup.subprocess, "run", fake_run):
+            with self.subTest(password=bad):
                 with self.assertRaises(Exception):
-                    backup.db_import(self.sql, bad)
+                    backup.db_import(self.sql, bad, docker=FakeDocker(fake_run))
         self.assertEqual(runs, [])
-
-
-class TestDbImportSubcommand(unittest.TestCase):
-    """`onionpress db-import --sql-file F`, the Linux launcher's db_import:
-    the password on stdin's first line, exit 0/1, never OnionPressCLI."""
-
-    DUMP = b"SELECT 1;\n"
-    PASSWORD = "Abc123SecretsFilePwXYZ0987654321"
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="db-import-cli-test-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.sql = os.path.join(self.tmp, "wordpress.sql")
-        with open(self.sql, "wb") as f:
-            f.write(self.DUMP)
-
-    def _main(self, stdin, *, probe_rc=0, import_rc=0):
-        import contextlib
-        import io
-        runs = []
-
-        def fake_run(argv, **kw):
-            argv = list(argv)
-            runs.append((argv, kw.get("input")))
-            rc = probe_rc if "grep -q -- --sandbox" in " ".join(argv) else import_rc
-            return subprocess.CompletedProcess(argv, rc, stdout=b"", stderr=b"boom")
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(backup.subprocess, "run", fake_run), \
-                mock.patch.object(cli, "OnionPressCLI") as MockCLI, \
-                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = cli.main(["--data-dir", self.tmp, "db-import", "--sql-file", self.sql])
-        MockCLI.assert_not_called()
-        return rc, runs, err.getvalue()
-
-    def test_imports_with_the_password_from_stdin(self):
-        rc, runs, err = self._main(self.PASSWORD + "\n")
-        self.assertEqual(rc, 0, err)
-        imports = [(a, i) for a, i in runs if _is_import_run(a, i)]
-        self.assertEqual(len(imports), 1, runs)
-        argv, stdin = imports[0]
-        self.assertEqual(stdin, self.PASSWORD.encode() + b"\n" + self.DUMP)
-        for a in argv:
-            self.assertNotIn(self.PASSWORD, a)
-
-    def test_no_password_is_exit_1_without_a_client_run(self):
-        rc, runs, err = self._main("")
-        self.assertEqual(rc, 1)
-        self.assertEqual(runs, [])
-        self.assertIn("ERROR: no database password", err)
-
-    def test_an_old_client_is_exit_1(self):
-        rc, runs, err = self._main(self.PASSWORD + "\n", probe_rc=1)
-        self.assertEqual(rc, 1)
-        self.assertIn("too old", err)
-        self.assertEqual(len(runs), 1)
-
-    def test_a_failed_import_is_exit_1(self):
-        rc, runs, err = self._main(self.PASSWORD + "\n", import_rc=1)
-        self.assertEqual(rc, 1)
-        self.assertIn("ERROR: Database import failed: boom", err)
-
-
-class TestLinuxDelegationEndToEnd(unittest.TestCase):
-    """The Linux launcher's db_import, cut out and run under bash with op_py
-    on this interpreter and a `docker` stub on PATH: the password line and
-    the dump reach the stub's stdin, the flags its argv, and the Python's
-    exit status is the function's."""
-
-    DUMP = b"/*M!999999\\- enable the sandbox mode */\nSELECT 1;\n\x00\xff bin\n"
-    PASSWORD = "p a$s\\w'o\"rd`x"
-
-    DOCKER_STUB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$CALLS"
-case "$*" in
-  *"grep -q -- --sandbox"*) exit "${PROBE_RC:-0}" ;;
-esac
-cat > "$STDIN_FILE"
-exit "${IMPORT_RC:-0}"
-"""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="db-import-bash-test-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.sql = os.path.join(self.tmp, "wordpress.sql")
-        with open(self.sql, "wb") as f:
-            f.write(self.DUMP)
-        self.bindir = os.path.join(self.tmp, "bin")
-        os.makedirs(self.bindir)
-        stub = os.path.join(self.bindir, "docker")
-        with open(stub, "w") as f:
-            f.write(self.DOCKER_STUB)
-        os.chmod(stub, 0o755)
-        self.calls = os.path.join(self.tmp, "calls")
-        self.stdin_file = os.path.join(self.tmp, "stdin")
-
-    def _run(self, **env_extra):
-        script = (
-            "set -u\n"
-            f"DATA_DIR={shlex.quote(os.path.join(self.tmp, 'data'))}\n"
-            f"op_py() {{ PYTHONPATH={shlex.quote(os.path.join(PROJECT_DIR, 'src'))} "
-            f"{shlex.quote(sys.executable)} -m onionpress.cli \"$@\"; }}\n"
-            + _shell_function(_read(LINUX), "db_import") + "\n"
-            f"db_import {shlex.quote(self.PASSWORD)} {shlex.quote(self.sql)}\n"
-            "echo \"rc=$?\"\n")
-        env = dict(os.environ, PATH=self.bindir + os.pathsep + os.environ.get("PATH", ""),
-                   CALLS=self.calls, STDIN_FILE=self.stdin_file,
-                   DOCKER_HOST="unix:///var/empty/no-docker-for-tests.sock", **env_extra)
-        res = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                             env=env, timeout=120)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        return res.stdout.strip().splitlines()[-1], res.stderr
-
-    def test_the_stub_sees_the_password_line_then_the_dump(self):
-        last, err = self._run()
-        self.assertEqual(last, "rc=0", err)
-        with open(self.stdin_file, "rb") as f:
-            self.assertEqual(f.read(), self.PASSWORD.encode() + b"\n" + self.DUMP)
-        with open(self.calls) as f:
-            calls = f.read().splitlines()
-        self.assertEqual(len(calls), 2, calls)
-        self.assertIn("mariadb --help", calls[0])
-        self.assertTrue(calls[1].startswith("exec -i onionpress-db sh -c "), calls[1])
-        self.assertTrue(calls[1].endswith(
-            "mariadb --sandbox --binary-mode --local-infile=0 -u wordpress wordpress"),
-            calls[1])
-        for line in calls:
-            self.assertNotIn(self.PASSWORD, line)
-
-    def test_an_old_client_fails_the_function(self):
-        last, err = self._run(PROBE_RC="1")
-        self.assertEqual(last, "rc=1")
-        self.assertIn("too old", err)
-        self.assertFalse(os.path.exists(self.stdin_file), "the dump was sent anyway")
-
-    def test_a_failed_import_fails_the_function(self):
-        last, err = self._run(IMPORT_RC="1")
-        self.assertEqual(last, "rc=1")
-        self.assertIn("Database import failed", err)
 
 
 # ── backup.py restore behaviour ────────────────────────────────────────────
@@ -382,10 +227,9 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
              mock.patch.object(backup, "_restore_db_password",
                                return_value=self.PASSWORD), \
              mock.patch.object(backup, "_log_workload_stats"), \
-             mock.patch.object(backup, "_ensure_multisite_constants"), \
-             mock.patch.object(backup.subprocess, "run", fake_run):
+             mock.patch.object(backup, "_ensure_multisite_constants"):
             backup.restore_container_artifacts(staging, {}, lambda *a: None,
-                                               hub_volumes=False)
+                                               docker=FakeDocker(fake_run), hub_volumes=False)
         return runs
 
     def test_import_uses_safe_flags_and_streams_on_stdin(self):
@@ -440,11 +284,10 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
              mock.patch.object(backup, "_get_db_credentials",
                                return_value={"name": "wordpress", "user": "wordpress",
                                              "password": "x"}), \
-             mock.patch.object(backup, "_restore_db_password", return_value="x"), \
-             mock.patch.object(backup.subprocess, "run", fake_run):
+             mock.patch.object(backup, "_restore_db_password", return_value="x"):
             with self.assertRaises(Exception) as cm:
                 backup.restore_container_artifacts(staging, {}, lambda *a: None,
-                                                   hub_volumes=False)
+                                                   docker=FakeDocker(fake_run), hub_volumes=False)
         self.assertIn("too old", str(cm.exception).lower())
 
 
@@ -481,23 +324,17 @@ class TestDbValueValidation(unittest.TestCase):
             return _run
 
         # a poisoned DB_PASSWORD (quote) is refused
-        with mock.patch.object(backup.subprocess, "run",
-                               creds_run(["wordpress\n", "wordpress\n",
-                                          "x'; DROP\n"])):
-            with self.assertRaises(Exception):
-                backup._get_db_credentials()
+        with self.assertRaises(Exception):
+            backup._get_db_credentials(FakeDocker(creds_run(["wordpress\n", "wordpress\n",
+                                                             "x'; DROP\n"])))
         # a DB_NAME beginning with '-' is refused
-        with mock.patch.object(backup.subprocess, "run",
-                               creds_run(["-evil\n", "wordpress\n", "ok\n"])):
-            with self.assertRaises(Exception):
-                backup._get_db_credentials()
+        with self.assertRaises(Exception):
+            backup._get_db_credentials(FakeDocker(creds_run(["-evil\n", "wordpress\n", "ok\n"])))
         # legit values pass
-        with mock.patch.object(backup.subprocess, "run",
-                               creds_run(["wordpress\n", "wordpress\n",
-                                          "Abc123\n"])):
-            creds = backup._get_db_credentials()
-            self.assertEqual(creds["name"], "wordpress")
-            self.assertEqual(creds["password"], "Abc123")
+        creds = backup._get_db_credentials(
+            FakeDocker(creds_run(["wordpress\n", "wordpress\n", "Abc123\n"])))
+        self.assertEqual(creds["name"], "wordpress")
+        self.assertEqual(creds["password"], "Abc123")
 
 
 class TestRestoreDbPasswordSource(unittest.TestCase):

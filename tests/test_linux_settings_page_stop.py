@@ -3,11 +3,12 @@
 
 Both go through `onionpress handle-action` to the launcher's own `stop`
 and `restart` cases (tests/test_handle_action.py: `test_stop`,
-`test_restart_applies_config_then_restarts`), and those cases stop the
-heartbeat client before the containers go down (so it sends /offline to
-the OnionHeaven hub) and start it again after a restart. The page used to
-reach only the containers, leaving the heartbeat beating for a site that
-was down.
+`test_restart_applies_config_then_restarts`), and those cases ask the
+daemon for /offline before the containers go down (so the OnionHeaven
+hub hears it while the tor container is still up; issue #407, before
+which the heartbeat client unit was stopped and started around them).
+The page used to reach only the containers, leaving the heartbeat
+beating for a site that was down.
 
 After the page's Stop the `onionpress.service` user unit is still active
 (its `start` process keeps running its status loop and holds the PID
@@ -46,24 +47,22 @@ class TestLinuxLauncherStopAndRestart(unittest.TestCase):
         src = _read("linux/onionpress")
         self.main = src[src.index("\nmain() {"):]
 
-    def test_stop_stops_the_heartbeat_client_before_the_containers(self):
+    def test_stop_asks_the_daemon_offline_before_the_containers(self):
         body = _case(self.main, "stop")
-        self.assertIn("stop_heartbeat_client", body)
-        self.assertLess(body.index("stop_heartbeat_client"), body.index("stop_containers"))
+        self.assertIn("daemon_offline", body)
+        self.assertLess(body.index("daemon_offline"), body.index("stop_containers"))
 
-    def test_restart_stops_and_starts_the_heartbeat_client_around_the_containers(self):
+    def test_restart_asks_offline_then_starts_the_daemon_after_the_containers(self):
         body = _case(self.main, "restart")
-        self.assertLess(body.index("stop_heartbeat_client"), body.index("stop_containers"))
-        self.assertLess(body.index("start_containers"), body.index("start_heartbeat_client"))
+        self.assertLess(body.index("daemon_offline"), body.index("stop_containers"))
+        self.assertLess(body.index("start_containers"), body.index("start_daemon"))
 
-    def test_stop_heartbeat_client_stops_the_user_unit_too(self):
-        # Current installs run the heartbeat as a user unit; an old one as
-        # a system unit. Both are stopped.
+    def test_daemon_offline_is_the_clis(self):
         src = _read("linux/onionpress")
-        fn = src[src.index("\nstop_heartbeat_client() {"):]
+        fn = src[src.index("\ndaemon_offline() {"):]
         fn = fn[:fn.index("\n}\n")]
-        self.assertIn("systemctl --user stop onionpress-heartbeat", fn)
-        self.assertIn("sudo systemctl stop onionpress-heartbeat", fn)
+        self.assertIn('op_py --data-dir "$DATA_DIR" daemon offline', fn)
+        self.assertNotIn("systemctl", fn)
 
     def test_the_page_handler_runs_the_launchers_stop_and_restart(self):
         self.assertIn("stop", handle_action.ACTIONS)

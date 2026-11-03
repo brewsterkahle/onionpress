@@ -40,6 +40,7 @@ sys.path.insert(0, TESTS_DIR)
 
 import onionnames  # noqa: E402
 from onionpress import backup  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 import test_onionhome_registry_volume as vol  # noqa: E402
 
 NAMES_DIR = vol.NAMES_DIR
@@ -139,9 +140,9 @@ class TestRestoreNameRegistry(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="op-names-restore-")
         self.addCleanup(shutil.rmtree, self.root, True)
         self.shim = _TorShim(self, self.root)
-        patcher = mock.patch.object(backup.subprocess, "run", side_effect=self.shim)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # The runner's environment is this process's: the shim runs the
+        # container's commands here.
+        self.docker = FakeDocker(self.shim, env=os.environ)
         self.src = os.path.join(self.root, "staging", "onionhome")
         self.logs = []
 
@@ -150,7 +151,7 @@ class TestRestoreNameRegistry(unittest.TestCase):
         _make_registry(self.shim.names, names=names)
 
     def _restore(self):
-        backup.restore_name_registry(self.src, self.logs.append)
+        backup.restore_name_registry(self.src, self.logs.append, docker=self.docker)
 
     def _assert_container_tmp_cleaned(self):
         self.assertEqual(os.listdir(self.shim.tmp), [])
@@ -290,8 +291,8 @@ class TestRestoreContainerArtifacts(unittest.TestCase):
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
                 stderr="" if kwargs.get("text") else b"")
 
-        with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, {}, logs.append, data_dir=root)
+        backup.restore_container_artifacts(staging, {}, logs.append,
+                                           docker=FakeDocker(run), data_dir=root)
         self.assertTrue([m for m in logs if "ERROR — OnionHome's name registry was not "
                          "restored" in m and "unchanged" in m], logs)
         self.assertFalse([c for c in calls if any(f"onionpress-tor:{NAMES_DIR}" in a
@@ -332,7 +333,7 @@ class TestOnionpressRestore(unittest.TestCase):
                 mock.patch("onionpress.backup.prepare_install_from_backup",
                            return_value=(staging, {"onion_address": ALICE})), \
                 mock.patch("onionpress.backup.restore_staged_name_registry",
-                           side_effect=lambda st, log: order.append(("names", st))), \
+                           side_effect=lambda st, log, **kw: order.append(("names", st))), \
                 mock.patch("onionpress.derivatives.spawn_regeneration"), \
                 mock.patch("sys.stdout"):
             self.assertEqual(me.cmd_restore("pw", "/tmp/b.zip"), 0)
@@ -359,10 +360,9 @@ class TestOnionpressRestore(unittest.TestCase):
                                                         "password": "wp"}), \
                         mock.patch.object(backup, "_restore_db_password",
                                           return_value="wp"), \
-                        mock.patch.object(backup, "_assert_db_client_sandboxed"), \
-                        mock.patch.object(backup.subprocess, "run", return_value=
-                                          subprocess.CompletedProcess([], 0, stdout="", stderr="")):
-                    backup.restore_container_artifacts(staging, {}, logs.append, **kw)
+                        mock.patch.object(backup, "_assert_db_client_sandboxed"):
+                    backup.restore_container_artifacts(staging, {}, logs.append,
+                                                       docker=FakeDocker(), **kw)
                 self.assertEqual(names.called, inline)
                 if not inline:
                     self.assertIn("Restore: OnionHome's name registry is restored once "

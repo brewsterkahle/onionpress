@@ -32,6 +32,9 @@ sys.path.insert(0, SRC)
 
 from onionpress import backup  # noqa: E402
 from onionpress import cli  # noqa: E402
+from onionpress import wp_files  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_docker import FakeDocker  # noqa: E402
 
 LINUX = "linux/onionpress"
 MACOS = "app/MacOS/onionpress"
@@ -84,17 +87,17 @@ class TestCreateBackupWiring(unittest.TestCase):
     def setUp(self):
         self.text = _read(LINUX)
 
-    def test_create_backup_pipes_the_password_to_the_python_verifier(self):
-        body = _function(self.text, "create_backup")
-        self.assertIn(
-            """if ! printf '%s' "$password" | verify_wp_admin_password; then""",
-            body)
-        self.assertNotIn("wp eval", body)
-        self.assertNotIn("wp_check_password", body)
-
     def test_verifier_takes_the_password_on_stdin_only(self):
-        body = _function(self.text, "verify_wp_admin_password")
-        self.assertIn("\n    op_py verify-admin-password\n", body)
+        # The launcher's prompt went with its uninstall (#529): the checks
+        # are scrub._prompt_and_validate_wp_password's, over
+        # backup.verify_wp_admin_password_any (the password reaches PHP on
+        # stdin only); `verify-admin-password` stays a subcommand.
+        self.assertNotIn("verify_wp_admin_password", self.text)
+        self.assertNotIn("verify-admin-password", self.text)
+        import inspect
+        from onionpress import scrub
+        self.assertIn("verify_wp_admin_password_any(pw, docker=docker)",
+                      inspect.getsource(scrub._prompt_and_validate_wp_password))
 
     def test_archive_login_is_the_pythons(self):
         # multisite.fetch_archive_s3_keys (TestArchiveLoginPython) since #442.10.
@@ -131,10 +134,12 @@ class TestNoCodeSplicingInLaunchers(unittest.TestCase):
 
 
 # `docker exec` arguments of a `wp eval` reading stdin, run as www-data
-# (onionpress.wp_files.wp_cli_args).
-WP_EVAL_AS_WWW_DATA = ["exec", "-i", "-u", "www-data", "-e",
-                       "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
-                       "onionpress-wordpress", "wp", "eval"]
+# and offline (onionpress.wp_files.wp_cli_args: the check needs no network).
+WP_EVAL_AS_WWW_DATA = wp_files.wp_cli_args("eval", stdin=True, offline=True)
+assert WP_EVAL_AS_WWW_DATA == ["exec", "-i", "-u", "www-data", "-e",
+                               "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                               "-e", "ONIONPRESS_WP_OFFLINE=1",
+                               "onionpress-wordpress", "wp", "eval"]
 
 
 class _Harness(unittest.TestCase):
@@ -162,9 +167,10 @@ if tool == "docker" and args[:2] == ["exec", "-i"] and args[3:4] == ["curl"]:
 if tool == "docker" and args[:2] in (["image", "inspect"], ["volume", "ls"]):
     sys.exit(0)     # the key helpers' tor image is here; no key volume
 if tool == "docker":
-    if args[:9] == ["exec", "-i", "-u", "www-data", "-e",
-                    "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
-                    "onionpress-wordpress", "wp", "eval"]:
+    if args[:11] == ["exec", "-i", "-u", "www-data", "-e",
+                     "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                     "-e", "ONIONPRESS_WP_OFFLINE=1",
+                     "onionpress-wordpress", "wp", "eval"]:
         if data == os.environ.get("STUB_ACCEPT"):
             print("admin")
             sys.exit(0)
@@ -231,51 +237,6 @@ if tool == "curl":
         return out, made, logged
 
 
-class TestCreateBackupHarness(_Harness):
-
-    # create_backup reads keys out of the volumes with the key helpers, from
-    # the stack's pinned tor image (KEY_HELPER_IMAGE).
-    LINES = ("KEY_HELPER_IMAGE=",)
-    FUNCTIONS = ("op_py", "verify_wp_admin_password", "using_local_images",
-                 "docker_volume_state", "ensure_key_helper_image", "key_volume_cat",
-                 "create_backup")
-    RUN = 'rc=0; create_backup "$PW" "$OUT" || rc=$?; echo "rc=$rc"'
-
-    def _verify_calls(self, made):
-        return [c for c in made if c["tool"] == "docker"
-                and c["argv"][:9] == WP_EVAL_AS_WWW_DATA]
-
-    def test_wrong_password_is_refused_before_anything_else_runs(self):
-        for pw in TRICKY_PASSWORDS:
-            with self.subTest(pw=pw):
-                out, made, logged = self.run_bash(
-                    self.RUN, {"PW": pw, "STUB_ACCEPT": "the-real-password"})
-                self.assertEqual(out.stdout.strip(), "rc=1", out.stderr)
-                self.assertIn("Password does not match any WordPress admin account", logged)
-                self.assertEqual(len(made), 1, made)
-                [call] = self._verify_calls(made)
-                self.assertEqual(call["stdin"], pw)
-
-    def test_password_is_stdin_only_and_the_php_never_changes(self):
-        php = set()
-        for pw in TRICKY_PASSWORDS:
-            with self.subTest(pw=pw):
-                out, made, logged = self.run_bash(
-                    self.RUN, {"PW": pw, "STUB_ACCEPT": pw})
-                self.assertIn("Backup: password verified", logged, out.stderr)
-                [call] = self._verify_calls(made)
-                self.assertEqual(call["stdin"], pw)
-                php.add(call["argv"][9])
-                for c in made:
-                    for arg in c["argv"]:
-                        self.assertNotIn(pw, arg, f"password in argv: {c['argv']}")
-                # The stub fails the database dump, which ends the run there.
-                self.assertIn("ERROR: Database export failed", logged)
-                self.assertEqual(out.stdout.strip(), "rc=1")
-        self.assertEqual(len(php), 1, php)
-        self.assertIn("php://stdin", php.pop())
-
-
 class TestArchiveLoginPython(unittest.TestCase):
     """The terminal setup's archive.org login is multisite.fetch_archive_s3_keys
     since #442.10 (Linux's bash fetch_archive_s3_keys is gone): the form,
@@ -286,10 +247,10 @@ class TestArchiveLoginPython(unittest.TestCase):
         from onionpress import multisite
         answer = json.dumps({"success": True, "values": {"s3": {"access": "AK", "secret": "SK"}}})
         for pw in TRICKY_PASSWORDS:
-            with self.subTest(pw=pw), mock.patch.object(
-                    multisite.subprocess, "run",
-                    return_value=subprocess.CompletedProcess([], 0, answer, "")) as run:
-                keys = multisite.fetch_archive_s3_keys("o'brien@example.org", pw)
+            run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, answer, ""))
+            with self.subTest(pw=pw):
+                keys = multisite.fetch_archive_s3_keys("o'brien@example.org", pw,
+                                                       docker=FakeDocker(run))
                 self.assertEqual(keys, {"access": "AK", "secret": "SK"})
                 argv = run.call_args.args[0]
                 self.assertEqual(argv[1:5], ["exec", "-i", "onionheaven", "curl"])
@@ -309,15 +270,14 @@ class TestPythonVerifierInput(unittest.TestCase):
             seen.append((argv, kwargs))
             return subprocess.CompletedProcess(argv, 0, "admin\n", "")
 
-        with mock.patch("onionpress.backup.subprocess.run", side_effect=fake_run):
-            for pw in TRICKY_PASSWORDS:
-                ok, user = backup.verify_wp_admin_password_any(pw)
-                self.assertEqual((ok, user), (True, "admin"))
-        php = {argv[10] for argv, _ in seen}
+        for pw in TRICKY_PASSWORDS:
+            ok, user = backup.verify_wp_admin_password_any(pw, docker=FakeDocker(fake_run))
+            self.assertEqual((ok, user), (True, "admin"))
+        php = {argv[12] for argv, _ in seen}
         self.assertEqual(len(php), 1, "the PHP source must not vary with the password")
         for (argv, kwargs), pw in zip(seen, TRICKY_PASSWORDS):
             # wp-cli as www-data, never as root.
-            self.assertEqual(argv[:10], ["docker"] + WP_EVAL_AS_WWW_DATA)
+            self.assertEqual(argv[:12], ["docker"] + WP_EVAL_AS_WWW_DATA)
             self.assertEqual(kwargs["input"], pw)
             for arg in argv:
                 self.assertNotIn(pw, arg)
@@ -330,7 +290,7 @@ class TestPythonVerifierInput(unittest.TestCase):
                     mock.patch("onionpress.backup.verify_wp_admin_password_any",
                                return_value=(True, "admin")) as verify:
                 self.assertEqual(cli.main(["verify-admin-password"]), 0)
-                verify.assert_called_once_with(pw)
+                verify.assert_called_once_with(pw, docker=mock.ANY)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_cli_rejects_an_empty_password_without_asking_wordpress(self, _cli):

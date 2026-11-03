@@ -132,7 +132,15 @@ class MacPowerHandler:
 
     ``on_has_powered_on`` is invoked when the system has finished waking
     up. No timing constraint; just routine wake-handling.
+
+    ``run_loop_once``, ``stop`` and ``OFFLINE_MAX_TIME`` are the interface
+    onionpress.power.LogindPowerHandler shares, so the daemon drives
+    either the same way (issue #407).
     """
+
+    # The /offline inside the will-sleep window may take this long: IOKit
+    # allows ~30 s; 5 s has always been the budget.
+    OFFLINE_MAX_TIME = 5
 
     def __init__(self, on_will_sleep, on_has_powered_on, log=print):
         self._on_will_sleep = on_will_sleep
@@ -208,6 +216,20 @@ class MacPowerHandler:
         except Exception as e:
             self._log(f"MacPowerHandler: register failed: {e}")
             return False
+
+    def run_loop_once(self, seconds: float) -> bool:
+        """Turn the main thread's CFRunLoop (the module's run_loop_once)
+        so the callbacks fire; False when the frameworks are not loaded."""
+        return run_loop_once(seconds)
+
+    def stop(self) -> None:
+        """Deregister (the daemon's shutdown); best effort."""
+        if _iokit is None or not self._root_port.value:
+            return
+        try:
+            _iokit.IODeregisterForSystemPower(byref(self._notifier))
+        except Exception:
+            pass
 
     def _dispatch(self, refcon, service, message_type, message_arg):
         """C callback. Runs on the main run loop, synchronous to IOKit."""

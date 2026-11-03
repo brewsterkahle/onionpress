@@ -164,8 +164,10 @@ class TestCensus(unittest.TestCase):
         mac = _read("app/MacOS/onionpress")
         self.assertIn('[[ "$_vm_mem_kb" =~ ^[0123456789]{1,12}$ ]] || _vm_mem_kb=0', mac)
         self.assertIn('[[ "$_vm_cpus" =~ ^[0123456789]{1,6}$ ]] || _vm_cpus=0', mac)
-        self.assertIn('[[ "$started_epoch" =~ ^[0123456789]{1,12}$ ]] || started_epoch=0',
-                      _read("linux/onionpress"))
+        # Linux's one (write_status's uptime from docker inspect's StartedAt)
+        # went with the bash into onionpress.status_writer (#523), where
+        # tests/test_status_writer.py holds the hostile value to 0.
+        self.assertNotIn("started_epoch", _read("linux/onionpress"))
 
 
 # --- the guarded block under bash ---------------------------------------
@@ -176,15 +178,6 @@ def _mac_vm_block():
     text = _read("app/MacOS/onionpress")
     start = text.index("                _vm_mem_kb=$(docker exec onionpress-tor awk")
     end_marker = "|| _vm_cpus=0\n"
-    end = text.index(end_marker, start) + len(end_marker)
-    return text[start:end]
-
-
-def _linux_uptime_block():
-    """write_status's uptime from docker inspect's StartedAt."""
-    text = _read("linux/onionpress")
-    start = text.index("    local uptime_seconds=0\n    local started_at\n")
-    end_marker = "            uptime_seconds=$((now_epoch - started_epoch))\n        fi\n    fi\n"
     end = text.index(end_marker, start) + len(end_marker)
     return text[start:end]
 
@@ -257,13 +250,6 @@ class TestGuardedBlocksUnderBash(unittest.TestCase):
                 out = self._run(_mac_vm_block(), answer,
                                 'echo "mem=$_vm_mem_gb cpus=$_vm_cpus"\n')
                 self.assertEqual(out, "mem=0 cpus=0\n")
-
-    @unittest.skipUnless(shutil.which("date"), "needs date")
-    def test_hostile_started_at_on_linux(self):
-        out = self._run(_linux_uptime_block(), HOSTILE,
-                        'echo "uptime=$uptime_seconds"\n')
-        self.assertFalse(os.path.exists(self.pwned))
-        self.assertEqual(out, "uptime=0\n")
 
 
 if __name__ == "__main__":

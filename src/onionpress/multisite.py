@@ -9,16 +9,20 @@ Step order matters — see `provision_post_install` for the rationale.
 Each individual step is also exposed as a top-level function so callers
 that already have part of the state (e.g. `start_containers` after a
 restore) can invoke just the steps they need.
+
+Every step takes *docker*, the caller's onionpress.docker.Docker (the one
+runner, issue #477): wp-cli through its wp(), the files through wp_files'
+put_file / put_tree / own, root's shell commands through its exec().
 """
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 from typing import Callable, Optional
 
 from . import onion_hostname, wp_files
+from .wp_files import WP_CONTAINER
 
 
 # Files installed into the WordPress container by install_multisite_domain_map.
@@ -138,14 +142,16 @@ RewriteRule . index.php [L]
 
 def _wp(
     *args,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 60,
     input: Optional[str] = None,
     offline: bool = True,
-) -> subprocess.CompletedProcess:
+):
     """Run wp-cli inside the onionpress-wordpress container, as www-data
-    (wp_files.wp_cli_args). With *input*, `docker exec -i` and *input* on
-    wp-cli's stdin.
+    (docker.wp, the one front end: *docker* is the caller's
+    onionpress.docker.Docker). With *input*, `docker exec -i` and *input*
+    on wp-cli's stdin. The DockerResult: a timeout is a failed one, its
+    stderr naming no argv.
 
     *offline* (the default: nothing here needs the network) holds every
     outbound request of the WordPress it loads (wp_files.OFFLINE_ENV, read
@@ -153,22 +159,17 @@ def _wp(
     wp_update_themes(), an update check through Tor; with Tor down each
     such request hung until the proxy's timeout, the call expired, and the
     start reported provision-post-install failed (issue #373)."""
-    return wp_files.wp_cli(*args, docker_bin=docker_bin, input=input,
-                           timeout=timeout, offline=offline)
+    return docker.wp(*args, input=input, timeout=timeout, offline=offline, quiet=True)
 
 
 def _exec_sh(
     command: str,
     *,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 30,
-) -> subprocess.CompletedProcess:
-    """Run a shell command inside the WordPress container."""
-    return subprocess.run(
-        [docker_bin, "exec", "onionpress-wordpress", "sh", "-c", command],
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
-    )
+):
+    """Run a shell command inside the WordPress container, as root."""
+    return docker.exec(WP_CONTAINER, command, timeout=timeout, quiet=True)
 
 
 # Everything below is handed to the container as www-data (wp_files), never
@@ -181,79 +182,65 @@ def _put_data(
     dest: str,
     data,
     *,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 60,
-) -> subprocess.CompletedProcess:
+):
     """Write *data* (str or bytes) to *dest* in the WordPress container, as
-    www-data, mode 644 (Apache and PHP run as www-data). stderr is text."""
-    if isinstance(data, bytes):
-        data = data.decode("utf-8", errors="surrogateescape")
-    return subprocess.run(
-        [docker_bin] + wp_files.put_file_args(dest, "644"),
-        input=data, capture_output=True, text=True,
-        encoding="utf-8", errors="surrogateescape", timeout=timeout,
-    )
+    www-data, mode 644 (Apache and PHP run as www-data)."""
+    return wp_files.put_file(dest, data, "644", docker=docker, timeout=timeout)
 
 
 def _put_file(
     src: str,
     dest: str,
     *,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 60,
-) -> subprocess.CompletedProcess:
+):
     """Write the host file *src* to *dest* in the WordPress container, as
     www-data, mode 644."""
     with open(src, "rb") as f:
         data = f.read()
-    return _put_data(dest, data, docker_bin=docker_bin, timeout=timeout)
+    return _put_data(dest, data, docker=docker, timeout=timeout)
 
 
 def _own(
     path: str,
     *,
     recursive: bool = False,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 600,
-) -> subprocess.CompletedProcess:
+):
     """Give *path* (and, *recursive*, all below it) to www-data, as root,
-    following no link (wp_files.own_args)."""
-    return subprocess.run(
-        [docker_bin] + wp_files.own_args(path, recursive),
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
-    )
+    following no link (wp_files.own)."""
+    return wp_files.own(path, recursive, docker=docker, timeout=timeout)
 
 
 def _put_tree(
     src: str,
     dest: str,
     *,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 120,
-) -> subprocess.CompletedProcess:
+):
     """Replace the folder *dest* in the WordPress container with the host
     folder *src*, as www-data."""
-    return wp_files.put_tree(src, dest, docker_bin=docker_bin, timeout=timeout)
+    return wp_files.put_tree(src, dest, docker=docker, timeout=timeout)
 
 
 def _exec_www_data(
     command: str,
     *,
-    docker_bin: str = "docker",
+    docker,
     timeout: int = 30,
-) -> subprocess.CompletedProcess:
+):
     """Run a shell command inside the WordPress container as www-data."""
-    return subprocess.run(
-        [docker_bin] + wp_files.exec_args("sh", "-c", command),
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
-    )
+    return docker.run(wp_files.exec_args("sh", "-c", command), timeout=timeout, quiet=True)
 
 
-def wp_is_installed(docker_bin: str = "docker") -> bool:
+def wp_is_installed(docker) -> bool:
     """True iff `wp core is-installed` succeeds."""
-    return _wp("core", "is-installed", docker_bin=docker_bin).returncode == 0
+    return _wp("core", "is-installed", docker=docker).returncode == 0
 
 
 def _noop_log(_msg: str) -> None:
@@ -262,7 +249,7 @@ def _noop_log(_msg: str) -> None:
 
 def ensure_multisite(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Convert single-site WordPress to multisite if it isn't already.
@@ -270,12 +257,12 @@ def ensure_multisite(
     True on success (or when the work was already done).
     """
     log = log_func or _noop_log
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         log("WordPress not installed yet -- skipping multisite check")
         return True
 
     already = _wp(
-        "core", "is-installed", "--network", docker_bin=docker_bin)
+        "core", "is-installed", "--network", docker=docker)
     if already.returncode == 0:
         log("WordPress multisite already active")
         return True
@@ -284,7 +271,7 @@ def ensure_multisite(
     r = _wp(
         "core", "multisite-convert",
         "--url=http://localhost",
-        docker_bin=docker_bin, timeout=120,
+        docker=docker, timeout=120,
     )
     if r.returncode != 0:
         log(f"WARNING: wp core multisite-convert failed: {r.stderr.strip()[:200]}")
@@ -295,7 +282,7 @@ def ensure_multisite(
         _wp(
             "config", "set", name, value,
             "--raw", "--type=constant",
-            docker_bin=docker_bin,
+            docker=docker,
         )
 
     log("WordPress multisite conversion complete")
@@ -305,7 +292,7 @@ def ensure_multisite(
 def install_multisite_domain_map(
     *,
     plugins_dir: str,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Copy sunrise.php, write the multisite .htaccess, and install all
@@ -321,7 +308,7 @@ def install_multisite_domain_map(
     # tables (which only happens AFTER ensure_multisite), the next
     # `wp core install` itself errors out trying to load sunrise.php,
     # leaving an unrecoverable install (#284).
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         log("WordPress not installed yet -- skipping sunrise.php install")
         return False
 
@@ -331,7 +318,7 @@ def install_multisite_domain_map(
         cp = _put_file(
             sunrise_src,
             "/var/www/html/wp-content/sunrise.php",
-            docker_bin=docker_bin,
+            docker=docker,
         )
         if cp.returncode == 0:
             # Ensure SUNRISE constant is in wp-config.php (required for
@@ -339,7 +326,7 @@ def install_multisite_domain_map(
             _wp(
                 "config", "set", "SUNRISE", "true",
                 "--raw", "--type=constant",
-                docker_bin=docker_bin,
+                docker=docker,
             )
             log("sunrise.php installed")
         else:
@@ -347,7 +334,7 @@ def install_multisite_domain_map(
 
     # 2. .htaccess (body: HTACCESS_BODY at module scope).
     r = _put_data("/var/www/html/.htaccess", HTACCESS_BODY,
-                  docker_bin=docker_bin)
+                  docker=docker)
     if r.returncode == 0:
         log(".htaccess multisite rewrite rules installed")
     else:
@@ -355,10 +342,10 @@ def install_multisite_domain_map(
 
     # 3. mu-plugins directory + each plugin. Root's mkdir made the folder
     # root's in older versions, where www-data could not add a file.
-    _own("/var/www/html/wp-content/mu-plugins", docker_bin=docker_bin)
+    _own("/var/www/html/wp-content/mu-plugins", docker=docker)
     _exec_www_data(
         "mkdir -p /var/www/html/wp-content/mu-plugins",
-        docker_bin=docker_bin,
+        docker=docker,
     )
     for plugin in MU_PLUGINS:
         src = os.path.join(plugins_dir, plugin)
@@ -367,7 +354,7 @@ def install_multisite_domain_map(
         cp = _put_file(
             src,
             f"/var/www/html/wp-content/mu-plugins/{plugin}",
-            docker_bin=docker_bin,
+            docker=docker,
         )
         if cp.returncode == 0:
             log(f"{plugin} mu-plugin installed")
@@ -383,7 +370,7 @@ def install_multisite_domain_map(
         cp = _put_file(
             src,
             f"/var/www/html/wp-content/mu-plugins/{asset}",
-            docker_bin=docker_bin,
+            docker=docker,
         )
         if cp.returncode == 0:
             log(f"{asset} installed")
@@ -397,7 +384,7 @@ def install_onionpress_theme(
     *,
     themes_dir: str,
     plugins_dir: str,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Install the OnionPress theme + the hit-counter and creations
@@ -405,7 +392,7 @@ def install_onionpress_theme(
     twentytwenty* default; leaves user-chosen themes alone.
     """
     log = log_func or _noop_log
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         return True
 
     # 1. Theme. _put_tree replaces the folder whole (a copy into an
@@ -415,7 +402,7 @@ def install_onionpress_theme(
         cp = _put_tree(
             theme_src,
             "/var/www/html/wp-content/themes/onionpress",
-            docker_bin=docker_bin,
+            docker=docker,
         )
         if cp.returncode == 0:
             log("OnionPress theme installed")
@@ -424,7 +411,7 @@ def install_onionpress_theme(
                 "theme", "list",
                 "--status=active",
                 "--field=name",
-                docker_bin=docker_bin,
+                docker=docker,
             )
             current_theme = (current.stdout or "").strip().split("\n")[0]
             if current_theme == "onionpress":
@@ -432,7 +419,7 @@ def install_onionpress_theme(
             elif current_theme.startswith("twentytwenty") or current_theme == "":
                 act = _wp(
                     "theme", "activate", "onionpress",
-                    docker_bin=docker_bin,
+                    docker=docker,
                 )
                 if act.returncode == 0:
                     log("OnionPress theme activated")
@@ -446,7 +433,7 @@ def install_onionpress_theme(
             _wp(
                 "theme", "enable", "onionpress",
                 "--network",
-                docker_bin=docker_bin,
+                docker=docker,
             )
         else:
             log("WARNING: Failed to copy OnionPress theme")
@@ -459,12 +446,12 @@ def install_onionpress_theme(
         cp = _put_tree(
             src,
             f"/var/www/html/wp-content/plugins/{plugin}",
-            docker_bin=docker_bin,
+            docker=docker,
         )
         if cp.returncode != 0:
             log(f"WARNING: Failed to copy {plugin}")
             continue
-        act = _wp("plugin", "activate", plugin, docker_bin=docker_bin)
+        act = _wp("plugin", "activate", plugin, docker=docker)
         if act.returncode == 0:
             log(f"{plugin} plugin installed and activated")
         else:
@@ -475,7 +462,7 @@ def install_onionpress_theme(
 
 def fix_onionpress_permissions(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Ensure the shared `/var/lib/onionpress/` volume is owned by www-data
@@ -494,7 +481,7 @@ def fix_onionpress_permissions(
         "find /var/lib/onionpress -maxdepth 0 -exec chown www-data:www-data {} + && "
         "find /var/lib/onionpress -mindepth 1 -maxdepth 1 ! -name onionheaven "
         "-exec chown -R www-data:www-data {} +",
-        docker_bin=docker_bin,
+        docker=docker,
     )
     if r.returncode == 0:
         log("Onionpress data directory permissions fixed")
@@ -506,7 +493,7 @@ def fix_onionpress_permissions(
 
 def fix_wordpress_uploads_permissions(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Ensure `wp-content/uploads` is owned by www-data so the multisite
@@ -518,11 +505,11 @@ def fix_wordpress_uploads_permissions(
     log = log_func or _noop_log
     r = _exec_www_data(
         "mkdir -p /var/www/html/wp-content/uploads",
-        docker_bin=docker_bin,
+        docker=docker,
     )
     if r.returncode == 0:
         r = _own("/var/www/html/wp-content/uploads", recursive=True,
-                 docker_bin=docker_bin)
+                 docker=docker)
     if r.returncode == 0:
         log("WordPress uploads directory permissions fixed")
         return True
@@ -533,7 +520,7 @@ def fix_wordpress_uploads_permissions(
 
 def write_shared_onion_address(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Copy the tor container's hostname file into the shared volume so WP
@@ -547,13 +534,13 @@ def write_shared_onion_address(
     any file in the tor container (its onion service key, say).
     """
     log = log_func or _noop_log
-    addr = onion_hostname.read_served_address_with(docker_bin, timeout=15)
+    addr = onion_hostname.read_served_address(docker, timeout=15)
     content = addr + "\n" if addr else None
     if content is None:
         # Caller may not care — this can fail benignly when tor isn't up yet.
         return False
     r = _put_data(wp_files.ONION_ADDRESS_FILE, content,
-                  docker_bin=docker_bin, timeout=15)
+                  docker=docker, timeout=15)
     if r.returncode == 0:
         log("Onion address written to shared volume")
         return True
@@ -608,16 +595,16 @@ IA_CONFIG_MARKER = "onionpress_link_fixer_config"
 IA_CONFIG_VERSION = "1"
 
 
-def _in_container(path: str, *, docker_bin: str = "docker") -> bool:
+def _in_container(path: str, *, docker) -> bool:
     """Is *path* a file in the WordPress container? Looked at as www-data,
     whose folders these are."""
-    return _exec_www_data(f"test -f '{path}'", docker_bin=docker_bin).returncode == 0
+    return _exec_www_data(f"test -f '{path}'", docker=docker).returncode == 0
 
 
-def site_urls(*, docker_bin: str = "docker") -> list:
+def site_urls(*, docker) -> list:
     """Every site's URL on a multisite; [None] on a single site (or when
     the list cannot be had), meaning: run without --url."""
-    r = _wp("site", "list", "--field=url", docker_bin=docker_bin)
+    r = _wp("site", "list", "--field=url", docker=docker)
     urls = [u.strip() for u in (r.stdout or "").splitlines() if u.strip()]
     if r.returncode != 0 or not urls:
         return [None]
@@ -626,7 +613,7 @@ def site_urls(*, docker_bin: str = "docker") -> list:
 
 def configure_ia_plugin(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Configure the Internet Archive Wayback Machine Link Fixer in every
@@ -646,28 +633,28 @@ def configure_ia_plugin(
     not activate the plugin without it.
     """
     log = log_func or _noop_log
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         return True
-    if not _in_container(f"{WP_PLUGINS_DIR}/{IA_PLUGIN}", docker_bin=docker_bin):
+    if not _in_container(f"{WP_PLUGINS_DIR}/{IA_PLUGIN}", docker=docker):
         return True  # Plugin not installed; nothing to configure
     if not _in_container(f"{WP_MU_PLUGINS_DIR}/{IA_POLICY_MU_PLUGIN}",
-                         docker_bin=docker_bin):
+                         docker=docker):
         log(f"WARNING: {IA_POLICY_MU_PLUGIN} is not installed — "
             "not setting up the Internet Archive Link Fixer without it")
         return False
 
     ok = True
-    for url in site_urls(docker_bin=docker_bin):
-        ok = _configure_ia_site(url, docker_bin=docker_bin, log=log) and ok
+    for url in site_urls(docker=docker):
+        ok = _configure_ia_site(url, docker=docker, log=log) and ok
     return ok
 
 
-def _configure_ia_site(url: Optional[str], *, docker_bin: str, log) -> bool:
+def _configure_ia_site(url: Optional[str], *, docker, log) -> bool:
     where = [f"--url={url}"] if url else []
     site = url or "the site"
 
     def wp(*args):
-        return _wp(*args, *where, docker_bin=docker_bin)
+        return _wp(*args, *where, docker=docker)
 
     done = wp("option", "get", IA_CONFIG_MARKER)
     if done.returncode == 0 and done.stdout.strip() == IA_CONFIG_VERSION:
@@ -711,7 +698,7 @@ def _configure_ia_site(url: Optional[str], *, docker_bin: str, log) -> bool:
 
 def configure_cache_enabler(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Prepare Cache Enabler's activation (setup_bundled_plugins runs this
@@ -726,21 +713,21 @@ def configure_cache_enabler(
     at every start. True when there is nothing to do.
     """
     log = log_func or _noop_log
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         return True
     if not _in_container(f"{WP_PLUGINS_DIR}/{CACHE_ENABLER_PLUGIN}",
-                         docker_bin=docker_bin):
+                         docker=docker):
         return True
     if not _in_container(f"{WP_MU_PLUGINS_DIR}/{CACHE_POLICY_MU_PLUGIN}",
-                         docker_bin=docker_bin):
+                         docker=docker):
         log(f"WARNING: {CACHE_POLICY_MU_PLUGIN} is not installed — "
             "not setting up Cache Enabler without it")
         return False
-    current = _wp("config", "get", "FS_METHOD", docker_bin=docker_bin)
+    current = _wp("config", "get", "FS_METHOD", docker=docker)
     if current.returncode == 0 and current.stdout.strip() == "direct":
         return True
     r = _wp("config", "set", "FS_METHOD", "direct", "--type=constant",
-            docker_bin=docker_bin)
+            docker=docker)
     if r.returncode != 0:
         log(f"WARNING: Failed to set FS_METHOD=direct: {r.stderr.strip()[:200]}")
         return False
@@ -750,7 +737,7 @@ def configure_cache_enabler(
 
 def apply_cache_policy(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """After Cache Enabler is activated: validate every site's settings
@@ -762,14 +749,14 @@ def apply_cache_policy(
     command fails; the files are left as they are then.
     """
     log = log_func or _noop_log
-    r = _wp("onionpress-cache-policy", "apply", docker_bin=docker_bin, timeout=120)
+    r = _wp("onionpress-cache-policy", "apply", docker=docker, timeout=120)
     if r.returncode != 0:
         log(f"WARNING: Cache Enabler settings not checked: "
             f"{(r.stderr or r.stdout).strip()[:200]}")
         return False
     r = _exec_www_data(
         f"rm -f {CACHE_ENABLER_SETTINGS_DIR}/*.php && rm -rf {CACHE_ENABLER_CACHE_DIR}",
-        docker_bin=docker_bin, timeout=300,
+        docker=docker, timeout=300,
     )
     if r.returncode != 0:
         log(f"WARNING: Cache Enabler's stored pages not cleared: {r.stderr.strip()[:200]}")
@@ -780,7 +767,7 @@ def apply_cache_policy(
 
 def deactivate_wp_statistics(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Remove the WP-Statistics plugin if it's present. It phoned home
@@ -789,16 +776,16 @@ def deactivate_wp_statistics(
     (onionpress-hit-counter) that doesn't talk to anyone.
     """
     log = log_func or _noop_log
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         return True
     plugin_file = "/var/www/html/wp-content/plugins/wp-statistics/wp-statistics.php"
     if _exec_sh(f"test -f {plugin_file}",
-                docker_bin=docker_bin).returncode != 0:
+                docker=docker).returncode != 0:
         return True  # Not present; nothing to do
 
     log("Removing WP-Statistics plugin (clearnet leak — replaced by built-in hit counter)...")
-    _wp("plugin", "deactivate", "wp-statistics", "--network", docker_bin=docker_bin)
-    _wp("plugin", "delete", "wp-statistics", docker_bin=docker_bin)
+    _wp("plugin", "deactivate", "wp-statistics", "--network", docker=docker)
+    _wp("plugin", "delete", "wp-statistics", docker=docker)
     log("WP-Statistics plugin removed")
     return True
 
@@ -823,17 +810,18 @@ def fetch_archive_s3_keys(
     email: str,
     password: str,
     *,
-    docker_bin: str = "docker",
-    env: Optional[dict] = None,
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Log in to archive.org and return its S3 keys as
     {"access": ..., "secret": ...}, or None (logged) on any failure.
 
-    The one archive.org login on the Mac: first-run setup (onion_proxy)
-    and the per-launch reconcile (ensure_archive_s3_keys) both come here,
-    so they cannot drift apart again (issue #322: setup went to clearnet
-    archive.org and could fail where the reconcile succeeded).
+    The one archive.org login: first-run setup (onion_proxy), the
+    per-launch reconcile (ensure_archive_s3_keys) and the Settings page's
+    login (handle_action's archive-login, issue #528; the page logged in
+    from WordPress until then) all come here, so they cannot drift apart
+    again (issue #322: setup went to clearnet archive.org and could fail
+    where the reconcile succeeded).
 
     POSTs to archive.org's onion (NOT clearnet), from inside the
     onionheaven container through its Tor SOCKS port: clearnet archive.org
@@ -845,78 +833,69 @@ def fetch_archive_s3_keys(
 
     The login form and the session cookie go to curl on stdin
     (docker exec -i, --data-binary @- / -H @-): argv is visible to every
-    local user (ps), and a TimeoutExpired's message quotes it.
+    local user (ps). Through *docker* (the caller's Docker), whose
+    results name no argv either.
     """
     import urllib.parse
 
     log = log_func or _noop_log
-    try:
-        login = subprocess.run(
-            [docker_bin, "exec", "-i", "onionheaven",
-             "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
-             "--max-time", "60", "-X", "POST",
-             "--data-binary", "@-",
-             _ARCHIVE_ONION + "/services/xauthn/?op=login"],
-            input=urllib.parse.urlencode({"email": email, "password": password}),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=75, env=env,
-        )
-        if login.returncode != 0 or not login.stdout:
-            log("WARNING: Could not reach archive.org onion to fetch S3 keys")
-            return None
-        try:
-            body = json.loads(login.stdout)
-        except json.JSONDecodeError:
-            body = None
-        if not isinstance(body, dict):
-            log("WARNING: archive.org login returned non-JSON")
-            return None
-        values = body.get("values") or {}
-        if not body.get("success"):
-            log(f"WARNING: archive.org login failed: {values.get('reason', 'unknown')}")
-            return None
 
-        s3 = values.get("s3") or {}
-        access = s3.get("access", "")
-        secret = s3.get("secret", "")
-        if access and secret:
-            return {"access": access, "secret": secret}
+    def curl(*args, input):
+        return docker.run(["exec", "-i", "onionheaven",
+                           "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
+                           "--max-time", "60", *args],
+                          input=input, timeout=75, quiet=True)
 
-        # No keys in the login response: fetch them with its session cookie.
-        cookies = values.get("cookies") or {}
-        sig = cookies.get("logged-in-sig", "")
-        user = cookies.get("logged-in-user", "")
-        if sig and user:
-            page = subprocess.run(
-                [docker_bin, "exec", "-i", "onionheaven",
-                 "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
-                 "--max-time", "60",
-                 "-H", "@-",
-                 _ARCHIVE_ONION + "/account/s3.php?output_json=1"],
-                input=f"Cookie: logged-in-sig={sig}; logged-in-user={user}\n",
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=75, env=env,
-            )
-            try:
-                key = json.loads(page.stdout).get("key") if page.returncode == 0 else None
-            except (json.JSONDecodeError, AttributeError):
-                key = None
-            if isinstance(key, dict) and key.get("s3accesskey") and key.get("s3secretkey"):
-                return {"access": key["s3accesskey"], "secret": key["s3secretkey"]}
-        log("WARNING: archive.org login succeeded but S3 keys were empty")
-        return None
-    except subprocess.TimeoutExpired:
+    login = curl("-X", "POST", "--data-binary", "@-",
+                 _ARCHIVE_ONION + "/services/xauthn/?op=login",
+                 input=urllib.parse.urlencode({"email": email, "password": password}))
+    if login.timed_out:
         log("WARNING: archive.org login timed out")
         return None
-    except (subprocess.SubprocessError, OSError) as e:
-        # Not {e}: a subprocess error's message quotes the argv.
-        log(f"WARNING: archive.org S3 key fetch failed: {type(e).__name__}")
+    if login.returncode != 0 or not login.stdout:
+        log("WARNING: Could not reach archive.org onion to fetch S3 keys")
         return None
+    try:
+        body = json.loads(login.stdout)
+    except json.JSONDecodeError:
+        body = None
+    if not isinstance(body, dict):
+        log("WARNING: archive.org login returned non-JSON")
+        return None
+    values = body.get("values") or {}
+    if not body.get("success"):
+        log(f"WARNING: archive.org login failed: {values.get('reason', 'unknown')}")
+        return None
+
+    s3 = values.get("s3") or {}
+    access = s3.get("access", "")
+    secret = s3.get("secret", "")
+    if access and secret:
+        return {"access": access, "secret": secret}
+
+    # No keys in the login response: fetch them with its session cookie.
+    cookies = values.get("cookies") or {}
+    sig = cookies.get("logged-in-sig", "")
+    user = cookies.get("logged-in-user", "")
+    if sig and user:
+        page = curl("-H", "@-", _ARCHIVE_ONION + "/account/s3.php?output_json=1",
+                    input=f"Cookie: logged-in-sig={sig}; logged-in-user={user}\n")
+        if page.timed_out:
+            log("WARNING: archive.org login timed out")
+            return None
+        try:
+            key = json.loads(page.stdout).get("key") if page.returncode == 0 else None
+        except (json.JSONDecodeError, AttributeError):
+            key = None
+        if isinstance(key, dict) and key.get("s3accesskey") and key.get("s3secretkey"):
+            return {"access": key["s3accesskey"], "secret": key["s3secretkey"]}
+    log("WARNING: archive.org login succeeded but S3 keys were empty")
+    return None
 
 
 def ensure_archive_s3_keys(
     *,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Fetch archive.org S3 keys for the shared OnionPress account and
@@ -931,36 +910,45 @@ def ensure_archive_s3_keys(
     where the Settings page saves them from any site.
     """
     log = log_func or _noop_log
-    if not wp_is_installed(docker_bin):
+    if not wp_is_installed(docker):
         return True
 
     current = _wp("option", "get", "onionpress_archive_s3_access",
-                  docker_bin=docker_bin)
+                  docker=docker)
     if current.returncode == 0 and current.stdout.strip():
         return True  # Already configured
 
     log("Fetching archive.org S3 keys for Wayback Machine archiving...")
     keys = fetch_archive_s3_keys(_ARCHIVE_LOGIN_EMAIL, _ARCHIVE_LOGIN_PASS,
-                                 docker_bin=docker_bin, log_func=log)
+                                 docker=docker, log_func=log)
     if keys is None:
         log("WARNING: no archive.org S3 keys — set them manually in Settings if needed.")
         return False
 
-    # `wp option update <key>` with no value reads it from stdin, so the
-    # keys stay out of argv.
-    _wp("option", "update", "onionpress_archive_s3_access",
-        docker_bin=docker_bin, input=keys["access"])
-    _wp("option", "update", "onionpress_archive_s3_secret",
-        docker_bin=docker_bin, input=keys["secret"])
+    save_archive_s3_keys(keys, docker=docker)
     log("Archive.org S3 keys configured for Wayback archiving")
     return True
+
+
+def save_archive_s3_keys(keys: dict, *, docker) -> bool:
+    """Save *keys* ({"access", "secret"}) as the network's one pair, in
+    the main site's options (`wp option` without --url), where the Wayback
+    sweep reads them: the reconcile's pair and the one the Settings page's
+    archive.org login fetched (handle_action's archive-login, issue #528).
+    `wp option update <key>` with no value reads it from stdin, so the
+    keys stay out of argv. True when both were written."""
+    ok = True
+    for name, value in (("onionpress_archive_s3_access", keys["access"]),
+                        ("onionpress_archive_s3_secret", keys["secret"])):
+        ok = _wp("option", "update", name, docker=docker, input=value).returncode == 0 and ok
+    return ok
 
 
 def provision_post_install(
     *,
     themes_dir: str,
     plugins_dir: str,
-    docker_bin: str = "docker",
+    docker,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> int:
     """Run the post-`wp core install` provisioning sequence. Called by
@@ -978,16 +966,16 @@ def provision_post_install(
     without aborting the run.
     """
     log = log_func or _noop_log
-    ensure_multisite(docker_bin=docker_bin, log_func=log)
+    ensure_multisite(docker=docker, log_func=log)
     install_multisite_domain_map(
-        plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)
+        plugins_dir=plugins_dir, docker=docker, log_func=log)
     install_onionpress_theme(
         themes_dir=themes_dir, plugins_dir=plugins_dir,
-        docker_bin=docker_bin, log_func=log)
-    fix_onionpress_permissions(docker_bin=docker_bin, log_func=log)
-    fix_wordpress_uploads_permissions(docker_bin=docker_bin, log_func=log)
+        docker=docker, log_func=log)
+    fix_onionpress_permissions(docker=docker, log_func=log)
+    fix_wordpress_uploads_permissions(docker=docker, log_func=log)
     # Ensure the WP container can read its own .onion via the shared
     # volume — wait_for_services bails early on fresh installs before
     # writing this; this is the post-Setup belt-and-braces.
-    write_shared_onion_address(docker_bin=docker_bin, log_func=log)
+    write_shared_onion_address(docker=docker, log_func=log)
     return 0

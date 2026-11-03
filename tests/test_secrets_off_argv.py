@@ -8,7 +8,7 @@ key being imported), the OnionHeaven request signatures and the WordPress
 database password go to their child processes on stdin instead:
 
   - curl in onionpress-tor reads the hub payload with --data-binary @-
-    (docker exec -i), on the Mac and in the Linux heartbeat daemon;
+    (docker exec -i), from the daemon on both platforms;
   - MariaDB clients in onionpress-db read the password from MYSQL_PWD,
     which a sh prelude fills from the first line of stdin (backup.py and
     the Linux launcher's db_client);
@@ -19,6 +19,7 @@ Nothing here talks to Docker: subprocess is mocked, or `docker` is a stub.
 """
 import base64
 import importlib.util
+import io
 import json
 import os
 import re
@@ -34,12 +35,14 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, TESTS_DIR)
 
 for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import backup, key_manager, onion_auth, onionheaven  # noqa: E402
+from fake_docker import FakeDocker, answering, on_path  # noqa: E402
 
 KEY_MANAGER = os.path.join(PROJECT_DIR, "src", "onionpress", "key_manager.py")
 HC = "vipwsi6bjeychxvdo3xjvojr2yvw7ggwagekemekmeccscryuhehp2id.onion"
@@ -99,8 +102,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -138,7 +140,7 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
 
     def _post(self, fn, reply):
         rec = _Recorder(lambda argv: reply)
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(self.app, rec):
             result = fn()
         self.assertTrue(result is None or result, self.app.logs)
         self.assertEqual(len(rec.calls), 1, rec.calls)
@@ -176,78 +178,13 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
 
     def test_helpers_pass_input_through(self):
         rec = _Recorder(lambda argv: "ok")
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(self.app, rec):
             self.assertEqual(onionheaven._run_docker(self.app, ["x"], input="a"),
                              (True, "ok"))
             self.assertEqual(onionheaven._run_docker_rc(self.app, ["x"], input="b"),
                              (0, "ok"))
             onionheaven._run_docker(self.app, ["x"])
         self.assertEqual([c[1] for c in rec.calls], ["a", "b", None])
-
-
-_HB_HOME = tempfile.mkdtemp(prefix="op-hb-argv-test-")
-
-
-def _load_linux_heartbeat():
-    """Import linux/onionpress-heartbeat.py under a throwaway HOME (it opens
-    ~/.onionpress/onionpress.log at import), as test_linux_analytics_upload
-    does."""
-    os.makedirs(os.path.join(_HB_HOME, ".onionpress"), exist_ok=True)
-    saved_home = os.environ.get("HOME")
-    os.environ["HOME"] = _HB_HOME
-    sys.modules.setdefault("key_manager", key_manager)
-    sys.modules.setdefault("onion_auth", onion_auth)
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "onionpress_heartbeat_argv_test",
-            os.path.join(PROJECT_DIR, "linux", "onionpress-heartbeat.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-    finally:
-        if saved_home is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = saved_home
-    return mod
-
-
-class TestLinuxHeartbeatPayloadOnStdin(unittest.TestCase):
-    """linux/onionpress-heartbeat.py: the docker-exec fallback of
-    sign_and_post (first registration, and whenever the persistent
-    connection is down)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.hb = _load_linux_heartbeat()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(_HB_HOME, ignore_errors=True)
-
-    def test_fallback_sends_key_on_stdin(self):
-        priv, pub, pem_b64 = _keypair()
-        addr = onion_auth.derive_onion_address(pub)
-        rec = _Recorder(lambda argv: '{"online": true}')
-        with mock.patch.object(self.hb, "_hub_conn", None), \
-                mock.patch.object(self.hb.subprocess, "run", rec):
-            ok, resp = self.hb.sign_and_post(
-                "online", self.hb.DEFAULT_HUB, addr, HC, priv, pub,
-                extra={"arti_key_pem": pem_b64})
-        self.assertTrue(ok)
-        self.assertEqual(resp, {"online": True})
-        self.assertEqual(len(rec.calls), 1)
-        argv, stdin = rec.calls[0]
-        self.assertEqual(argv[:4], ["docker", "exec", "-i", "onionpress-tor"])
-        i = argv.index("--data-binary")
-        self.assertEqual(argv[i + 1], "@-")
-        self.assertEqual(json.loads(stdin)["arti_key_pem"], pem_b64)
-        rec.assert_secret_not_in_argv(self, pem_b64)
-
-    def test_docker_exec_without_input_is_unchanged(self):
-        rec = _Recorder(lambda argv: "x")
-        with mock.patch.object(self.hb.subprocess, "run", rec):
-            self.assertEqual(self.hb.docker_exec("c", ["true"]), (True, "x"))
-        self.assertEqual(rec.calls, [(["docker", "exec", "c", "true"], None)])
 
 
 class TestBackupDbPasswordOnStdin(unittest.TestCase):
@@ -273,11 +210,11 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
         """Run what docker exec would run in the container, here."""
         argv = backup._db_client_argv(self._fake_client(), "-u", "wordpress",
                                       "wordpress")
-        self.assertEqual(argv[:5], ["docker", "exec", "-i", "onionpress-db", "sh"])
+        self.assertEqual(argv[:4], ["exec", "-i", "onionpress-db", "sh"])
         # The mariadb image's /bin/sh is dash; try it too where it exists.
         for shell in filter(None, ("sh", shutil.which("dash"))):
             with self.subTest(shell=shell):
-                out = subprocess.run([shell] + argv[5:], input=TRICKY_PASSWORD + "\n",
+                out = subprocess.run([shell] + argv[4:], input=TRICKY_PASSWORD + "\n",
                                      capture_output=True, text=True, timeout=10)
                 self.assertEqual(out.returncode, 0, out.stderr)
                 self.assertEqual(out.stdout.splitlines(), [
@@ -286,11 +223,10 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
 
     def test_workload_stats_query(self):
         rec = _Recorder(lambda argv: "1\t2\t3\t4\t5\t6\n")
-        with mock.patch.object(backup.subprocess, "run", rec):
-            stats = backup._query_workload_stats(self.CREDS)
+        stats = backup._query_workload_stats(FakeDocker(rec), self.CREDS)
         self.assertEqual(stats["db_bytes"], 1)
         argv, stdin = rec.calls[0]
-        self.assertEqual(argv, backup._db_client_argv(
+        self.assertEqual(argv[1:], backup._db_client_argv(
             "mariadb", "-B", "-N", "-u", "wordpress", "-D", "wordpress",
             "-e", argv[-1]))
         self.assertEqual(stdin, TRICKY_PASSWORD + "\n")
@@ -320,9 +256,8 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
             return ""
         rec = _Recorder(reply)
         logs = []
-        with mock.patch.object(backup.subprocess, "run", rec):
-            backup.restore_container_artifacts(staging, {}, logs.append,
-                                               data_dir=data_dir)
+        backup.restore_container_artifacts(staging, {}, logs.append,
+                                           docker=FakeDocker(rec), data_dir=data_dir)
         rec.assert_secret_not_in_argv(self, safe_password)
 
         # The dump goes in on stdin, through a sandboxed client, never
@@ -394,7 +329,7 @@ exit 0
         with mock.patch.dict(os.environ,
                              {"PATH": bindir + os.pathsep + os.environ["PATH"]}):
             backup.create_backup("x.onion", "admin", "zip-password", out_zip,
-                                 "test", logs.append, data_dir=data_dir)
+                                 "test", logs.append, docker=on_path(), data_dir=data_dir)
         self.assertTrue(os.path.exists(out_zip), logs)
         with open(argv_log) as f:
             argv_lines = f.read()
@@ -407,55 +342,21 @@ exit 0
 
 
 class TestLauncherDbClient(unittest.TestCase):
-    """The Linux launcher's db_client(), run in bash against a stub `docker`
-    that runs the container side here. The Mac launcher has none: its
-    database work goes through onionpress.cli (backup.py)."""
+    """Neither launcher runs a database client of its own any more: the
+    backup's dump and the restore's import are onionpress.cli's (backup.py,
+    the password on the client's stdin; issue #406 took Linux's db_client
+    and db_import)."""
 
     LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
-    DB_CLIENT_LAUNCHERS = ("linux/onionpress",)
 
     def test_no_password_flag_left(self):
         for rel in self.LAUNCHERS:
             with self.subTest(rel=rel):
-                self.assertNotRegex(_read(rel), r'"-p\$\{?db_pass')
-
-    def test_db_client_uses_backups_prelude(self):
-        for rel in self.DB_CLIENT_LAUNCHERS:
-            with self.subTest(rel=rel):
-                # The same container-side prelude as backup.py's.
-                self.assertIn(f"sh -c '{backup._DB_PASSWORD_FROM_STDIN}' sh",
-                              _shell_function(rel, "db_client"))
-
-    def test_db_client_feeds_password_on_stdin(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            argv_log = os.path.join(tmp, "argv.log")
-            client = os.path.join(tmp, "client")
-            with open(client, "w") as f:
-                f.write('#!/bin/sh\nprintf "pwd=%s args=%s\\n" "$MYSQL_PWD" "$*"\n')
-            os.chmod(client, 0o755)
-            for rel in self.DB_CLIENT_LAUNCHERS:
-                with self.subTest(rel=rel):
-                    script = (
-                        "set -e\n"
-                        'docker() {\n'
-                        '    printf "%s\\n" "$*" >> "$ARGV_LOG"\n'
-                        '    [ "$1 $2 $3" = "exec -i onionpress-db" ] || return 99\n'
-                        '    shift 3\n'
-                        '    "$@"\n'
-                        '}\n'
-                        + _shell_function(rel, "db_client") + "\n"
-                        'db_client "$PW" "$CLIENT" -u wordpress wordpress\n'
-                    )
-                    out = subprocess.run(
-                        ["bash", "-c", script], capture_output=True, text=True,
-                        timeout=30, env={**os.environ, "ARGV_LOG": argv_log,
-                                         "PW": TRICKY_PASSWORD, "CLIENT": client})
-                    self.assertEqual(out.returncode, 0, out.stderr)
-                    self.assertEqual(out.stdout.strip(),
-                                     f"pwd={TRICKY_PASSWORD} args=-u wordpress wordpress")
-                    with open(argv_log) as f:
-                        self.assertNotIn(TRICKY_PASSWORD, f.read())
-
+                text = _read(rel)
+                self.assertNotRegex(text, r'"-p\$\{?db_pass')
+                self.assertNotIn("\ndb_client() {", text)
+                self.assertNotIn("\ndb_import() {", text)
+                self.assertNotRegex(text, r"\bmariadb(-dump)?\b[^\n]*wordpress")
 
 class TestConfigSetTokenOnStdin(unittest.TestCase):
     """`onionpress config set CLOUDFLARE_TUNNEL_TOKEN` (issue #365): the
@@ -519,8 +420,8 @@ class TestConfigSetTokenOnStdin(unittest.TestCase):
 
 
 class TestKeyImportKeyOnStdin(unittest.TestCase):
-    """The key-import path: menubar -> Mac launcher -> key_manager.py, and
-    the Linux launcher -> key_manager.py."""
+    """The key-import path: the Settings page or menubar -> the launcher ->
+    `onionpress import-key -` (the key on stdin, never argv)."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="import-argv-test-")
@@ -555,66 +456,35 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(
             out_dir, self.addr, "ks_hs_id.ed25519_expanded_private")))
 
-    # The key import's own helpers (replace_onion_key and what it calls),
-    # where the launcher has them.
-    HELPERS = ("is_onion_address", "vanity_key_dir", "docker_volume_state",
-               "replace_onion_key", "set_address_prefix_for")
-
-    def _run_import(self, rel, function, wrapper, call):
-        data_dir = os.path.join(self.tmpdir, rel.replace("/", "_"))
-        argv_log = os.path.join(self.tmpdir, "argv.log")
-        # No Docker: every `docker` (the launcher's and key_manager.py's
-        # own reads of the tor container) is a stub that fails, except the
-        # volume listing, which says there are none.
-        bin_dir = os.path.join(self.tmpdir, "bin")
-        os.makedirs(bin_dir, exist_ok=True)
-        with open(os.path.join(bin_dir, "docker"), "w") as f:
-            f.write('#!/bin/sh\n[ "$1 $2" = "volume ls" ] && exit 0\nexit 1\n')
-        os.chmod(os.path.join(bin_dir, "docker"), 0o755)
-        text = _read(rel)
-        helpers = "".join(_shell_function(rel, n) + "\n" for n in self.HELPERS
-                          if re.search(r"^" + n + r"\(\)", text, re.M))
-        script = (
-            "set -e\n"
-            "log() { :; }\n"
-            "sed() { :; }\n"  # ADDRESS_PREFIX is test_address_prefix.py's
-            "stop_containers() { :; }\n"
-            # Nothing registered with an OnionHeaven hub (that path is
-            # tests/test_onionheaven_lifecycle.py's).
-            "onionheaven_release() { :; }\n"
-            "start_heartbeat_client() { :; }\n"
-            f'{wrapper}() {{ printf "%s\\n" "$*" >> "$ARGV_LOG"; "$PY" "$@"; }}\n'
-            + helpers + _shell_function(rel, function) + "\n" + call + "\n"
-        )
-        out = subprocess.run(
-            ["bash", "-c", script], input=self.key_b32 + "\n",
-            capture_output=True, text=True, timeout=60,
-            env={**os.environ, "ARGV_LOG": argv_log, "PY": sys.executable,
-                 "KEY": self.key_b32, "DATA_DIR": data_dir,
-                 "PATH": bin_dir + os.pathsep + os.environ["PATH"],
-                 "LOG_FILE": os.path.join(self.tmpdir, "log"),
-                 "SCRIPTS_DIR": os.path.dirname(KEY_MANAGER)})
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(
-            data_dir, "shared", "vanity-keys", self.addr, "hostname")),
-            out.stdout + out.stderr)
-        with open(argv_log) as f:
-            argv_lines = f.read()
-        self.assertIn("key_manager.py import-key -", argv_lines)
-        self.assertNotIn(self.key_b32, argv_lines)
-
-    def test_mac_launcher_import_key_dash(self):
-        self._run_import("app/MacOS/onionpress", "import_key", "bundled_python",
-                         "import_key -")
-
-    def test_linux_launcher_import_key(self):
-        self._run_import("linux/onionpress", "import_key", "python3",
-                         'import_key "$KEY"')
-
-    def test_linux_launcher_replace_onion_key(self):
-        """What the Settings page's import-key-file runs."""
-        self._run_import("linux/onionpress", "replace_onion_key",
-                         "python3", 'replace_onion_key "$KEY"')
+    def test_the_launchers_pass_the_dash_on_and_the_cli_reads_stdin(self):
+        """Both launchers hand "$@" to `onionpress import-key` untouched
+        (issue #524: no key_manager.py run with the key in a variable),
+        so `-` reaches key_import.run, which reads the key from stdin."""
+        for rel in ("app/MacOS/onionpress", "linux/onionpress"):
+            with self.subTest(rel=rel):
+                text = _read(rel)
+                m = re.search(r"^import_key\(\)\s*\{.*?^\}", text, re.DOTALL | re.M)
+                self.assertIsNotNone(m)
+                self.assertIn('import-key "$@"', m.group(0))
+                self.assertNotIn("$key_b32", m.group(0))
+        from onionpress import key_import
+        data_dir = os.path.join(self.tmpdir, "data")
+        argv = []
+        stdin = io.StringIO(self.key_b32 + "\n")
+        args = types.SimpleNamespace(key="-", file=None, check=True, json=True, confirmed=[])
+        containers = mock.Mock()
+        containers.volume_state.return_value = 1
+        out = io.StringIO()
+        with mock.patch.object(subprocess, "run", side_effect=lambda a, *k, **kw: argv.append(a)), \
+                mock.patch.object(subprocess, "Popen", side_effect=lambda a, *k, **kw: argv.append(a)):
+            rc = key_import.run(args, paths=types.SimpleNamespace(data_dir=data_dir),
+                                docker=mock.Mock(), containers=containers,
+                                log=lambda m: None, release=lambda r: [], linux=True,
+                                interactive=False, environ={}, out=out, stdin=stdin)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(json.loads(out.getvalue().splitlines()[-1]),
+                         {"ok": True, "address": self.addr})
+        self.assertEqual(argv, [])
 
     def test_handle_action_passes_key_on_stdin(self):
         """The Settings page's key goes to the launcher's import-key on

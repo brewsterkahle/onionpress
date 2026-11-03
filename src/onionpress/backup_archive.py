@@ -218,14 +218,13 @@ def scrub_staged_tree(root, log_func, where=None):
     return len(left_out)
 
 
-def _stage_container_tar(argv, dest, log_func, where,
+def _stage_container_tar(docker, argv, dest, log_func, where,
                          timeout=_STAGE_COPY_FLOOR_S):
-    """Run *argv* (`docker exec … tar -cf - …`) and unpack its stdout into
-    *dest* with unpack_plain_tar; raise if either side fails. The copy gets
-    *timeout* seconds; then the docker client is killed, which closes the
-    pipe the container's tar writes to."""
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE)
+    """Run *argv* (`exec … tar -cf - …`, through *docker*'s popen) and
+    unpack its stdout into *dest* with unpack_plain_tar; raise if either
+    side fails. The copy gets *timeout* seconds; then the docker client is
+    killed, which closes the pipe the container's tar writes to."""
+    proc = docker.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
     timed_out = threading.Event()
 
     def _kill():
@@ -282,8 +281,7 @@ def _onion_key_readme_text(metadata):
 
 def pack_backup(staging, output_path, password, log_func):
     """Write the staged backup tree *staging* to *output_path* as a format-2
-    encrypted backup (see backup_crypto). Shared by create_backup and, via
-    `onionpress.cli pack-backup`, the Linux launcher's bash create_backup.
+    encrypted backup (see backup_crypto); create_backup's, on both platforms.
 
     The system `zip` builds the same archive it always has (same member
     names, same -n list) but without -P; its output streams from stdout

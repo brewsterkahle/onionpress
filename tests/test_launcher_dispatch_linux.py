@@ -15,7 +15,6 @@ Runs under /bin/bash where that is all there is (macOS: 3.2), so the
 launcher stays within what both platforms' bash accept."""
 
 import ast
-import json
 import os
 import re
 import subprocess
@@ -54,9 +53,14 @@ class TestStart(_Case):
         r = self.l.run("start")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.l.fn_calls(), [
-            "setup_db_passwords", "start_containers", "wait_for_services",
-            "start_container_log_capture", "write_status", "_status_poll_loop"])
+            "setup_db_passwords", "start_containers", "wait_for_services"])
+        # The daemon after the stack; the address line reads the served
+        # address through the CLI (#529).
+        self.assertEqual(self.l.py_calls(), ["check-docker",
+                                             f"{self.dd()} daemon start --launcher {self.l.script}",
+                                             f"{self.dd()} address"])
         self.assertIn("OnionPress is running!", r.stdout)
+        self.assertIn("Onion address: none yet", r.stdout)
         self.assertFalse(os.path.exists(self.l.pidfile), "the EXIT trap removes the lock")
 
     def test_no_verb_means_start(self):
@@ -88,57 +92,98 @@ class TestStart(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("start_containers", self.l.fn_calls())
 
-    def test_systemd_is_told_when_ready(self):
+    def test_the_start_returns_and_the_daemon_is_the_units(self):
+        """onionpress.service is a oneshot that stays active (#407): no
+        systemd-notify, no loop; the daemon is asked to start, its
+        failure a warning."""
         r = self.l.run("start", env={"NOTIFY_SOCKET": "/run/x"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("bin systemd-notify --ready", self.l.calls())
+        self.assertNotIn("bin systemd-notify --ready", self.l.calls())
+        self.assertNotIn("_status_poll_loop", self.l.fn_calls())
+
+
+class TestStartDaemon(_Case):
+    STUBS = ("setup_db_passwords", "start_containers", "wait_for_services")
+
+    def test_start_runs_daemon_start_after_the_stack(self):
+        r = self.l.run("start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.l.calls()
+        # The daemon after the stack; the address line's `address` (#529) follows.
+        self.assertEqual(self.l.py_calls()[-2:],
+                         [f"{self.dd()} daemon start --launcher {self.l.script}", f"{self.dd()} address"])
+        self.assertLess(calls.index("fn wait_for_services"),
+                        calls.index(f"py {self.dd()} daemon start --launcher {self.l.script}"))
+
+    def test_a_daemon_that_does_not_start_is_only_a_warning(self):
+        # start_daemon alone (STUB_RC_PY would fail the start's own
+        # check-docker call first): its op_py failing is a logged warning.
+        with open(LINUX) as f:
+            text = f.read()
+        start = text.index("\nstart_daemon() {")
+        fn = text[start:text.index("\n}\n", start) + 3]
+        log = os.path.join(self.l.data_dir, "onionpress.log")
+        os.makedirs(self.l.data_dir, exist_ok=True)
+        script = (f"DATA_DIR={self.l.data_dir!r}\nLOG_FILE={log!r}\nINSTALL_DIR=/opt/onionpress\n"
+                  'log() { echo "$1" >> "$LOG_FILE"; }\nop_py() { return 1; }\n'
+                  + fn + "start_daemon\necho rc=$?\n")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "rc=0", r.stderr)
+        with open(log) as f:
+            self.assertIn("WARNING: the OnionPress daemon could not be started", f.read())
 
 
 class TestStopAndRestart(_Case):
-    STUBS = ("setup_db_passwords", "stop_heartbeat_client", "start_heartbeat_client",
-             "stop_container_log_capture",
-             "stop_onionheaven_farm", "write_status", "start_containers",
-             "wait_for_services", "start_container_log_capture")
+    STUBS = ("setup_db_passwords", "stop_onionheaven_farm", "start_containers",
+             "wait_for_services", "start_daemon")
 
-    def test_stop_stops_the_heartbeat_then_the_stack(self):
+    def test_stop_asks_the_daemon_offline_then_stops_the_stack(self):
         r = self.l.run("stop")
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.l.calls()
         # Always with the cloudflared override, so a removed token's tunnel goes too.
         down = "bin docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml down"
-        self.assertLess(calls.index("fn stop_heartbeat_client"), calls.index(down))
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline"])
+        self.assertLess(calls.index(f"py {self.dd()} daemon offline"), calls.index(down))
         self.assertIn("Containers stopped", r.stdout)
         with open(os.path.join(self.l.data_dir, ".previous-port-offset")) as f:
             self.assertEqual(f.read().strip(), "0")
+
+    def test_a_daemon_that_cannot_go_offline_does_not_stop_the_stop(self):
+        r = self.l.run("stop", env={"STUB_RC_PY": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Containers stopped", r.stdout)
 
     def test_a_failed_compose_down_is_the_exit_status(self):
         r = self.l.run("stop", env={"STUB_RC_DOCKER_DOWN": "3"})
         self.assertEqual(r.returncode, 3)
         self.assertIn("ERROR: stopping the containers failed", r.stdout)
-        self.assertIn("write_status", self.l.fn_calls(), "the tray still learns the state")
+        self.assertNotIn("write_status", self.l.fn_calls(), "the daemon's pass reports the state")
 
     def test_restart(self):
         r = self.l.run("restart")
         self.assertEqual(r.returncode, 0, r.stderr)
         fns = self.l.fn_calls()
-        self.assertLess(fns.index("stop_heartbeat_client"), fns.index("start_containers"))
-        self.assertEqual(fns[-1], "start_heartbeat_client")
-        self.assertIn("start_container_log_capture", fns)
+        calls = self.l.calls()
+        self.assertLess(calls.index(f"py {self.dd()} daemon offline"), calls.index("fn start_containers"))
+        self.assertEqual(fns[-1], "start_daemon")
+        self.assertNotIn("start_container_log_capture", fns)
 
     def test_a_failed_stop_still_restarts(self):
         r = self.l.run("restart", env={"STUB_RC_DOCKER_DOWN": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("WARNING: restart: the stop failed", r.stdout)
         self.assertIn("start_containers", self.l.fn_calls())
-        self.assertEqual(self.l.fn_calls()[-1], "start_heartbeat_client")
+        self.assertEqual(self.l.fn_calls()[-1], "start_daemon")
 
 
 class TestStatusAndLogs(_Case):
-    def test_status_is_one_json_array(self):
-        r = self.l.run("status", env={"STUB_PS": '{"Name":"onionpress-tor"}\n{"Name":"onionheaven"}'})
+    def test_status_is_the_clis(self):
+        # #529: `onionpress status` (cmd_status's JSON), no bash compose ps.
+        r = self.l.run("status")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([c["Name"] for c in json.loads(r.stdout)],
-                         ["onionpress-tor", "onionheaven"])
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} status"])
+        self.assertNotIn("bin docker compose ps", "\n".join(self.l.calls()))
 
     def test_bare_logs_follow_the_containers(self):
         r = self.l.run("logs")
@@ -184,143 +229,153 @@ class TestDelegations(_Case):
         self.assertEqual(self.l.py_calls(), [f"{self.dd()} config list --json"])
 
 
-class TestBackup(_Case):
-    STUBS = ("setup_db_passwords", "create_backup")
+class TestUpdate(_Case):
+    """`update` is the Python's (one updater on both platforms); the
+    launcher keeps the two install leaves it calls back."""
+    STUBS = ("update_install_deb", "update_from_checkout")
 
-    def test_the_backup_is_create_backups_at_the_path_given(self):
-        for flag in (("-o", "/b/x.zip"), ("--output", "/b/x.zip"), ("--output=/b/x.zip",)):
-            with self.subTest(flag=flag):
-                r = self.l.run("backup", *flag, env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
+    def test_update_delegates_with_this_launcher(self):
+        for argv, want in ((("update",), "update --launcher {l}"),
+                           (("update", "--check", "--json"), "update --launcher {l} --check --json"),
+                           (("update", "--version", "2.6.0", "--pre", "--force"),
+                            "update --launcher {l} --version 2.6.0 --pre --force"),
+                           (("update", "--from-checkout"), "update --launcher {l} --from-checkout")):
+            with self.subTest(argv=argv):
+                r = self.l.run(*argv)
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn("fn create_backup pw /b/x.zip", self.l.calls())
-                self.assertIn("Backup saved to: /b/x.zip", r.stdout)
+                self.assertEqual(self.l.py_calls(), [f"{self.dd()} {want.format(l=self.l.script)}"])
+                self.assertEqual(self.l.fn_calls(), [])
 
-    def test_the_default_path_is_under_onionpress_backups(self):
-        r = self.l.run("backup", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
+    def test_yes_reaches_the_python(self):
+        # The global -y filter takes --yes out of argv: it comes back.
+        r = self.l.run("update", "-y")
         self.assertEqual(r.returncode, 0, r.stderr)
-        call = [c for c in self.l.calls() if c.startswith("fn create_backup")][0]
-        self.assertRegex(call, re.escape(os.path.join(self.l.home, "OnionPress", "backups"))
-                         + r"/onionpress-\d{4}-\d\d-\d\d-\d+\.zip$")
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} update --launcher {self.l.script} --yes"])
+        r = self.l.run("update", "--check", env={"ONIONPRESS_YES": "true"})
+        self.assertEqual(self.l.py_calls(),
+                         [f"{self.dd()} update --launcher {self.l.script} --check --yes"])
 
-    def test_json_adds_the_answer(self):
-        r = self.l.run("backup", "-o", "/b/x.zip", "--json", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
+    def test_the_leaves_run_the_bash(self):
+        r = self.l.run("update-install-deb", "/tmp/x/onionpress.deb", "--force")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                         {"ok": True, "output": "/b/x.zip"})
+        self.assertEqual(self.l.calls(), ["fn update_install_deb /tmp/x/onionpress.deb --force"])
+        r = self.l.run("update-from-checkout")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.calls(), ["fn update_from_checkout"])
+        r = self.l.run("update-install-deb", "/x.deb", env={"STUB_RC_UPDATE_INSTALL_DEB": "1"})
+        self.assertEqual(r.returncode, 1)
 
-    def test_the_old_positional_password_is_refused(self):
-        # Issue #504: nothing runs, the message names no password.
-        r = self.l.run("backup", "oldpw", "/b/y.zip")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertNotIn("create_backup", self.l.fn_calls())
-        self.assertIn("refused", r.stderr)
-        self.assertNotIn("oldpw", r.stderr + r.stdout)
 
-    def test_user_equals_reaches_the_check(self):
-        r = self.l.run("backup", "--check", "--user=bob", env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-        self.assertEqual(self.l.py_calls(), [f"{self.dd()} backup --check --user bob"])
+class TestBackup(_Case):
+    """`backup` is the CLI's, as the Mac's (issue #406): every argument
+    passed on, the password left in the environment for the CLI to read
+    (it refuses a positional one, issue #504, and parses the flags), the
+    CLI's exit status the launcher's."""
 
-    def test_a_bad_command_line_is_refused_before_anything_runs(self):
-        for argv, msg in ((("--confirmed", "x"), "unknown option --confirmed"),
-                          (("--bogus",), "unknown option --bogus"),
-                          (("a", "b", "c"), "too many arguments")):
+    STUBS = ("setup_db_passwords",)
+
+    def test_the_backup_is_the_clis_with_the_arguments_passed_on(self):
+        for argv in (("-o", "/b/x.zip"), ("--output", "/b/x.zip"), ("--output=/b/x.zip",),
+                     (), ("--check", "--user=bob"), ("-o", "/b/x.zip", "--json"),
+                     ("--confirmed", "x"), ("oldpw", "/b/y.zip")):
             with self.subTest(argv=argv):
                 r = self.l.run("backup", *argv, env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 2)
-                self.assertIn(msg, r.stderr)
-                self.assertNotIn("create_backup", self.l.fn_calls())
-                self.assertEqual(self.l.py_calls(), [])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.l.py_calls(), [f"{self.dd()} backup" + "".join(" " + a for a in argv)])
+                self.assertIn("py-env pw", self.l.calls())
+                self.assertEqual(self.l.fn_calls(), [])
+
+    def test_the_clis_status_is_the_launchers(self):
+        r = self.l.run("backup", "--check", "--json", env={"STUB_RC_PY": "5"})
+        self.assertEqual(r.returncode, 5)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} backup --check --json"])
+        self.assertIn("py-env <none>", self.l.calls())
+
+    def test_nothing_of_the_backup_is_bash(self):
+        with open(LINUX) as f:
+            text = f.read()
+        for name in ("create_backup", "restore_backup", "key_volume_cat", "db_client", "db_import"):
+            self.assertNotIn(f"\n{name}() {{", text, name)
 
 
 class TestRestore(_Case):
-    STUBS = ("setup_db_passwords", "stop_heartbeat_client", "start_heartbeat_client")
+    """`restore` is the CLI's argparse (#529): every argument reaches it,
+    the password travels in the environment (or on stdin, to the CLI
+    itself), and the CLI's exit status is the launcher's."""
+
+    STUBS = ("setup_db_passwords",)
 
     def py(self, *rest):
         return f"{self.dd()} restore " + " ".join(rest)
 
-    def test_the_restore_runs_between_the_heartbeat_stop_and_start(self):
+    def test_the_password_goes_in_the_environment(self):
         r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "s3cret"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.l.calls()
-        self.assertLess(calls.index("fn stop_heartbeat_client"), calls.index(f"py {self.py('/b/x.zip')}"))
-        self.assertEqual(calls[-1], "fn start_heartbeat_client")
-        self.assertIn("py-env s3cret", calls)
-        self.assertIn("Done! OnionPress rebuilt from backup.", r.stdout)
+        self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip")])
+        self.assertEqual(self.l.fn_calls(), ["setup_db_passwords"])
+        self.assertIn("py-env s3cret", self.l.calls())
+        self.assertNotIn("s3cret", " ".join(self.l.py_calls()))
 
-    def test_a_failed_restore_starts_the_heartbeat_again_and_fails(self):
-        r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "pw",
-                                                   "STUB_RC_PY": "1"})
-        self.assertEqual(r.returncode, 1)
-        self.assertEqual(self.l.calls()[-1], "fn start_heartbeat_client")
-        self.assertIn("Restore failed", r.stderr)
-
-    def test_check_changes_nothing_and_hands_back_the_clis_answer(self):
-        r = self.l.run("restore", "/b/x.zip", "--check", "--json", env={"STUB_RC_PY": "5"})
-        self.assertEqual(r.returncode, 5)
-        self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--check", "--json")])
-        self.assertNotIn("stop_heartbeat_client", self.l.fn_calls())
-
-    def test_the_old_positional_password_is_refused(self):
-        r = self.l.run("restore", "oldpw", "/b/x.zip")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertEqual(self.l.py_calls(), [])
-        self.assertIn("refused", r.stderr)
-        self.assertNotIn("oldpw", r.stderr + r.stdout)
-
-    def test_usage_and_a_missing_password(self):
-        r = self.l.run("restore")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("restore <backup_file.zip>", r.stdout)
-        r = self.l.run("restore", "/b/x.zip")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("Password is required", r.stderr)
-        self.assertEqual(self.l.py_calls(), [])
-
-    def test_confirmed_takes_the_next_word_or_an_equals(self):
-        for argv, want in ((("--confirmed", "sealed-hub-data-left-out"), "--confirmed sealed-hub-data-left-out"),
-                           (("--confirmed=sealed-hub-data-left-out",), "--confirmed=sealed-hub-data-left-out")):
-            with self.subTest(argv=argv):
-                r = self.l.run("restore", "/b/x.zip", "--json", *argv,
-                               env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--json", want)])
-                self.assertIn("py-env pw", self.l.calls())
-
-    def test_a_bad_command_line_is_refused_before_the_cli(self):
-        for argv, msg in ((("/b/x.zip", "--bogus"), "unknown option --bogus"),
-                          (("/b/x.zip", "--confirmed"), "--confirmed needs a value"),
-                          (("a", "b", "/b/x.zip"), "too many arguments")):
+    def test_every_argument_reaches_the_cli_verbatim(self):
+        # The legacy positional password, a bare `restore`, --confirmed in
+        # either form, an unknown flag: the CLI's parser answers them
+        # (cli.read_backup_password's refusal, argparse's usage), not bash.
+        for argv in (("oldpw", "/b/x.zip"), (), ("--confirmed", "sealed-hub-data-left-out", "/b/x.zip", "--json"),
+                     ("/b/x.zip", "--confirmed=sealed-hub-data-left-out"), ("/b/x.zip", "--bogus"),
+                     ("/b/x.zip", "--check", "--json")):
             with self.subTest(argv=argv):
                 r = self.l.run("restore", *argv, env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 2)
-                self.assertIn(msg, r.stderr)
-                self.assertEqual(self.l.py_calls(), [])
-                self.assertNotIn("stop_heartbeat_client", self.l.fn_calls())
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.l.py_calls(), [self.py(*argv).rstrip()])
+
+    def test_the_clis_exit_status_is_the_launchers(self):
+        # 5: {"ask": "password"} for --check without one; 3: refused; 1: failed.
+        for rc in ("5", "3", "1"):
+            with self.subTest(rc=rc):
+                r = self.l.run("restore", "/b/x.zip", "--check", "--json", env={"STUB_RC_PY": rc})
+                self.assertEqual(r.returncode, int(rc))
+                self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--check", "--json")])
+                self.assertEqual(r.stdout + r.stderr, "", "nothing of bash's own is said")
+
+    def test_the_recovery_key_travels_in_the_environment(self):
+        self.l.add_stubs('op_py() { _op_rec "hubkey ${ONIONPRESS_HUB_RECOVERY_KEY:-unset}"; _op_py "$@"; }\n'
+                         'bundled_python() { shift 2; op_py "$@"; }')
+        r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_HUB_RECOVERY_KEY": "rk",
+                                                   "ONIONPRESS_BACKUP_PASSWORD": "pw"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hubkey rk", self.l.calls())
+        self.assertNotIn("rk", " ".join(self.l.py_calls()))
 
 
 class TestUsage(_Case):
-    def test_help_exits_0(self):
+    def test_help_is_the_clis_text_and_exits_0(self):
+        # #529: one text for both platforms (cli.launcher_help, tested in
+        # tests/test_launcher_help.py); the case prints it and exits 0.
         for flag in ("help", "-h", "--help"):
             with self.subTest(flag=flag):
                 r = self.l.run(flag)
                 self.assertEqual(r.returncode, 0)
-                self.assertIn("|backup|restore|", r.stdout)
-                self.assertNotIn("alerts", r.stdout)
+                self.assertEqual(self.l.py_calls(), [f"{self.dd()} launcher-help"])
 
-    def test_an_unknown_verb_is_refused_on_stderr(self):
-        r = self.l.run("frobnicate")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("unknown command: frobnicate", r.stderr)
+    def test_an_unknown_verb_reaches_the_cli(self):
+        """The default case hands every other verb to onionpress.cli (the
+        tray's check-for-update has no case of its own); the CLI's own
+        usage and exit status answer one it does not have either."""
+        r = self.l.run("frobnicate", "--json", env={"STUB_RC_PY": "2"})
+        self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
-        self.assertEqual(self.l.calls(), [])
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} frobnicate --json"])
+        self.assertEqual(self.l.fn_calls(), [])
 
 
 class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
-    """Every `Launcher.run*("<verb>", ...)` in linux/onionpress-tray names
-    a case of linux/onionpress's main; `handle-action` takes its request
-    from the request files, never a positional argument (the tray's old
-    Regenerate item ran `handle-action regenerate-vanity`, which the CLI
-    refuses with exit 2)."""
+    """Every `Launcher.run*("<verb>", ...)` in linux/onionpress-tray (the
+    shared ui_client.Launcher) names a case of linux/onionpress's main or
+    a subcommand of onionpress.cli (the main's default case hands those
+    to it); `handle-action` takes its request from the request files,
+    never a positional argument (the tray's old Regenerate item ran
+    `handle-action regenerate-vanity`, which the CLI refuses with exit 2).
+    The tray runs no `python -m onionpress.cli` of its own."""
 
     def _verbs(self):
         with open(LINUX, encoding="utf-8") as f:
@@ -329,16 +384,27 @@ class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
         verbs = set()
         for m in re.finditer(r"^        ([a-z|-]+)\)$", main, re.M):
             verbs.update(m.group(1).split("|"))
+        from test_cli_dispatch import parser_tree
+        verbs.update(key[0] for key in parser_tree())
         return verbs
 
     def _tray_calls(self):
         with open(TRAY, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "Launcher"
-                    and node.args and isinstance(node.args[0], ast.Constant)):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.args[0], ast.Constant)):
+                continue
+            f = node.func
+            if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                    and f.value.id == "Launcher"):
                 yield node.lineno, [a.value if isinstance(a, ast.Constant) else None for a in node.args]
+
+    def test_the_tray_runs_no_python_of_its_own(self):
+        with open(TRAY, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn('"onionpress.cli"', text)
+        self.assertNotIn("sys.executable", text)
 
     def test_every_verb_is_the_launchers(self):
         verbs = self._verbs()

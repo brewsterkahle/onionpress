@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The one-time auto-login token never sits on a host command line.
 
-The menubar, the Linux tray and `onionpress dashboard` open the site with
+`onionpress open` (the menubar's and the tray's) and `onionpress dashboard`
+open the site with
 `?op_login=<token>`, which the onionpress-auto-login.php mu-plugin trades
 once, within two minutes, for an admin session. `ps` shows every user's
 argv (macOS `ps -axo args`, Linux /proc/<pid>/cmdline), and several users can
@@ -9,10 +10,9 @@ share one Mac, so:
 
   - the token reaches WordPress on stdin, through a fixed `wp eval` PHP
     (auto_login.MINT_PHP), never as code or as an argument;
-  - on the Mac the URL goes to the browser through LaunchServices from the
-    menubar process (browser.open_url), not through `open`;
-  - on Linux the browser's command line gets the path of a 0600 page that
-    redirects to the URL (launcher_ops.login_target);
+  - the browser's command line gets the path of a 0600 page that
+    redirects to the URL (launcher_ops.login_target), on both platforms
+    since issue #527 (`onionpress open`, launcher_ops.open_onion);
   - Brave on the Mac, whose Tor window takes URLs only on its command line,
     gets the site without a token;
   - logs get the URL without the token.
@@ -34,8 +34,10 @@ from unittest import mock
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+sys.path.insert(0, TESTS_DIR)
 
-from onionpress import auto_login, browser, launcher_ops  # noqa: E402
+from onionpress import auto_login, browser, launcher_ops, wp_files  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 PLUGIN = "app/Resources/plugins/onionpress-auto-login.php"
 ONION = "a" * 52 + "qd2a.onion"
@@ -148,40 +150,37 @@ class TestMint(unittest.TestCase):
     def test_token_goes_on_stdin_only(self):
         for scope in auto_login.SCOPES:
             rec = _Recorder()
-            with mock.patch.object(auto_login.subprocess, "run", rec):
-                token = auto_login.mint(scope, docker_bin="/x/docker")
+            token = auto_login.mint(scope, docker=FakeDocker(rec, docker_bin="/x/docker"))
             self.assertRegex(token, r"\A[A-Za-z0-9_-]{43}\Z")
             [(argv, stdin)] = rec.calls
-            self.assertEqual(argv, ["/x/docker", "exec", "-i", "-u", "www-data",
-                                    "-e", "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
-                                    "onionpress-wordpress",
-                                    "wp", "eval", auto_login.MINT_PHP])
+            # As www-data, offline (a transient needs no network).
+            self.assertEqual(argv, ["/x/docker"] + wp_files.wp_cli_args(
+                "eval", auto_login.MINT_PHP, stdin=True, offline=True))
+            self.assertEqual(argv[1:5], ["exec", "-i", "-u", "www-data"])
             self.assertEqual(stdin, f"{token}\n{scope}\n")
             rec.assert_not_in_argv(self, token)
 
     def test_each_token_is_fresh(self):
         rec = _Recorder()
-        with mock.patch.object(auto_login.subprocess, "run", rec):
-            tokens = {auto_login.mint("local") for _ in range(20)}
+        tokens = {auto_login.mint("local", docker=FakeDocker(rec)) for _ in range(20)}
         self.assertEqual(len(tokens), 20)
 
     def test_failure_returns_none_and_logs_no_argv(self):
         logs = []
-        with mock.patch.object(auto_login.subprocess, "run",
-                               _Recorder(rc=1, stderr="Error: no administrator")):
-            self.assertIsNone(auto_login.mint("local", log_func=logs.append))
+        docker = FakeDocker(_Recorder(rc=1, stderr="Error: no administrator"))
+        self.assertIsNone(auto_login.mint("local", docker=docker, log_func=logs.append))
         self.assertEqual(logs, ["Auto-login token failed: Error: no administrator"])
 
         def timeout(argv, **kwargs):
-            raise subprocess.TimeoutExpired(argv, 15)
+            raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 15)
         logs = []
-        with mock.patch.object(auto_login.subprocess, "run", timeout):
-            self.assertIsNone(auto_login.mint("onion", log_func=logs.append))
-        self.assertEqual(logs, ["Auto-login token error: TimeoutExpired"])
+        self.assertIsNone(auto_login.mint("onion", docker=FakeDocker(timeout), log_func=logs.append))
+        # The runner's result names no argv.
+        self.assertEqual(logs, ["Auto-login token failed: Command timed out after 15s"])
 
     def test_unknown_scope_is_refused(self):
         with self.assertRaises(ValueError):
-            auto_login.mint("anywhere")
+            auto_login.mint("anywhere", docker=FakeDocker())
 
     def test_scope_follows_the_url_host(self):
         cases = {
@@ -199,10 +198,10 @@ class TestMint(unittest.TestCase):
 
     def test_login_url_mints_only_for_our_hosts(self):
         rec = _Recorder()
-        with mock.patch.object(auto_login.subprocess, "run", rec):
-            self.assertIsNone(auto_login.login_url("http://example.com/"))
-            self.assertEqual(rec.calls, [])
-            url = auto_login.login_url("http://localhost:8080/wp-admin/admin.php?page=x")
+        docker = FakeDocker(rec)
+        self.assertIsNone(auto_login.login_url("http://example.com/", docker=docker))
+        self.assertEqual(rec.calls, [])
+        url = auto_login.login_url("http://localhost:8080/wp-admin/admin.php?page=x", docker=docker)
         [(_, stdin)] = rec.calls
         token = stdin.split("\n")[0]
         self.assertEqual(url, f"http://localhost:8080/wp-admin/admin.php?page=x&op_login={token}")
@@ -284,14 +283,13 @@ class TestLinuxLoginTarget(unittest.TestCase):
 
     def test_browser_gets_a_file_uri_and_no_token(self):
         run, popen = _Recorder(), _Recorder()
-        with mock.patch.object(auto_login.subprocess, "run", run), \
-                mock.patch.object(auto_login.subprocess, "Popen", popen), \
+        with mock.patch.object(auto_login.subprocess, "Popen", popen), \
                 mock.patch.object(launcher_ops.subprocess, "Popen", popen), \
                 mock.patch.object(launcher_ops, "_launch_default_web_browser",
                                   return_value=False), \
                 mock.patch.object(launcher_ops.sys, "platform", "linux"):
             target = launcher_ops.login_target("http://localhost:8080/wp-admin/",
-                                               page_dir=self.tmp)
+                                               docker=FakeDocker(run), page_dir=self.tmp)
             launcher_ops.open_in_browser(target)
         [(_, stdin)] = run.calls
         token = stdin.split("\n")[0]
@@ -304,10 +302,10 @@ class TestLinuxLoginTarget(unittest.TestCase):
         popen.assert_not_in_argv(self, token)
 
     def test_no_token_means_the_plain_url(self):
-        with mock.patch.object(auto_login.subprocess, "run", _Recorder(rc=1)):
-            self.assertEqual(launcher_ops.login_target("http://localhost:8080/",
-                                                       page_dir=self.tmp),
-                             "http://localhost:8080/")
+        self.assertEqual(launcher_ops.login_target("http://localhost:8080/",
+                                                   docker=FakeDocker(_Recorder(rc=1)),
+                                                   page_dir=self.tmp),
+                         "http://localhost:8080/")
         self.assertEqual(os.listdir(self.tmp), [])
 
     def test_a_file_uri_goes_to_the_web_browser_not_the_html_handler(self):
@@ -325,20 +323,18 @@ class TestLinuxLoginTarget(unittest.TestCase):
         self.assertFalse(hasattr(launcher_ops, "mint_op_login_token"))
         self.assertNotIn("op_login", _read("src/onionpress/launcher_ops.py"))
 
-    def test_tray_hands_browsers_only_login_target(self):
-        src = _read("linux/onionpress-tray")
-        self.assertNotIn("_build_login_url", src)
-        self.assertNotIn("op_login=", src)
-        # Every login_url (a token-bearing URL) goes to the copy dialog only.
-        for m in re.finditer(r"launcher_ops\.login_url\(", src):
-            line = src[src.rindex("\n", 0, m.start()):src.index("\n", m.end())]
-            self.assertIn("_show_url_copy_dialog(", line)
-        self.assertGreaterEqual(src.count("launcher_ops.login_target("), 3)
-        # The cold-launch thread mints when Tor Browser is up, not at click time.
-        body = src[src.index("def _wait_then_open():"):]
-        body = body[:body.index("threading.Thread(target=_wait_then_open")]
-        self.assertIn("target = launcher_ops.login_target(base)", body)
-        self.assertIn('cmd = [wrapper, "-new-tab", target]', body)
+    def test_the_uis_mint_no_token(self):
+        """Issue #527: the menubar and the tray open the site through
+        `onionpress open … --json`; neither mints a token or names a
+        browser's command line with one."""
+        for rel in ("linux/onionpress-tray", "src/menubar.py"):
+            src = _read(rel)
+            with self.subTest(rel):
+                for gone in ("_build_login_url", "op_login=", "login_url(", "login_target(",
+                             "auto_login", "_generate_login_url", "torbrowser-launcher\"]"):
+                    self.assertNotIn(gone, src)
+                self.assertIn('"open", "onion", "--json"', src)
+                self.assertIn('run_async("open", "site")', src)
 
     def test_dashboard_uses_open_login(self):
         src = _read("linux/onionpress")
@@ -354,163 +350,153 @@ class TestLinuxLoginTarget(unittest.TestCase):
         with mock.patch.object(launcher_ops, "open_login") as open_login, \
                 mock.patch.object(cli, "OnionPressCLI") as full_cli:
             self.assertEqual(cli.main(["open-login", "http://localhost:8080/wp-admin/"]), 0)
-        open_login.assert_called_once_with("http://localhost:8080/wp-admin/")
+        open_login.assert_called_once_with("http://localhost:8080/wp-admin/", docker=mock.ANY)
         full_cli.assert_not_called()
 
 
-# ─── Mac: LaunchServices, not `open` ─────────────────────────────────────
+# ─── `open onion`: launcher_ops.open_onion, both platforms (#527) ────────
 
 
-def _fake_appkit(main_thread=True):
-    calls = []
+class TestOpenOnion(unittest.TestCase):
 
-    class NSURL:
-        @staticmethod
-        def URLWithString_(s):
-            return ("url", s)
+    BASE = f"http://{ONION}/alice"
 
-        @staticmethod
-        def fileURLWithPath_(p):
-            return ("file", p)
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="open-onion-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.spawned = _Recorder()
+        self.mint = _Recorder()
+        self.docker = FakeDocker(self.mint)
+        # One subprocess module: the browsers and auto_login's page removal.
+        p = mock.patch.object(launcher_ops.subprocess, "Popen", self.spawned)
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(auto_login, "REDIRECT_DIR", self.tmp)
+        p.start()
+        self.addCleanup(p.stop)
 
-    class _WS:
-        def openURL_(self, u):
-            calls.append(("openURL", u))
-            return True
-
-        def openURLs_withApplicationAtURL_configuration_completionHandler_(self, urls, app, cfg, h):
-            calls.append(("openURLs", urls, app))
-
-        def URLForApplicationWithBundleIdentifier_(self, bid):
-            return ("bundle", bid)
-
-    ws = _WS()
-    queued = []
-    appkit = types.SimpleNamespace(
-        NSURL=NSURL,
-        NSWorkspace=types.SimpleNamespace(sharedWorkspace=lambda: ws),
-        NSWorkspaceOpenConfiguration=types.SimpleNamespace(configuration=lambda: "cfg"),
-        NSThread=types.SimpleNamespace(isMainThread=lambda: main_thread),
-        NSOperationQueue=types.SimpleNamespace(mainQueue=lambda: types.SimpleNamespace(
-            addOperationWithBlock_=queued.append)),
-    )
-    return appkit, calls, queued
-
-
-class TestMacOpenUrl(unittest.TestCase):
-
-    URL = "http://localhost:8080/name/?op_login=SECRET-TOKEN-0123456789-abcdefghijklmn"
-
-    def test_default_browser_through_launch_services(self):
-        appkit, calls, _ = _fake_appkit()
+    @property
+    def popen(self):
+        """The browsers started: auto_login.remove_later's `sh -c sleep` left out."""
         rec = _Recorder()
-        with mock.patch.dict(sys.modules, {"AppKit": appkit}), \
-                mock.patch.object(browser.subprocess, "run", rec):
-            browser.open_url(self.URL)
-        self.assertEqual(calls, [("openURL", ("url", self.URL))])
-        self.assertEqual(rec.calls, [])
+        rec.calls = [c for c in self.spawned.calls if c[0][:2] != ["sh", "-c"]]
+        return rec
 
-    def test_named_app(self):
-        appkit, calls, _ = _fake_appkit()
-        with mock.patch.dict(sys.modules, {"AppKit": appkit}), \
-                mock.patch.object(browser.os.path, "isdir",
-                                  lambda p: p == "/Applications/Tor Browser.app"):
-            browser.open_url(self.URL, browser.TOR_BROWSER_PATH)
-            browser.open_url(self.URL, "Firefox")
-        self.assertEqual(calls, [
-            ("openURLs", [("url", self.URL)], ("file", "/Applications/Tor Browser.app")),
-            ("openURLs", [("url", self.URL)], ("bundle", "org.mozilla.firefox")),
-        ])
+    def token(self):
+        [(_, stdin)] = self.mint.calls
+        return stdin.split("\n")[0]
 
-    def test_off_the_main_thread_it_is_dispatched_there(self):
-        appkit, calls, queued = _fake_appkit(main_thread=False)
-        with mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            browser.open_url(self.URL)
-            self.assertEqual(calls, [])
-            [block] = queued
-            block()
-        self.assertEqual(calls, [("openURL", ("url", self.URL))])
+    def linux(self, running=(None,), launcher_running=False, which="/usr/bin/torbrowser-launcher"):
+        running = list(running)
+        stack = [mock.patch.object(launcher_ops.sys, "platform", "linux"),
+                 mock.patch.object(launcher_ops, "_tor_browser_running",
+                                   side_effect=lambda: running.pop(0) if len(running) > 1
+                                   else running[0]),
+                 mock.patch.object(launcher_ops, "_torbrowser_launcher_running",
+                                   return_value=launcher_running),
+                 mock.patch.object(launcher_ops.shutil, "which", return_value=which),
+                 mock.patch.object(launcher_ops, "cleanup_stale_tor_browser_locks",
+                                   return_value=False),
+                 mock.patch.object(launcher_ops, "_launch_default_web_browser",
+                                   return_value=False)]
+        for p in stack:
+            p.start()
+            self.addCleanup(p.stop)
 
-    def test_onion_token_only_for_launch_services_browsers(self):
-        base = f"http://{ONION}/name/"
-        for btype, bname in (("tor_browser", "Tor Browser"), ("extension", "Firefox"),
-                             ("brave", "Brave Browser")):
-            with self.subTest(btype=btype):
-                rec, opened, logs, minted = _Recorder(), [], [], []
+    def test_a_running_tor_browser_gets_the_url_to_paste(self):
+        self.linux(running=["/tb/Browser/firefox.real"])
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertEqual(answer, {"paste_url": f"{self.BASE}?op_login={self.token()}"})
+        self.assertEqual(self.popen.calls, [])
 
-                def add_login(url):
-                    minted.append(url)
-                    return url + "?op_login=SECRET"
-                with mock.patch.object(browser, "detect_best_browser",
-                                       return_value=(btype, bname)), \
-                        mock.patch.object(browser, "open_url",
-                                          lambda u, app=None, log_func=None:
-                                          opened.append((u, app))), \
-                        mock.patch.object(browser.subprocess, "run", rec):
-                    self.assertTrue(browser.open_onion_url(base, "/x", logs.append,
-                                                           add_login=add_login))
-                rec.assert_not_in_argv(self, "SECRET")
-                for line in logs:
-                    self.assertNotIn("SECRET", line)
-                if btype == "brave":
-                    self.assertEqual(minted, [])
-                    self.assertEqual(opened, [])
-                    self.assertIn(base, rec.calls[0][0])
-                else:
-                    self.assertEqual(minted, [base])
-                    self.assertEqual(rec.calls, [])
-                    self.assertEqual(opened[0][0], base + "?op_login=SECRET")
+    def test_a_launch_under_way_is_left_alone(self):
+        self.linux(launcher_running=True)
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertTrue(answer["launching"])
+        self.assertEqual(self.popen.calls, [])
+        self.assertEqual(self.mint.calls, [])
 
+    def test_without_torbrowser_launcher_the_default_browser_gets_the_page(self):
+        self.linux(which=None)
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertEqual(answer, {"ok": True, "browser": "default"})
+        [(argv, _)] = self.popen.calls
+        self.assertEqual(argv[0], "xdg-open")
+        self.assertTrue(argv[1].startswith("file://" + self.tmp))
+        self.popen.assert_not_in_argv(self, self.token())
 
-class TestMenubar(unittest.TestCase):
+    def test_a_cold_launch_mints_once_tor_browser_is_up_and_uses_the_wrapper(self):
+        fr = os.path.join(self.tmp, "Browser", "firefox.real")
+        os.makedirs(os.path.dirname(fr))
+        wrapper = os.path.join(self.tmp, "Browser", "start-tor-browser")
+        with open(wrapper, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(wrapper, 0o755)
+        self.linux(running=[None, None, None, fr])
+        said, slept = [], []
 
-    SRC = _read("src/menubar.py")
+        def sleep(seconds):
+            slept.append(seconds)
+            self.assertEqual(self.mint.calls, [])     # not before it is up
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp,
+                                         say=said.append, sleep=sleep)
+        self.assertEqual(answer, {"ok": True, "browser": "Tor Browser"})
+        self.assertEqual(self.popen.calls[0][0], ["torbrowser-launcher"])
+        argv = self.popen.calls[1][0]
+        self.assertEqual(argv[:2], [wrapper, "-new-tab"])
+        self.assertTrue(argv[2].startswith("file://"))
+        self.popen.assert_not_in_argv(self, self.token())
+        self.assertIn("Tor Browser is starting", said[0])
 
-    def _method(self, name):
-        start = self.SRC.index(f"    def {name}(")
-        end = re.compile(r"\n    (?:def |@)").search(self.SRC, start + 1).start()
-        return textwrap.dedent(self.SRC[start:end])
+    def test_a_cold_launch_that_never_comes_up_is_an_error(self):
+        self.linux(running=[None])
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp,
+                                         sleep=lambda s: None)
+        self.assertIn("did not start", answer["error"])
 
-    def test_open_local_site_keeps_the_token_out_of_argv_and_log(self):
-        ns = {}
-        opened, logs = [], []
-        rec = _Recorder()
-        ns["op_browser"] = types.SimpleNamespace(
-            open_url=lambda url, app=None, log_func=None: opened.append(url))
-        ns["auto_login"] = auto_login
-        ns["os"] = os
-        ns["subprocess"] = types.SimpleNamespace(run=rec)
-        exec(self._method("_generate_login_url"), ns)
-        exec(self._method("open_local_site"), ns)
-        app = types.SimpleNamespace(
-            read_config_value=lambda k, d="": "alice", local_url="http://localhost:8080",
-            bin_dir="/x/bin", log=logs.append)
-        app._generate_login_url = types.MethodType(ns["_generate_login_url"], app)
-        with mock.patch.object(auto_login.subprocess, "run", rec):
-            ns["open_local_site"](app, None)
-        [(argv, stdin)] = rec.calls
-        token = stdin.split("\n")[0]
-        self.assertEqual(argv[0], "/x/bin/docker")
-        self.assertEqual(stdin, f"{token}\nlocal\n")
-        self.assertEqual(opened, [f"http://localhost:8080/alice/?op_login={token}"])
-        rec.assert_not_in_argv(self, token)
-        self.assertEqual(logs, ["Opened local site: http://localhost:8080/alice/"])
+    def mac(self, apps=(), extension=None):
+        real_isdir = os.path.isdir
 
-    def test_every_token_url_goes_to_launch_services(self):
-        """A _generate_login_url result is only ever handed to
-        op_browser.open_url or open_onion_url (add_login=), never logged or
-        given to subprocess."""
-        self.assertNotIn("op_login", self.SRC)
-        for m in re.finditer(r"_generate_login_url\b", self.SRC):
-            line = self.SRC[self.SRC.rindex("\n", 0, m.start()) + 1:
-                            self.SRC.index("\n", m.end())]
-            if line.lstrip().startswith("def _generate_login_url"):
-                continue
-            prev = self.SRC[self.SRC.rindex("\n", 0, self.SRC.rindex("\n", 0, m.start())):
-                            m.start()]
-            self.assertRegex(prev + line,
-                             r"op_browser\.open_url\(|add_login=self\._generate_login_url",
-                             line)
+        def isdir(path):    # one os.path: the redirect page's folder is real
+            return path in apps if path.endswith(".app") else real_isdir(path)
+        stack = [mock.patch.object(launcher_ops.sys, "platform", "darwin"),
+                 mock.patch.object(os.path, "isdir", side_effect=isdir),
+                 mock.patch.object(browser, "extension_connected_recently",
+                                   return_value=extension)]
+        for p in stack:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_mac_tor_browser_gets_the_login_page(self):
+        self.mac(apps=(browser.TOR_BROWSER_PATH,))
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertEqual(answer, {"ok": True, "browser": "Tor Browser"})
+        [(argv, _)] = self.popen.calls
+        self.assertEqual(argv[:3], ["open", "-a", browser.TOR_BROWSER_PATH])
+        self.assertTrue(argv[3].startswith("file://"))
+        self.popen.assert_not_in_argv(self, self.token())
+
+    def test_mac_extension_browser_gets_the_login_page(self):
+        self.mac(extension="Firefox")
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertEqual(answer["browser"], "Firefox")
+        self.assertEqual(self.popen.calls[0][0][:3], ["open", "-a", "Firefox"])
+        self.popen.assert_not_in_argv(self, self.token())
+
+    def test_mac_brave_gets_no_token(self):
+        self.mac(apps=(browser.BRAVE_BROWSER_PATH,))
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertEqual(answer["logged_in"], False)
+        self.assertEqual(self.mint.calls, [])
+        [(argv, _)] = self.popen.calls
+        self.assertEqual(argv[1:], ["--tor", self.BASE])
+
+    def test_mac_without_a_tor_capable_browser(self):
+        self.mac()
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertTrue(answer["no_browser"])
+        self.assertEqual(self.popen.calls, [])
+        self.assertEqual(self.mint.calls, [])
 
 
 # ─── The mu-plugin ───────────────────────────────────────────────────────

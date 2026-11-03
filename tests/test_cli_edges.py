@@ -412,17 +412,6 @@ class TestHandlerFailures(HandleActionCase):
         self.assertEqual(self.argvs(), [])
         self.assertFalse(os.path.exists(d))
 
-    def test_recent_logs_that_cannot_be_scrubbed(self):
-        host = self.host("linux")
-        with open(host.paths.log_file, "w") as f:
-            f.write("a line\n")
-        with mock.patch.object(ha.redact, "wordpress_log_excerpt", side_effect=OSError("io")):
-            self.assertEqual(ha.handle(host), {"handled": None})
-        self.assertIn("(Recent logs unavailable", self.docker.get("recent-logs.txt"))
-        os.remove(host.paths.log_file)
-        self.docker.put("recent-logs.txt", "old")
-        ha.handle(host)
-        self.assertEqual(self.docker.get("recent-logs.txt"), "old")
 
 
 class TestApplyConfigOutput(HandleActionCase):

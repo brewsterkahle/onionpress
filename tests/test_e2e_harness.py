@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
 from harness import platforms, safety  # noqa: E402
 from harness.nodes.base import parse_curl_include, wp_port_from_status  # noqa: E402
 from harness.nodes.linux_vm import LinuxVMNode, guest_template  # noqa: E402
-from harness.nodes.mac import pick_port_offset  # noqa: E402
+from harness.nodes.mac import MacNode, pick_port_offset  # noqa: E402
 from harness.report import NOT_APPLICABLE, Outcome, RunReport, merge  # noqa: E402
 
 
@@ -203,6 +203,28 @@ class SafetyTest(unittest.TestCase):
                      "\t\t/Applications/OnionPress.app/Contents/MacOS/onionpress\n\t\tdaemon\n\t}\n}")
         with self.assertRaises(safety.UnsafeTarget):
             safety.check_daemon_agent(args_only, 0, root)
+
+    def test_a_mac_node_checks_its_own_derived_label(self):
+        # Issue #505: a node's daemon runs under the label the product
+        # derives from its data dir, so the live install's agent is not
+        # the node's concern; the node's own label loaded by another
+        # program still refuses it.
+        sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+        from onionpress import daemon_client
+        root = tempfile.mkdtemp()
+        data_dir = os.path.join(root, "mac-1", "h", ".onionpress")
+        label = safety.node_agent_label(data_dir)
+        self.assertEqual(label, daemon_client.agent_label(data_dir))
+        self.assertTrue(label.startswith(safety.DAEMON_AGENT_LABEL + "."))
+        node = MacNode("mac-1", None, root, root=root, real_home=root,
+                       app_source=("app", "/nonexistent"), port_offset=31000)
+        self.assertEqual(node.agent_label, label)
+        theirs = (f"gui/501/{label} = {{\n\tstate = running\n"
+                  "\tprogram = /Applications/OnionPress.app/Contents/MacOS/onionpress\n}")
+        with self.assertRaisesRegex(safety.UnsafeTarget, re.escape(label)):
+            safety.check_daemon_agent(theirs, 0, root, label)
+        with self.assertRaises(safety.UnsafeTarget):
+            safety.node_agent_label(daemon_client.default_data_dir())
 
     def test_daemon_label_is_the_products(self):
         with open(os.path.join(PROJECT_DIR, "src", "onionpress", "daemon_client.py"), encoding="utf-8") as f:

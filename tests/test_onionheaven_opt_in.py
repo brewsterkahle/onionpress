@@ -90,7 +90,6 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
         "src/onionpress/onionheaven.py",
         "src/menubar.py",
         "src/onionpress/daemon.py",
-        "linux/onionpress-heartbeat.py",
         "linux/onionpress-tray",
         "linux/onionpress",
     )
@@ -101,18 +100,32 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
         for rel in self.FILES:
             self.assertIsNone(pat.search(_read(rel)), f"{rel}: a typo must not count as yes")
 
-    def test_bash_status_only_yes_or_empty_is_enabled(self):
+    def test_status_only_yes_or_empty_is_enabled(self):
+        # status.json's client_enabled is the status writer's on both
+        # platforms (#523): onionheaven.status_block over client_overview's
+        # normalized choice; no bash reads the key for the status any more.
         src = _read("linux/onionpress")
-        self.assertIn("oh_config_enabled=${oh_config_enabled:-yes}", src)
-        self.assertIn('[ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no', src)
+        self.assertNotIn("oh_config_enabled", src)
+        self.assertIn('"client_enabled": c["enabled"] is True,', _read("src/onionpress/onionheaven.py"))
+        self.assertIn("onionheaven.status_block(overview, server_active=bool(app.is_onionheaven))",
+                      _read("src/onionpress/status_writer.py"))
 
-    def test_linux_daemon_reads_the_choice_through_one_normalizer(self):
-        # Registration, the per-cycle re-read, the opt-out and the
-        # system-sleep hook's /offline all gate on _registration_choice.
-        src = _read("linux/onionpress-heartbeat.py")
-        self.assertIn("def _registration_choice(config):", src)
-        self.assertEqual(src.count('config.get("REGISTER_WITH_ONIONHEAVEN"'), 1)
-        self.assertEqual(src.count("_registration_choice(config)"), 4)
+    def test_linux_runs_the_same_client(self):
+        # The daemon's OnionHeavenClient is the one client on both
+        # platforms (#407): no second normalizer or gate anywhere in
+        # linux/ (the launcher and install.sh only write the default).
+        self.assertFalse(os.path.exists(os.path.join(REPO, "linux", "onionpress-heartbeat.py")))
+        for name in sorted(os.listdir(os.path.join(REPO, "linux"))):
+            path = os.path.join(REPO, "linux", name)
+            if not os.path.isfile(path):
+                continue
+            with self.subTest(name=name):
+                text = _read(f"linux/{name}")
+                self.assertNotIn("_registration_choice", text)
+                for line in text.splitlines():
+                    if "REGISTER_WITH_ONIONHEAVEN" in line and not line.lstrip().startswith("#"):
+                        self.assertRegex(line, r"^REGISTER_WITH_ONIONHEAVEN=yes$|config set REGISTER_WITH_ONIONHEAVEN",
+                                         line)
 
     def test_mac_gates_go_through_get_registration_choice(self):
         # The loop, every /online and every /offline re-read the choice.
@@ -154,3 +167,94 @@ class TestNoStartupPrompt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheProbeAsksTheHubOnlyWhileRegistering(unittest.TestCase):
+    """The reachability probe's failure path checks reference onions to
+    see whether onionheaven's tor works. The hub is one of them only
+    while the install registers, and then the configured hub: an
+    opted-out install never contacts the hub, not even there (the
+    e2e log tripwire caught the canonical hub in an opted-out node's log
+    mid-stop)."""
+
+    OTHER_HUB = "a" * 56 + ".onion"
+
+    class _App:
+        def __init__(self, config):
+            self.config = config
+
+        def read_config_value(self, key, default=""):
+            return self.config.get(key, default)
+
+    def setUp(self):
+        from onionpress import onionheaven
+        self.onionheaven = onionheaven
+        saved = onionheaven.ONIONHEAVEN_ADDRESS
+        self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS", saved)
+        onionheaven.use_configured_hub("")
+
+    def _curled(self, config):
+        """The onions the failure path's reference check curls, with
+        nothing answering."""
+        from unittest import mock
+        from onionpress.docker import DockerResult
+        from onionpress.health import HealthChecker
+        app = self._App(config)
+        hosts = []
+
+        def exec_(container, argv, timeout=30, **kw):
+            if argv[0] != "sh":
+                hosts.append(argv[-1].split("//", 1)[1].split("/", 1)[0])
+            return DockerResult(returncode=7, stdout="", stderr="no")
+        docker = mock.Mock()
+        docker.exec.side_effect = exec_
+        hc = HealthChecker(docker, hub_reference=lambda: self.onionheaven.reference_hub(app))
+        self.assertFalse(hc.check_onionheaven_tor_healthy())
+        return hosts
+
+    def test_an_opted_out_install_never_names_the_hub(self):
+        from onionpress.health import WELL_KNOWN_ONIONS
+        for value in ("no", "NO", "off", "nope"):      # a typo registers neither
+            hosts = self._curled({"REGISTER_WITH_ONIONHEAVEN": value})
+            self.assertNotIn(self.onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS, hosts, value)
+            self.assertEqual(hosts, [o for _, o in WELL_KNOWN_ONIONS], value)
+            self.assertEqual(self.onionheaven.reference_hub(
+                self._App({"REGISTER_WITH_ONIONHEAVEN": value})), "", value)
+
+    def test_a_registering_install_asks_its_configured_hub_first(self):
+        hosts = self._curled({})
+        self.assertEqual(hosts[0], self.onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS)
+        self.onionheaven.use_configured_hub(self.OTHER_HUB)
+        hosts = self._curled({"REGISTER_WITH_ONIONHEAVEN": "yes"})
+        self.assertEqual(hosts[0], self.OTHER_HUB)
+        self.assertNotIn(self.onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS, hosts)
+
+    def test_the_choice_is_read_on_every_check(self):
+        from unittest import mock
+        from onionpress.health import HealthChecker
+        app = self._App({})
+        hc = HealthChecker(mock.Mock(), hub_reference=lambda: self.onionheaven.reference_hub(app))
+        self.assertEqual(hc.reference_onions()[0][0], "hub")
+        app.config["REGISTER_WITH_ONIONHEAVEN"] = "no"
+        self.assertNotEqual(hc.reference_onions()[0][0], "hub")
+
+    def test_no_hub_reference_is_no_hub(self):
+        from unittest import mock
+        from onionpress.health import HealthChecker, WELL_KNOWN_ONIONS
+        self.assertEqual(HealthChecker(mock.Mock()).reference_onions(), WELL_KNOWN_ONIONS)
+
+    def test_the_daemon_wires_the_choice_into_its_checker(self):
+        import shutil
+        import tempfile
+        from onionpress import daemon as op_daemon
+        from onionpress.platform import OS, resolve_paths
+        from fake_docker import FakeDocker
+        d = tempfile.mkdtemp(prefix="op-probe-hub-")
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "config"), "w") as f:
+            f.write("REGISTER_WITH_ONIONHEAVEN=no\n")
+        daemon = op_daemon.Daemon(resolve_paths(data_dir=d, app_bundle=""), version="9.9",
+                                  launcher_script="/x/onionpress", docker=FakeDocker({}),
+                                  os_name=OS.LINUX)
+        names = [n for n, _ in daemon._health_checker.reference_onions()]
+        self.assertNotIn("hub", names)

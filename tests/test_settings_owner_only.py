@@ -94,13 +94,15 @@ class TestSettingsPageHandlers(unittest.TestCase):
     def test_every_block_that_reaches_the_host_checks_the_owner_first(self):
         """Every hook and function that names the shared volume asks
         onionpress_settings_owner_allowed() before it. The one exception
-        reads status.json's platform for the field list and is only called
-        from gated code (next test)."""
+        reads status.json's platform for the field list, and one the
+        config the form shows (#528); both are only called from gated code
+        (next tests)."""
         checked = 0
         for block in _blocks(self.php):
             if HOST not in block:
                 continue
-            if block.startswith("function onionpress_settings_fields()"):
+            if block.startswith(("function onionpress_settings_fields()",
+                                 "function onionpress_settings_shown_config()")):
                 continue
             head = block.split("\n", 1)[0]
             with self.subTest(block=head):
@@ -108,9 +110,10 @@ class TestSettingsPageHandlers(unittest.TestCase):
                 self.assertLess(block.index("onionpress_settings_owner_allowed()"),
                                 block.index(HOST))
             checked += 1
-        # action handler, REST route, config save, download, poll, update
-        # check, the page itself, and the OnionHeaven page
-        self.assertEqual(checked, 8)
+        # action handler, config save, download, poll, update check, the
+        # page itself (the Share Now REST route went with #528), and the
+        # OnionHeaven page
+        self.assertEqual(checked, 7)
 
     def test_field_list_is_read_only_after_the_gate(self):
         calls = [b for b in _blocks(self.php)
@@ -141,13 +144,19 @@ class TestSettingsPageHandlers(unittest.TestCase):
             with self.subTest(write=write):
                 self.assertLess(gate, body.index(write))
 
-    def test_rest_route_is_the_owners(self):
-        body = _block(self.php, "register_rest_route( 'onionpress/v1', '/upload-analytics'")
-        self.assertIn(
-            "'permission_callback' => function () { return onionpress_settings_owner_allowed(); },",
-            body)
-        self.assertEqual(body.count("register_rest_route("), 1)
-        self.assertEqual(self.php.count("register_rest_route("), 1)
+    def test_no_rest_route(self):
+        # Share Now is the gated action handler's since #528.
+        self.assertNotIn("register_rest_route(", self.php)
+
+    def test_shown_config_is_read_only_after_the_gate(self):
+        calls = [b for b in _blocks(self.php)
+                 if "onionpress_settings_shown_config()" in b
+                 and not b.startswith("function onionpress_settings_shown_config()")]
+        self.assertEqual(len(calls), 2)     # the page, and the save's comment
+        for block in calls:
+            with self.subTest(block=block.split("\n", 1)[0]):
+                self.assertLess(block.index(OWNER_GATE),
+                                block.index("onionpress_settings_shown_config()"))
 
     def test_every_ajax_endpoint_is_the_owners(self):
         names = re.findall(r"add_action\( 'wp_ajax_(\w+)'", self.php)

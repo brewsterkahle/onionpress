@@ -51,6 +51,12 @@ class FakeDocker:
     def exec(self, container, command, timeout=30, quiet=False, **kw):
         return self.run(["exec", container, *command], timeout=timeout, quiet=quiet)
 
+    def popen(self, args, *, extra_env=None, **kwargs):
+        """A real subprocess.Popen on this fake's binary and environment
+        (the `logs -f` tests patch subprocess.Popen and read its argv)."""
+        return subprocess.Popen([self.docker_bin, *(str(a) for a in args)],
+                                env={**self.env, **(extra_env or {})}, **kwargs)
+
 
 def _read(rel):
     with open(os.path.join(PROJECT_ROOT, rel), encoding="utf-8") as f:
@@ -305,32 +311,64 @@ class TestOpen(Sandbox):
         with mock.patch.object(app_commands.launcher_ops, "login_target",
                                return_value="file:///home/x/OnionPress/.auto-login/login-1.html") as lt, \
                 mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
+            rc = app_commands.open_command("site", self.paths, with_address(), out=self.out)
+        self.assertEqual(rc, 0)
+        lt.assert_called_once_with("http://localhost:18080/", docker=mock.ANY)
+        ob.assert_called_once_with("file:///home/x/OnionPress/.auto-login/login-1.html")
+        self.assertEqual(self.out.getvalue(), "Opening http://localhost:18080/\n")
+
+    def test_the_onion_goes_to_open_onion(self):
+        with mock.patch.object(app_commands.launcher_ops, "open_onion",
+                               return_value={"ok": True, "browser": "Tor Browser"}) as oo:
             rc = app_commands.open_command("onion", self.paths, with_address(), out=self.out)
         self.assertEqual(rc, 0)
-        lt.assert_called_once_with(f"http://{ADDR}/")
-        ob.assert_called_once_with("file:///home/x/OnionPress/.auto-login/login-1.html",
-                                   prefer_tor=True)
+        oo.assert_called_once_with(f"http://{ADDR}/", docker=mock.ANY,
+                                   data_dir=self.paths.data_dir, say=mock.ANY)
         self.assertEqual(self.out.getvalue(), f"Opening http://{ADDR}/\n")
 
-    def test_onion_without_an_address_fails(self):
-        with mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
-            rc = app_commands.open_command("onion", self.paths, FakeDocker(), out=self.out)
-        self.assertEqual(rc, 1)
-        ob.assert_not_called()
-        self.assertIn("No onion address", self.err.getvalue())
+    def test_open_json_answers(self):
+        for answer, rc, text in (
+                ({"ok": True, "browser": "Tor Browser"}, 0, None),
+                ({"paste_url": f"http://{ADDR}/?op_login=T"}, 0, "paste this"),
+                ({"ok": True, "launching": True}, 0, "starting already"),
+                ({"error": "No Tor-capable browser found", "no_browser": True}, 1, None)):
+            with self.subTest(answer=answer):
+                with mock.patch.object(app_commands.launcher_ops, "open_onion",
+                                       return_value=answer):
+                    out = io.StringIO()
+                    self.assertEqual(app_commands.open_command(
+                        "onion", self.paths, with_address(), json_output=True, out=out), rc)
+                    self.assertEqual(json.loads(out.getvalue()),
+                                     {"url": f"http://{ADDR}/", **answer})
+                    out = io.StringIO()
+                    self.assertEqual(app_commands.open_command(
+                        "onion", self.paths, with_address(), out=out), rc)
+                    if text:
+                        self.assertIn(text, out.getvalue())
 
-    def test_mac_tor_browser_branch(self):
-        from onionpress import browser, launcher_ops
-        self.assertIn(browser.TOR_BROWSER_PATH, launcher_ops.TOR_BROWSER_APPS)
-        with mock.patch.object(launcher_ops.sys, "platform", "darwin"), \
-                mock.patch.object(launcher_ops, "_tor_browser_running", return_value=None), \
-                mock.patch.object(launcher_ops.shutil, "which", return_value=None), \
-                mock.patch.object(launcher_ops.os.path, "isdir",
-                                  side_effect=lambda p: p == browser.TOR_BROWSER_PATH), \
-                mock.patch.object(launcher_ops.subprocess, "Popen") as popen:
-            launcher_ops.open_in_browser("file:///x.html", prefer_tor=True)
-        self.assertEqual(popen.call_args.args[0],
-                         ["open", "-a", browser.TOR_BROWSER_PATH, "file:///x.html"])
+    def test_onion_without_an_address_fails(self):
+        with mock.patch.object(app_commands.launcher_ops, "open_onion") as oo:
+            rc = app_commands.open_command("onion", self.paths, FakeDocker(), out=self.out)
+            self.assertEqual(rc, 1)
+            out = io.StringIO()
+            self.assertEqual(app_commands.open_command("onion", self.paths, FakeDocker(),
+                                                       json_output=True, out=out), 1)
+        oo.assert_not_called()
+        self.assertIn("No onion address", self.err.getvalue())
+        self.assertIn("No onion address", json.loads(out.getvalue())["error"])
+
+    def test_the_default_browser_on_each_platform(self):
+        from onionpress import launcher_ops
+        for platform, argv in (("darwin", ["open", "http://x/"]),
+                               ("linux", ["xdg-open", "http://x/"])):
+            with self.subTest(platform), \
+                    mock.patch.object(launcher_ops.sys, "platform", platform), \
+                    mock.patch.object(launcher_ops.subprocess, "Popen") as popen:
+                launcher_ops.open_in_browser("http://x/")
+            self.assertEqual(popen.call_args.args[0], argv)
+        with mock.patch.object(launcher_ops.subprocess, "Popen", side_effect=OSError("no")), \
+                self.assertRaises(RuntimeError):
+            launcher_ops.open_in_browser("http://x/")
 
 
 class StubRegistrar:
@@ -475,79 +513,18 @@ class TestEncodeKeyFile(unittest.TestCase):
 
 
 class TestImportKeyFileFlag(unittest.TestCase):
-    """Both launchers' import_key take --file <hs_ed25519_secret_key> (and
-    Linux's `-` on stdin now too): the key reaches replace_onion_key as
-    the file's base32, after key_manager's check."""
-
-    PRELUDE = r'''
-log() { echo "[log] $*" >> "$LOG_FILE"; }
-bundled_python() { "$PY" "$@"; }
-python3() { "$PY" "$@"; }
-replace_onion_key() { printf '%s\n' "$1" >> "$CALLS"; return 0; }
-start_heartbeat_client() { :; }
-docker() { return 1; }
-'''
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="op-ikfile-")
-        self.addCleanup(shutil.rmtree, self.dir, True)
-        self.key_file = os.path.join(self.dir, "hs_ed25519_secret_key")
-        with open(self.key_file, "wb") as f:
-            f.write(CTOR_FILE)
-        self.calls = os.path.join(self.dir, "calls")
-
-    def _run(self, launcher, args, stdin=""):
-        text = _read(launcher)
-        funcs = "\n".join(_shell_function(text, n) for n in ("is_onion_address", "import_key"))
-        script = self.PRELUDE + funcs + f"\nimport_key {args}\n"
-        env = {**os.environ, "PY": sys.executable,
-               "SCRIPTS_DIR": os.path.join(PROJECT_ROOT, "src", "onionpress"),
-               "DATA_DIR": os.path.join(self.dir, "data"), "LOG_FILE": os.path.join(self.dir, "log"),
-               "CALLS": self.calls, "_BUNDLED_PYTHONHOME": "", "_BUNDLED_PYTHON_BIN": sys.executable}
-        env.pop("ONIONPRESS_CONFIRMED", None)
-        return subprocess.run(["bash", "-c", script], input=stdin, capture_output=True,
-                              text=True, timeout=120, env=env)
-
-    def _calls(self):
-        if not os.path.exists(self.calls):
-            return []
-        with open(self.calls) as f:
-            return f.read().split()
-
-    def test_mac(self):
-        r = self._run("app/MacOS/onionpress", f'--file "{self.key_file}" --json')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self._calls(), [base64.b32encode(CTOR_FILE).decode()])
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                         {"ok": True, "address": KEY_ADDR})
-
-    def test_linux(self):
-        r = self._run("linux/onionpress", f'--file "{self.key_file}"')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self._calls(), [base64.b32encode(CTOR_FILE).decode()])
-        self.assertIn(f"Imported key for: {KEY_ADDR}", r.stdout)
-
-    def test_linux_reads_the_key_from_stdin(self):
-        r = self._run("linux/onionpress", "-", stdin=base64.b32encode(KEY).decode() + "\n")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self._calls(), [base64.b32encode(KEY).decode()])
-
-    def test_a_bad_file_is_refused_before_anything(self):
-        with open(self.key_file, "wb") as f:
-            f.write(b"garbage")
-        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
-            with self.subTest(launcher=launcher):
-                r = self._run(launcher, f'--file "{self.key_file}"')
-                self.assertEqual(r.returncode, 1)
-                self.assertIn("96 bytes", r.stderr)
-                self.assertEqual(self._calls(), [])
+    """import-key --file <hs_ed25519_secret_key> (and `-` on stdin) is
+    onionpress.key_import's now (issue #524; tests/test_onion_key_replacement.py
+    runs it against a fake docker): both launchers just pass their
+    arguments on."""
 
     def test_the_launchers_list_the_new_commands(self):
         mac = _read("app/MacOS/onionpress")
         linux = _read("linux/onionpress")
+        from onionpress import cli
         for name in ("version", "check-reachability", "check-docker", "open", "onionname"):
-            self.assertIn(f"  {name}", mac + "\n")
-            self.assertIn(name + "|", linux)
+            for os_name in ("macos", "linux"):
+                self.assertIn(f"\n  {name}", cli.launcher_help(os_name), f"{os_name}: {name}")
         self.assertIn('--data-dir "$DATA_DIR" address "${@:2}"', mac)
         self.assertIn('--data-dir "$DATA_DIR" address "${@:2}"', linux)
         self.assertIn('--data-dir "$DATA_DIR" logs "${@:2}"', mac)

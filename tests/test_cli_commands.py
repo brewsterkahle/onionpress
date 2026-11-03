@@ -30,7 +30,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from onionpress import cli, confirm, hub_backup, onionheaven  # noqa: E402
+from onionpress import cli, confirm, hub_backup, onionheaven, updater  # noqa: E402
 from onionpress.backup import (  # noqa: E402
     HUB_DATA_NOT_RESTORED_NOTE, HUB_DATA_RESTORED_LOG, ONION_KEY_LEFT_OUT_NOTE,
     SettingsPageBackupRefused, SettingsPageRestoreRefused, sealed_skipped_message,
@@ -38,7 +38,7 @@ from onionpress.backup import (  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 from onionpress.config import PortConfig, Secrets  # noqa: E402
 from onionpress.containers import ContainerStatus  # noqa: E402
-from onionpress.docker import DockerResult  # noqa: E402
+from onionpress.docker import Docker, DockerResult  # noqa: E402
 from onionpress.launcher_ops import BACKUP_PASSWORD_ENV  # noqa: E402
 from onionpress.platform import OS, resolve_paths  # noqa: E402
 
@@ -56,7 +56,7 @@ def make_cli(data_dir):
     """An OnionPressCLI whose setup touched nothing but *data_dir*
     (config written there), with its docker, containers and log
     replaced by stubs."""
-    with mock.patch("onionpress.cli.detect_port_offset",
+    with mock.patch("onionpress.ports.resolve_at_start",
                     return_value=PortConfig(0, 8080, 9050, 9077)), \
             mock.patch("onionpress.cli.ensure_secrets",
                        return_value=Secrets("p1", "p2", "p3")), \
@@ -297,7 +297,10 @@ class TestLogFuncs(Sandbox):
 
 class TestHubContext(Sandbox):
 
-    def test_the_docker_environment_and_the_hub_address(self):
+    def test_the_docker_runner_and_the_hub_address(self):
+        """The context's Docker is this install's (issue #477: its socket
+        from the paths), and nothing is exported into the process's
+        environment for a bare `docker` any more."""
         bin_dir = os.path.join(self.dir, "bin")
         os.mkdir(bin_dir)
         self.write("config", f"ONIONHEAVEN_ADDRESS={HUB}\n")
@@ -306,17 +309,14 @@ class TestHubContext(Sandbox):
         saved = onionheaven.ONIONHEAVEN_ADDRESS
         self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS", saved)
         with mock.patch("onionpress.onionheaven.resolve_paths", return_value=paths), \
-                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
             ctx = cli._hub_context(self.dir, self.log)
-            self.assertEqual(os.environ["DOCKER_HOST"], f"unix://{paths.docker_socket}")
-            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], bin_dir)
-            # A second call adds the bin dir once and keeps a DOCKER_HOST
-            # the launcher exported.
-            os.environ["DOCKER_HOST"] = "unix:///launcher"
-            cli._hub_context(self.dir, self.log)
-            self.assertEqual(os.environ["DOCKER_HOST"], "unix:///launcher")
-            self.assertEqual(os.environ["PATH"].split(os.pathsep).count(bin_dir), 1)
+            self.assertNotIn("DOCKER_HOST", os.environ)
+            self.assertEqual(os.environ["PATH"], "/usr/bin")
         self.assertIsInstance(ctx, onionheaven.HubContext)
+        self.assertIsInstance(ctx.docker, Docker)
+        self.assertEqual(ctx.docker.env["DOCKER_HOST"], f"unix://{paths.docker_socket}")
+        self.assertEqual(ctx.docker.env["PATH"].split(os.pathsep)[0], bin_dir)
         self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, HUB)
 
 
@@ -324,19 +324,30 @@ class TestHubContext(Sandbox):
 # check-for-update, update, uninstall
 # ---------------------------------------------------------------------------
 
+def _release(result, assets=("OnionPress.dmg", "onionpress.deb", "SHA256SUMS")):
+    """An updater.Release from the (data, version) pairs these tests
+    describe releases with."""
+    data, version = result
+    return updater.Release(f"v{version}", version, data, list(assets))
+
+
 class TestCheckForUpdateReport(Sandbox):
 
-    def _report(self, result, *, others=(), offsets=(), json_output=False, log_lines=()):
-        def check(current, log=None):
-            for line in log_lines:
-                log(line)
-            return result
-        with mock.patch("onionpress.updater.check_for_update", side_effect=check), \
-                mock.patch("onionpress.updater.detect_other_instances",
-                           return_value=list(others)), \
+    def _report(self, result, *, others=(), offsets=(), json_output=False, error=None,
+                os_name="macos"):
+        """*result* is (data, version) or None (up to date: the release is
+        the installed 2.5.0); *error* is what the lookup failed with."""
+        if error is not None:
+            find = mock.patch("onionpress.updater.find_release",
+                              side_effect=updater.UpdateError(error))
+        else:
+            find = mock.patch("onionpress.updater.find_release",
+                              return_value=_release(result or ({}, "2.5.0")))
+        with find, mock.patch("onionpress.updater.detect_other_instances",
+                              return_value=list(others)), \
                 mock.patch("onionpress.updater.detect_active_offsets",
                            return_value=list(offsets)) as active:
-            rc = cli.check_for_update_report("2.5.0", self.log, json_output)
+            rc = cli.check_for_update_report("2.5.0", self.log, json_output, os_name=os_name)
         self.assertEqual(rc, 0)
         self.active = active
         return self.out.getvalue()
@@ -346,6 +357,7 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertIn("Installed: 2.5.0", text)
         self.assertIn("Update available: 2.6.0  (published 2026-10-01)", text)
         self.assertIn("\nFixes.\n", text)
+        self.assertIn("Run 'onionpress update' to install it.", text)
         self.assertNotIn("other users", text)
 
     def test_long_notes_are_cut(self):
@@ -355,19 +367,20 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertIn("published ?", text)
 
     def test_up_to_date(self):
-        self.assertIn("Already up to date.", self._report(None))
+        self.assertIn("Already up to date (release v2.5.0).", self._report(None))
 
     def test_a_failed_check_is_never_up_to_date(self):
-        text = self._report(None, log_lines=["Update check failed: no network"])
+        text = self._report(None, error="no network")
         self.assertIn("Update check failed: no network", text)
         self.assertNotIn("up to date", text)
         self.out.truncate(0)
         self.out.seek(0)
-        self._report(None, json_output=True, log_lines=["Update check failed: no network"])
+        self._report(None, json_output=True, error="no network")
         doc = json.loads(self.out.getvalue())
-        self.assertEqual(doc["error"], "Update check failed: no network")
+        self.assertEqual(doc["error"], "no network")
         self.assertIsNone(doc["latest"])
         self.assertFalse(doc["update_available"])
+        self.assertFalse(doc["installable"])
         self.assertTrue(any("failed" in m for m in self.logged))
 
     def test_the_json_report(self):
@@ -378,6 +391,8 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertEqual(doc["current"], "2.5.0")
         self.assertEqual(doc["latest"], "2.6.0")
         self.assertTrue(doc["update_available"])
+        self.assertTrue(doc["installable"])
+        self.assertIsNone(doc["install_problem"])
         self.assertEqual(doc["release_url"],
                          "https://github.com/brewsterkahle/onionpress/releases/tag/v2.6.0")
         self.assertIsNone(doc["error"])
@@ -385,6 +400,27 @@ class TestCheckForUpdateReport(Sandbox):
         self.assertEqual(doc["active_offsets"], [10000])
         self.assertEqual(doc["port_offset"], 10000)
         self.assertRegex(doc["checked_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_release_the_platform_cannot_install(self):
+        # The Mac wants a .dmg and SHA256SUMS; Linux its .deb and the sums.
+        with mock.patch("onionpress.updater.find_release",
+                        return_value=_release(({}, "2.6.0"), assets=("onionpress.deb",))), \
+                mock.patch("onionpress.updater.detect_other_instances", return_value=[]):
+            cli.check_for_update_report("2.5.0", self.log, True, os_name="macos")
+            mac = json.loads(self.out.getvalue())
+            self.out.truncate(0)
+            self.out.seek(0)
+            cli.check_for_update_report("2.5.0", self.log, True, os_name="linux")
+            linux = json.loads(self.out.getvalue())
+            self.out.truncate(0)
+            self.out.seek(0)
+            cli.check_for_update_report("2.5.0", self.log, False, os_name="linux")
+            text = self.out.getvalue()
+        self.assertEqual((mac["update_available"], mac["installable"]), (True, False))
+        self.assertIn("has no .dmg", mac["install_problem"])
+        self.assertEqual((linux["update_available"], linux["installable"]), (True, False))
+        self.assertIn("publishes no SHA256SUMS", linux["install_problem"])
+        self.assertIn("cannot install it: release v2.6.0 publishes no SHA256SUMS", text)
 
     def test_offsets_are_asked_only_with_other_users(self):
         os.environ["ONIONPRESS_PORT_OFFSET"] = "not-a-number"
@@ -436,8 +472,9 @@ class TestCmdUpdate(Sandbox):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         p = self.stack.enter_context
-        self.check = p(mock.patch("onionpress.updater.check_for_update",
-                                  return_value=self.release))
+        # GitHub's answer: the release (newer), or the installed 2.5.0.
+        self.check = p(mock.patch("onionpress.updater.find_release",
+                                  return_value=_release(self.release)))
         self.install = p(mock.patch("onionpress.updater.download_and_install",
                                     return_value="2.6.0"))
         self.others = p(mock.patch("onionpress.updater.detect_other_instances",
@@ -449,27 +486,57 @@ class TestCmdUpdate(Sandbox):
         self.start_agent = p(mock.patch("onionpress.daemon.start_agent"))
 
     def _update(self, **kw):
-        return cli.cmd_update(self.paths, self.log, **kw)
+        return cli.cmd_update(self.paths, self.log, os_name="macos", **kw)
+
+    def up_to_date(self):
+        self.check.return_value = _release(({}, "2.5.0"))
 
     def test_check_reports_the_bundles_version(self):
         with mock.patch("onionpress.cli.check_for_update_report", return_value=0) as report:
-            self.assertEqual(self._update(check=True, json_output=True), 0)
-        report.assert_called_once_with("2.5.0", self.log, True)
+            self.assertEqual(self._update(check=True, json_output=True, pre=True), 0)
+        report.assert_called_once_with("2.5.0", self.log, True, version=None, pre=True,
+                                       os_name="macos")
         self.install.assert_not_called()
 
     def test_without_a_plist_the_running_version_is_the_current_one(self):
         os.remove(os.path.join(self.app, "Contents", "Info.plist"))
-        self.check.return_value = None
+        self.check.return_value = _release(({}, cli.__version__))
         self.assertEqual(self._update(json_output=True), 0)
         self.assertEqual(self.answer()["current"], cli.__version__)
 
+    def test_a_lookup_failure_installs_nothing(self):
+        self.check.side_effect = updater.UpdateError("GitHub's answer did not describe a release.")
+        self.assertEqual(self._update(yes=True, json_output=True), 1)
+        self.assertIn("did not describe a release. Nothing was installed.", self.answer()["error"])
+        self.install.assert_not_called()
+
+    def test_a_release_without_a_dmg_installs_nothing(self):
+        self.check.return_value = _release(self.release, assets=("SHA256SUMS",))
+        self.assertEqual(self._update(yes=True, json_output=True), 1)
+        self.assertIn("has no .dmg. Nothing was installed.", self.answer()["error"])
+        self.install.assert_not_called()
+
+    def test_force_installs_a_release_that_is_not_newer(self):
+        self.up_to_date()
+        self.assertEqual(self._update(yes=True, json_output=True), 0)
+        self.install.assert_not_called()
+        self.assertEqual(self._update(yes=True, force=True, json_output=True), 0)
+        self.install.assert_called_once()
+        self.assertEqual(self.install.call_args.args[1], "2.5.0")
+
+    def test_a_chosen_version_reaches_the_lookup(self):
+        self._update(yes=True, version="2.6.0", pre=True)
+        self.check.assert_called_with("2.6.0", True, log=self.log)
+
     def test_up_to_date(self):
-        self.check.return_value = None
+        self.up_to_date()
         self.assertEqual(self._update(), 0)
-        self.assertIn("Installed: 2.5.0\nChecking GitHub for updates...\nAlready up to date.",
+        self.assertIn("Installed: 2.5.0\nChecking GitHub for updates...\nAlready up to date "
+                      "(OnionPress 2.5.0; release v2.5.0). Nothing to install.\n"
+                      "To install v2.5.0 anyway: onionpress update --version 2.5.0 --force",
                       self.out.getvalue())
         self.assertEqual(self._update(json_output=True), 0)
-        self.assertEqual(self.answer(), {"ok": True, "update_available": False,
+        self.assertEqual(self.answer(), {"ok": True, "update_available": False, "latest": "2.5.0",
                                          "current": "2.5.0"})
 
     def test_off_a_terminal_an_update_needs_yes(self):
@@ -780,7 +847,7 @@ class TestCmdRestore(Sandbox):
         self.read_meta = p(mock.patch("onionpress.backup.read_backup_metadata",
                                       side_effect=lambda *a: dict(self.meta)))
 
-        def prepare(zip_path, password, log, *, data_dir=None, after_extract=None):
+        def prepare(zip_path, password, log, *, docker=None, data_dir=None, after_extract=None):
             if after_extract:
                 after_extract(self.staging, dict(self.meta))
             return self.staging, dict(self.meta)
@@ -958,7 +1025,8 @@ class TestImportBackupArtifacts(Sandbox):
         self.assertEqual(self.cli.cmd_import_backup_artifacts(self.staging), 0)
         args, kw = self.restore.call_args
         self.assertEqual(args[:2], (self.staging, {"onion_address": ADDR}))
-        self.assertEqual(kw, {"name_registry": True, "hub_data": None, "data_dir": self.dir})
+        self.assertEqual(kw, {"docker": self.cli.docker, "name_registry": True, "hub_data": None,
+                              "data_dir": self.dir})
         self.cli.docker.wp.assert_called_once_with("core", "update-db", timeout=120)
         self.assertIn("Install-from-backup: artifacts imported", self.cli.logged)
 
@@ -998,143 +1066,33 @@ class TestStagingHelpers(Sandbox):
         self.assertEqual(self.cli.logged, [])
         with open(self.cli.paths.log_file) as f:
             self.assertIn("from the sweep", f.read())
-        self.assertEqual(regen.call_args.kwargs["docker_bin"], "/stub/docker")
+        self.assertIs(regen.call_args.kwargs["docker"], self.cli.docker)
         with mock.patch("onionpress.derivatives.regenerate_if_pending",
                         return_value=True) as regen, \
                 mock.patch.object(sys, "stderr", mock.Mock(isatty=lambda: True)):
             self.cli.cmd_regenerate_derivatives()
         self.assertIs(regen.call_args.args[1], self.cli.log)
 
-    def test_prune_image_derivatives(self):
-        self.assertEqual(self.cli.cmd_prune_image_derivatives(os.path.join(self.dir, "x")), 0)
-        self.assertEqual(self.out.getvalue(), "0 0\n")
-        with mock.patch("onionpress.derivatives.prune_image_derivatives",
-                        return_value=(3, 4096)) as prune:
-            self.assertEqual(self.cli.cmd_prune_image_derivatives(self.dir), 0)
-        prune.assert_called_once_with(self.dir, self.cli.log)
-        self.assertEqual(self.out.getvalue(), "0 0\n3 4096\n")
-
-    def test_scrub_staging(self):
-        self.assertEqual(OnionPressCLI.cmd_scrub_staging(os.path.join(self.dir, "none")), 0)
-        with mock.patch("onionpress.backup.scrub_staged_tree") as scrub:
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(self.dir), 0)
-            scrub.side_effect = OSError("denied")
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(self.dir), 1)
-        self.assertIn("could not check the staged files for links: denied", self.err.getvalue())
-
-    def test_stage_wp_content(self):
-        with mock.patch("onionpress.backup.stage_wp_content") as stage:
-            self.assertEqual(OnionPressCLI.cmd_stage_wp_content("/dest"), 0)
-            self.assertEqual(stage.call_args.args[0], "/dest")
-            stage.side_effect = RuntimeError("tar failed")
-            self.assertEqual(OnionPressCLI.cmd_stage_wp_content("/dest"), 1)
-        self.assertIn("could not copy wp-content: tar failed", self.err.getvalue())
-
-    def test_stage_hub_data(self):
-        with mock.patch("onionpress.backup.hub_data_state", side_effect=[None, "none", "hub", "hub"]), \
-                mock.patch("onionpress.backup.stage_hub_data",
-                           side_effect=[None, RuntimeError("cp")]) as stage:
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 4)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 3)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 0)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 1)
-        self.assertEqual(stage.call_count, 2)
-        err = self.err.getvalue()
-        self.assertIn("did not say whether it holds", err)
-        self.assertIn("could not copy the OnionHeaven data: cp", err)
-
-    def test_stage_hub_backup(self):
-        with mock.patch("onionpress.backup.hub_data_state", side_effect=[None, "none", "hub", "hub"]), \
-                mock.patch("onionpress.backup.stage_hub_backup",
-                           side_effect=[{"onionheaven_data": "sealed"}, RuntimeError("seal")]) as stage:
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 4)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 3)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 0)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 1)
-        self.assertEqual(stage.call_args.kwargs, {"data_dir": self.dir})
-        self.assertEqual(json.loads(self.out.getvalue()), {"onionheaven_data": "sealed"})
-        self.assertIn("could not back up the OnionHeaven data: seal", self.err.getvalue())
-
-    def test_the_settings_page_checks(self):
-        cases = (
-            ("settings_page_backup_refusal",
-             lambda: OnionPressCLI.cmd_settings_page_backup_check(ADDR, self.dir)),
-            ("settings_page_restore_node_refusal",
-             lambda: OnionPressCLI.cmd_settings_page_restore_node_check(ADDR, self.dir)),
-            ("settings_page_restore_refusal",
-             lambda: OnionPressCLI.cmd_settings_page_restore_check("/stg")),
-        )
-        for name, run in cases:
-            with self.subTest(name=name), \
-                    mock.patch("onionpress.backup.hub_data_state", return_value="none"), \
-                    mock.patch(f"onionpress.backup.{name}", side_effect=["", "this is a hub"]):
-                self.assertEqual(run(), 0)
-                self.assertEqual(run(), 3)
-        self.assertEqual(self.out.getvalue(), "this is a hub\n" * 3)
-
-    def test_wordpress_safe_config(self):
-        with mock.patch("onionpress.backup.write_wordpress_safe_config",
-                        side_effect=[["CLOUDFLARE_TUNNEL_TOKEN"], OSError("ro")]):
-            self.assertEqual(OnionPressCLI.cmd_wordpress_safe_config("/c", "/d"), 0)
-            self.assertEqual(OnionPressCLI.cmd_wordpress_safe_config("/c", "/d"), 1)
-        self.assertEqual(self.out.getvalue(), "CLOUDFLARE_TUNNEL_TOKEN\n")
-        self.assertIn("could not write the config for WordPress: ro", self.err.getvalue())
-
-    def test_restore_hub_data(self):
-        with mock.patch("onionpress.backup.restore_hub_data",
-                        side_effect=[None, RuntimeError("bad key")]):
-            self.assertEqual(OnionPressCLI.cmd_restore_hub_data("/src"), 0)
-            self.assertEqual(OnionPressCLI.cmd_restore_hub_data("/src"), 1)
-        self.assertIn("could not restore the OnionHeaven data: bad key", self.err.getvalue())
-
     def test_put_wp_tree(self):
         with mock.patch("onionpress.wp_files.put_tree", side_effect=[
                 mock.Mock(returncode=0), mock.Mock(returncode=1, stderr="tar: denied\n"),
                 OSError("no docker")]) as put:
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x", True), 0)
-            self.assertEqual(put.call_args.kwargs, {"merge": True})
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x"), 1)
-            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x"), 1)
+            docker = object()
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x", True,
+                                                           docker=docker), 0)
+            self.assertEqual(put.call_args.kwargs, {"docker": docker, "merge": True})
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x",
+                                                           docker=docker), 1)
+            self.assertEqual(OnionPressCLI.cmd_put_wp_tree("/src/theme", "/var/www/x",
+                                                           docker=docker), 1)
         err = self.err.getvalue()
         self.assertIn("Could not copy theme into WordPress: tar: denied", err)
         self.assertIn("Could not copy theme into WordPress: no docker", err)
 
-    def test_pack_and_extract_failures(self):
-        with mock.patch("onionpress.backup.pack_backup", side_effect=[None, OSError("full")]):
-            self.assertEqual(self.cli.cmd_pack_backup("/stg", "/out.zip", "pw"), 0)
-            self.assertEqual(self.cli.cmd_pack_backup("/stg", "/out.zip", "pw"), 1)
-        with mock.patch("onionpress.backup.extract_backup",
-                        side_effect=[None, ValueError("wrong password")]) as extract:
-            self.assertEqual(self.cli.cmd_extract_backup("/b.zip", "/dest", "pw"), 0)
-            self.assertEqual(extract.call_args.kwargs, {"staging": "/dest"})
-            self.assertEqual(self.cli.cmd_extract_backup("/b.zip", "/dest", "pw"), 1)
-        err = self.err.getvalue()
-        self.assertIn("encrypting the archive failed: full", err)
-        self.assertIn("could not extract the backup: wrong password", err)
-
-    def test_backup_address(self):
-        with mock.patch("onionpress.backup.staged_backup_address",
-                        side_effect=[ADDR, "", ValueError("bad metadata")]):
-            self.assertEqual(OnionPressCLI.cmd_backup_address("/stg"), 0)
-            self.assertEqual(OnionPressCLI.cmd_backup_address("/stg"), 0)
-            self.assertEqual(OnionPressCLI.cmd_backup_address("/stg"), 1)
-        self.assertEqual(self.out.getvalue(), ADDR + "\n")
-        self.assertIn("refusing the backup: bad metadata", self.err.getvalue())
-
-    def test_restore_config(self):
-        with mock.patch("onionpress.backup.restore_backup_config",
-                        side_effect=[None, None, OSError("ro")]) as restore:
-            self.assertEqual(OnionPressCLI.cmd_restore_config("/stg", "/cfg", ADDR), 0)
-            self.assertEqual(restore.call_args.args[3], ADDR)
-            self.assertEqual(OnionPressCLI.cmd_restore_config("/stg", "/cfg", "junk"), 0)
-            self.assertEqual(restore.call_args.args[3], "")
-            self.assertEqual(OnionPressCLI.cmd_restore_config("/stg", "/cfg"), 1)
-        self.assertIn("could not restore settings: ro", self.err.getvalue())
-
     def test_passthroughs(self):
         with mock.patch("onionpress.wayback_smoke.smoke_test_wayback", return_value=5) as smoke:
             self.assertEqual(self.cli.cmd_smoke_test_wayback(), 5)
-        smoke.assert_called_once_with(self.cli.log)
+        smoke.assert_called_once_with(self.cli.docker, self.cli.log)
         with mock.patch("onionpress.cli.check_for_update_report", return_value=0) as report:
             self.assertEqual(self.cli.cmd_check_for_update(json_output=True), 0)
             report.assert_called_once_with(cli.__version__, self.cli.log, True)
@@ -1214,25 +1172,25 @@ class TestHubRecoveryKeyCommands(Sandbox):
                 mock.patch("onionpress.hub_backup.unpack", return_value="hub"), \
                 mock.patch("onionpress.hub_backup.check", return_value="checked-hub"), \
                 mock.patch("onionpress.backup.write_hub_data") as write:
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 0)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 0)
             self.assertEqual(unseal.call_args.args, (b"blob", hub_backup.parse_private_key(text)))
             self.assertEqual(write.call_args.args[0], "checked-hub")
             self.assertIn("registrants' keys restored.", self.out.getvalue())
             # The key is checked before anything is written.
             other, _ = hub_backup.create_recovery_key(os.path.join(self.dir, "b"))
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", other), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", other, docker=mock.Mock()), 1)
             self.assertEqual(write.call_count, 1)
             # A failed write.
             write.side_effect = RuntimeError("docker cp")
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
             self.assertIn("could not restore the OnionHeaven data: docker cp", self.err.getvalue())
         with mock.patch("onionpress.backup.read_sealed_hub_member",
                         side_effect=ValueError("This backup holds no sealed hub data.")):
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
         self.assertIn("ERROR: This backup holds no sealed hub data.", self.err.getvalue())
         with mock.patch("onionpress.backup.read_sealed_hub_member",
                         return_value=({**meta, "onionheaven_sealed_format": 9}, b"blob")):
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
         self.assertIn(hub_backup.NEWER_SEAL_MSG.split("\n")[0][:40], self.err.getvalue())
 
 
@@ -1365,6 +1323,31 @@ class TestResetAtATerminal(Sandbox):
         self.assertFalse(os.path.exists(os.path.dirname(self.vanity)))
         self.assertIn("Removed volume: onionpress-db-data", self.cli.logged)
 
+    def test_on_linux_the_launcher_starts_the_stack_and_the_hub_state_is_reset(self):
+        # #529: the Linux launcher's reset tail (its start, then the
+        # onionheaven container's reset while it runs), in Python.
+        self.cli.docker.container_running.side_effect = lambda name: name == "onionheaven"
+        runs = []
+        with mock.patch.object(cli.subprocess, "run", side_effect=lambda argv, **kw: runs.append(argv)), \
+                mock.patch("onionpress.onionheaven.reset_hub_state", return_value={"reset": True}) as hub:
+            self.assertEqual(self.cli.cmd_reset(yes=True, os_name="linux", launcher="/x/onionpress"), 0)
+        self.assertEqual(runs, [["/x/onionpress", "start"]])
+        hub.assert_called_once_with(self.cli.docker, self.cli.log)
+        out = self.out.getvalue()
+        self.assertIn("Starting fresh containers...", out)
+        self.assertIn("Run 'onionpress setup' to initialize WordPress.", out)
+        self.assertNotIn("Run 'onionpress start'", out)
+        self.assertIn("Resetting OnionHeaven...", self.cli.logged)
+        self.assertIn("OnionPress reset and restarted", self.cli.logged)
+
+    def test_on_linux_a_start_that_cannot_run_is_a_warning_and_no_hub_reset_without_the_container(self):
+        self.cli.docker.container_running.return_value = False
+        with mock.patch.object(cli.subprocess, "run", side_effect=OSError("no launcher")), \
+                mock.patch("onionpress.onionheaven.reset_hub_state") as hub:
+            self.assertEqual(self.cli.cmd_reset(yes=True, os_name="linux", launcher="/x/onionpress"), 0)
+        hub.assert_not_called()
+        self.assertIn("WARNING: the start after the reset failed: no launcher", self.cli.logged)
+
     def test_ctrl_c_at_the_question_cancels(self):
         self.tty()
         with mock.patch("builtins.input", side_effect=KeyboardInterrupt):
@@ -1457,6 +1440,7 @@ class TestSettingsPageBackup(Sandbox):
         args, kw = self.create.call_args
         self.assertEqual(args[:4], (ADDR, "owner", "pw", "/out.zip"))
         self.assertEqual(args[4], cli.__version__)
+        self.assertIsInstance(kw.pop("docker"), Docker)
         self.assertEqual(kw, {"include_hub_data": False, "include_host_secrets": False,
                               "include_onion_key": False})
 
@@ -1485,14 +1469,18 @@ class TestSettingsPageBackup(Sandbox):
 
 
 class TestSettingsPageRestore(Sandbox):
+    """The Mac's: the address-change question and the hub release. Linux
+    refuses the change instead (tests/test_settings_page_onion_key.py),
+    so the OS is pinned here."""
 
     def _restore(self, confirmed=frozenset(), json_output=True):
-        return cli.cmd_settings_page_restore("/up.zip", "pw", self.dir, json_output, confirmed)
+        with mock.patch("onionpress.cli.detect_os", return_value=cli.OS.MACOS):
+            return cli.cmd_settings_page_restore("/up.zip", "pw", self.dir, json_output, confirmed)
 
     def test_the_hubs_are_asked_before_the_key_changes_and_a_refusal_is_logged(self):
         seen = {}
 
-        def restore(zip_path, password, log, *, through_wordpress, before_key_change,
+        def restore(zip_path, password, log, *, docker, through_wordpress, before_key_change,
                     confirm_address_change):
             seen["through"] = through_wordpress
             seen["confirmed"] = confirm_address_change(ADDR, OTHER)
@@ -1535,7 +1523,9 @@ class TestPrepareRestore(Sandbox):
         with mock.patch("onionpress.backup.prepare_install_from_backup",
                         return_value=("/stg", meta)) as prepare:
             rc = cli.cmd_prepare_restore("/b.zip", "pw", self.dir, True)
-        self.assertEqual(prepare.call_args.kwargs, {"data_dir": self.dir})
+        kwargs = dict(prepare.call_args.kwargs)
+        self.assertIsInstance(kwargs.pop("docker"), Docker)
+        self.assertEqual(kwargs, {"data_dir": self.dir})
         return rc
 
     def test_a_plain_backup(self):

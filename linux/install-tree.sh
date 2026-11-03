@@ -42,15 +42,12 @@ tree       linux/assets                             assets
 file       src/onionpress/onion_auth.py             scripts/onion_auth.py              0644
 file       src/onionpress/onion_keys.py             scripts/onion_keys.py              0644
 file       src/onionpress/key_manager.py            scripts/key_manager.py             0644
-file       linux/onionpress-heartbeat.py            scripts/onionpress-heartbeat.py    0644
 file       app/Resources/scripts/install_plugin.sh  scripts/install_plugin.sh          0755
 file       app/Resources/scripts/activate_plugin.sh scripts/activate_plugin.sh         0755
 file       linux/docker-rootless/dockerd-rootless.sh           docker-rootless/dockerd-rootless.sh           0755
 file       linux/docker-rootless/dockerd-rootless-setuptool.sh docker-rootless/dockerd-rootless-setuptool.sh 0755
 file       linux/onionpress.service                 onionpress.service                 0644
-file       linux/onionpress-heartbeat.service       onionpress-heartbeat.service       0644
-file       linux/onionpress-watcher.service         onionpress-watcher.service         0644
-file       linux/onionpress-watcher.timer           onionpress-watcher.timer           0644
+file       linux/onionpress-daemon.service          onionpress-daemon.service          0644
 file       app/Resources/app-icon.png               app-icon.png                       0644
 egress     src/onionpress/wordpress_egress.py       onionpress-wordpress-egress        0755
 version    src/menubar.py                           VERSION                            0644

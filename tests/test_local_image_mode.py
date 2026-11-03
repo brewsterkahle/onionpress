@@ -336,8 +336,15 @@ class TestEveryPullIsGuarded(unittest.TestCase):
                 if not self._guarded(lines, i):
                     unguarded.append(f"{path}:{lineno}: {line.strip()}")
             with self.subTest(path=path):
+                # Neither launcher pulls the key helper image any more
+                # (each one's unused ensure_key_helper_image is gone, the
+                # Mac's on 2026-10-31, Linux's on 2026-11-02): those pulls
+                # are the Python start's (containers.ensure_tor_image,
+                # start.start_core), held by tests/test_no_image_refresh.py
+                # and tests/test_image_pins.py. Linux's update_finish still
+                # pulls the stack (`--policy missing`).
                 self.assertTrue(
-                    found,
+                    found or path == "app/MacOS/onionpress",
                     f"No image pull found in {path} at all — have they been "
                     "renamed or removed? Update this test rather than "
                     "letting it pass vacuously.",
@@ -358,13 +365,18 @@ class TestEveryPullIsGuarded(unittest.TestCase):
         alone. tests/test_image_pins.py keeps `--pull always` out of both
         launchers.
         """
-        text = _read("app/MacOS/onionpress")
-        self.assertIn(
-            "docker compose up -d tor", text,
-            "The start-tor path must start tor without a pull policy.",
-        )
-        self.assertEqual(
-            [], [l for _, l in _code_lines(text) if "--pull always" in l])
+        # The start-tor path is ContainerManager.start_tor since #529
+        # (`onionpress start-tor`); the launchers run no compose for it.
+        import inspect
+        from onionpress import containers
+        src = inspect.getsource(containers.ContainerManager.start_tor)
+        self.assertIn('["up", "-d", "--no-deps", "tor"]', src)
+        self.assertNotIn("--pull", src)
+        for rel in ("app/MacOS/onionpress", "linux/onionpress"):
+            text = _read(rel)
+            self.assertEqual(
+                [], [l for _, l in _code_lines(text) if "--pull always" in l], rel)
+            self.assertNotIn("docker compose up -d tor", text, rel)
 
 
 class TestDevUpScript(unittest.TestCase):

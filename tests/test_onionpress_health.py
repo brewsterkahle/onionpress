@@ -21,11 +21,12 @@ from onionpress.health import (
     RepublishTrigger, decode_curl_reason,
     PROBE_PATH, PROBE_PATH_FALLBACK, PROBE_STATIC_RECHECK_SECONDS,
     PROBE_TIMEOUT_SECONDS, PROBE_RETRY_TIMEOUT_SECONDS,
-    PROBE_LOG_HEALTHY_INTERVAL_SECONDS, ONIONHEAVEN_HUB_ADDRESS,
+    PROBE_LOG_HEALTHY_INTERVAL_SECONDS,
     WELL_KNOWN_ONIONS, REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS,
     REPUBLISH_FAST_CLASSES, REPUBLISH_MIN_FAILURE_RATIO,
     REPUBLISH_RECOVERY_STREAK, WEDGE_CLASSIFY_TTL_SECONDS,
 )
+from onionpress.onionheaven import DEFAULT_ONIONHEAVEN_ADDRESS as ONIONHEAVEN_HUB_ADDRESS
 
 
 def _ok(stdout="", stderr=""):
@@ -73,19 +74,19 @@ class TestCheckWordpressLocal(unittest.TestCase):
     def test_healthy(self):
         docker = mock.Mock()
         docker.exec.return_value = _ok("<html>WordPress</html>")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertTrue(hc.check_wordpress_local())
 
     def test_database_error(self):
         docker = mock.Mock()
         docker.exec.return_value = _ok("Error establishing a database connection")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertFalse(hc.check_wordpress_local())
 
     def test_unreachable(self):
         docker = mock.Mock()
         docker.exec.return_value = _fail()
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertFalse(hc.check_wordpress_local())
 
 
@@ -157,7 +158,7 @@ class TestCheckTorBootstrap(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.return_value = _fail()
         docker.run.return_value = _ok("Bootstrapped 100% (done): Done")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         bootstrapped, pct = hc.check_tor_bootstrap()
         self.assertTrue(bootstrapped)
         self.assertEqual(pct, 100)
@@ -166,7 +167,7 @@ class TestCheckTorBootstrap(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.return_value = _fail()
         docker.run.return_value = _ok("PROGRESS=50 TAG=loading")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         bootstrapped, pct = hc.check_tor_bootstrap()
         self.assertFalse(bootstrapped)
         self.assertEqual(pct, 50)
@@ -175,7 +176,7 @@ class TestCheckTorBootstrap(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.return_value = _fail()
         docker.run.return_value = _fail()
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         bootstrapped, pct = hc.check_tor_bootstrap()
         self.assertFalse(bootstrapped)
         self.assertEqual(pct, 0)
@@ -185,7 +186,7 @@ class TestCheckTorBootstrap(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.return_value = _ok("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done")
         docker.run.side_effect = AssertionError("should not fall through to logs")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         bootstrapped, pct = hc.check_tor_bootstrap()
         self.assertTrue(bootstrapped)
         self.assertEqual(pct, 100)
@@ -198,7 +199,7 @@ class TestCheckTorHostname(unittest.TestCase):
     def test_returns_address(self):
         docker = mock.Mock()
         docker.exec.return_value = _ok(HOSTNAME + "\n")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertEqual(hc.check_tor_hostname(), HOSTNAME)
 
     def test_mismatch_logs_warning(self):
@@ -206,7 +207,7 @@ class TestCheckTorHostname(unittest.TestCase):
         different = "dif" + "b" * 53 + ".onion"
         docker.exec.return_value = _ok(different + "\n")
         logs = []
-        hc = HealthChecker(docker, log_func=logs.append)
+        hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
         addr = hc.check_tor_hostname(expected_address=HOSTNAME)
         self.assertEqual(addr, different)
         self.assertTrue(any("mismatch" in l for l in logs))
@@ -221,7 +222,7 @@ class TestCheckTorHostname(unittest.TestCase):
                 docker = mock.Mock()
                 docker.exec.return_value = _ok(content + "\n")
                 logs = []
-                hc = HealthChecker(docker, log_func=logs.append)
+                hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
                 self.assertEqual(hc.check_tor_hostname(), "")
                 self.assertTrue(any("valid onion address" in l for l in logs))
 
@@ -230,18 +231,25 @@ class TestCheckInternalConnectivity(unittest.TestCase):
     def test_reachable(self):
         docker = mock.Mock()
         docker.exec.return_value = _ok()
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertTrue(hc.check_internal_connectivity())
 
     def test_unreachable(self):
         docker = mock.Mock()
         docker.exec.return_value = _fail()
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertFalse(hc.check_internal_connectivity())
 
 
 class TestCheckInternetConnectivity(unittest.TestCase):
-    """Interface-scan based check — no TCC-gated API calls."""
+    """Interface-scan based check — no TCC-gated API calls (the Mac's;
+    Linux reads the routing table: tests/test_linux_daemon.py)."""
+
+    def setUp(self):
+        from onionpress.platform import OS
+        p = mock.patch("onionpress.platform.detect_os", return_value=OS.MACOS)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _run(self, stdout, returncode=0):
         return mock.Mock(returncode=returncode, stdout=stdout)
@@ -335,6 +343,12 @@ SITE = "op2abc.onion"
 STATIC = f"{SITE}{PROBE_PATH}"
 ROOT = f"{SITE}/"
 HUB = f"{ONIONHEAVEN_HUB_ADDRESS}/"
+
+
+def REGISTERED():
+    """hub_reference of an install registering with the default hub."""
+    return ONIONHEAVEN_HUB_ADDRESS
+
 TORPROJECT = f"{WELL_KNOWN_ONIONS[0][1]}/"
 DUCKDUCKGO = f"{WELL_KNOWN_ONIONS[1][1]}/"
 CIRCUITS_UP = _ok("250-status/circuit-established=1\r\n250 OK")
@@ -381,7 +395,7 @@ class TestCheckExternalReachability(unittest.TestCase):
         # Hot path: onionheaven returns 200, we short-circuit without probing self.
         docker = mock.Mock()
         docker.exec.return_value = _resp("200")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertTrue(reachable)
         self.assertEqual(code, "200")
@@ -398,7 +412,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionheaven", HUB): _resp("200", body="hub"),
             **CLASSIFY_TABLE,
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertFalse(reachable)
         self.assertEqual(code, "000:rc=97")
@@ -418,7 +432,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionheaven", DUCKDUCKGO): _fail(),
             **CLASSIFY_TABLE,
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertTrue(reachable)
         self.assertTrue(code.startswith("degraded:"))
@@ -435,7 +449,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionheaven", HUB): _resp("200", body="hub"),
             **CLASSIFY_TABLE,
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, _code = hc.check_external_reachability(SITE)
         self.assertFalse(reachable)
 
@@ -453,7 +467,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             **CLASSIFY_TABLE,
         }
         docker.exec.side_effect = _dispatch(table)
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertTrue(reachable)
         self.assertEqual(code, "200")
@@ -477,7 +491,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             _fail(code=28),  # plain probe: curl timeout
             _resp("301"),    # isolated retry: success
         ]
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc._probe_onion_via("onionpress-tor", SITE)
         self.assertTrue(reachable)
         self.assertEqual(code, "301")
@@ -493,7 +507,7 @@ class TestCheckExternalReachability(unittest.TestCase):
     def test_timeout_twice_is_reported_as_timeout(self):
         docker = mock.Mock()
         docker.exec.side_effect = [_fail(code=28), _fail(code=28)]
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc._probe_onion_via("onionpress-tor", SITE)
         self.assertFalse(reachable)
         self.assertEqual(code, "000:rc=28")
@@ -504,7 +518,7 @@ class TestCheckExternalReachability(unittest.TestCase):
         # unusable); fresh circuits can't change that — same client cache.
         docker = mock.Mock()
         docker.exec.side_effect = [_fail(code=97)]
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc._probe_onion_via("onionpress-tor", SITE)
         self.assertFalse(reachable)
         self.assertEqual(code, "000:rc=97")
@@ -512,7 +526,7 @@ class TestCheckExternalReachability(unittest.TestCase):
 
     def test_empty_address(self):
         docker = mock.Mock()
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc.check_external_reachability("")
         self.assertFalse(reachable)
         docker.exec.assert_not_called()
@@ -530,7 +544,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionheaven", DUCKDUCKGO): _fail(),
             **CLASSIFY_TABLE,
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         r1, _ = hc.check_external_reachability(SITE)
         r2, _ = hc.check_external_reachability(SITE)
         self.assertTrue(r1)
@@ -547,7 +561,7 @@ class TestProbeTransport(unittest.TestCase):
     def test_probes_the_static_file_and_splits_the_latency(self):
         docker = mock.Mock()
         docker.exec.return_value = _resp("200", timings="0.900 1.100 1.200")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         pr = hc._curl_onion("onionheaven", SITE)
         self.assertTrue(pr.ok)
         self.assertEqual(pr.code, "200")
@@ -564,7 +578,7 @@ class TestProbeTransport(unittest.TestCase):
     def test_legacy_bare_status_output_still_parses(self):
         docker = mock.Mock()
         docker.exec.return_value = _ok("200")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         pr = hc._curl_onion("onionheaven", SITE)
         self.assertTrue(pr.ok)
         self.assertEqual((pr.tor_ms, pr.app_ms), (-1, -1))
@@ -572,7 +586,7 @@ class TestProbeTransport(unittest.TestCase):
     def test_static_file_without_marker_is_not_our_site(self):
         docker = mock.Mock()
         docker.exec.return_value = _resp("200", body="<html>Welcome to the captive portal</html>")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         pr = hc._curl_onion("onionheaven", SITE)
         self.assertFalse(pr.ok)
         self.assertEqual(pr.code, "foreign")
@@ -582,7 +596,7 @@ class TestProbeTransport(unittest.TestCase):
     def test_takeover_header_wins_on_the_static_path(self):
         docker = mock.Mock()
         docker.exec.return_value = _resp("302", body="", takeover=True)
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         pr = hc._curl_onion("onionheaven", SITE)
         self.assertFalse(pr.ok)
         self.assertEqual(pr.code, "takeover")
@@ -596,7 +610,7 @@ class TestProbeTransport(unittest.TestCase):
             ("onionheaven", ROOT): _resp("301", body=""),
         })
         logs = []
-        hc = HealthChecker(docker, log_func=logs.append)
+        hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
         pr = hc._curl_site("onionheaven", SITE)
         self.assertTrue(pr.ok)
         self.assertEqual(pr.code, "301")
@@ -622,7 +636,7 @@ class TestOnionheavenTorHealthy(unittest.TestCase):
     def test_no_circuits_is_a_definite_no_without_any_curl(self):
         docker = mock.Mock()
         docker.exec.side_effect = _dispatch({("onionheaven", "ctl"): CIRCUITS_DOWN})
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertFalse(hc.check_onionheaven_tor_healthy())
         self.assertEqual(docker.exec.call_count, 1)
 
@@ -636,7 +650,7 @@ class TestOnionheavenTorHealthy(unittest.TestCase):
             ("onionheaven", TORPROJECT): _resp("200", body="Tor Project"),
         })
         logs = []
-        hc = HealthChecker(docker, log_func=logs.append)
+        hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
         self.assertTrue(hc.check_onionheaven_tor_healthy())
         keys = [k for k, _ in docker.exec.side_effect.calls]
         self.assertNotIn(("onionheaven", DUCKDUCKGO), keys)  # stopped at first answer
@@ -648,7 +662,7 @@ class TestOnionheavenTorHealthy(unittest.TestCase):
             ("onionheaven", "ctl"): CIRCUITS_UP,
             ("onionheaven", HUB): _resp("503", body="maintenance"),
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         # Any HTTP answer proves the circuits work, even a 503.
         self.assertTrue(hc.check_onionheaven_tor_healthy())
         self.assertEqual(docker.exec.call_count, 2)
@@ -661,7 +675,7 @@ class TestOnionheavenTorHealthy(unittest.TestCase):
             ("onionheaven", TORPROJECT): _ok("000"),
             ("onionheaven", DUCKDUCKGO): _fail(code=97),
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertFalse(hc.check_onionheaven_tor_healthy())
         self.assertEqual(docker.exec.call_count, 4)
 
@@ -680,7 +694,7 @@ class TestProbeLogLine(unittest.TestCase):
             **CLASSIFY_TABLE,
         })
         logs = []
-        hc = HealthChecker(docker, log_func=logs.append)
+        hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertFalse(reachable)
         line = next(m for m in logs if m.startswith("probe "))
@@ -699,7 +713,7 @@ class TestProbeLogLine(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.return_value = _resp("200")
         logs = []
-        hc = HealthChecker(docker, log_func=logs.append)
+        hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
         with mock.patch("onionpress.health.time.time", return_value=1000.0):
             hc.check_external_reachability(SITE)
             hc.check_external_reachability(SITE)
@@ -719,26 +733,26 @@ class TestTorContainerUnhealthy(unittest.TestCase):
         for pattern in SICK_PATTERNS:
             docker = mock.Mock()
             docker.run.return_value = _ok(f"some log\n{pattern}\nmore log")
-            hc = HealthChecker(docker)
+            hc = HealthChecker(docker, hub_reference=REGISTERED)
             self.assertTrue(hc.tor_container_unhealthy(), f"Should be unhealthy for: {pattern}")
 
     def test_healthy_pattern(self):
         docker = mock.Mock()
         docker.run.return_value = _ok("Sufficiently bootstrapped to build circuits")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertFalse(hc.tor_container_unhealthy())
 
     def test_no_patterns_returns_healthy(self):
         docker = mock.Mock()
         docker.run.return_value = _ok("some random log output")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         # No clear signals → don't restart (conservative approach)
         self.assertFalse(hc.tor_container_unhealthy())
 
     def test_log_failure_returns_unhealthy(self):
         docker = mock.Mock()
         docker.run.return_value = _fail()
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertTrue(hc.tor_container_unhealthy())
 
 
@@ -753,7 +767,7 @@ class TestFullCheck(unittest.TestCase):
             _ok("200"),              # check_external_reachability
         ]
         docker.run.return_value = _ok("Bootstrapped 100% (done)")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         hr = hc.full_check()
         self.assertTrue(hr.ready)
         self.assertTrue(hr.wp_healthy)
@@ -770,7 +784,7 @@ class TestFullCheck(unittest.TestCase):
             _ok(HOSTNAME + "\n"), # check_tor_hostname
         ]
         docker.run.return_value = _ok("Bootstrapped 100%")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         hr = hc.full_check()
         self.assertFalse(hr.ready)
         self.assertFalse(hr.tor_internally_ready)
@@ -794,7 +808,7 @@ class TestFullCheck(unittest.TestCase):
             _ok(),           # check_internal_connectivity
         ]
         docker.run.return_value = _ok("Bootstrapped 100% (done)")
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         hr = hc.full_check()
         self.assertTrue(hr.tor_internally_ready)
         self.assertEqual(hr.onion_address, "")
@@ -961,7 +975,7 @@ class TestCheckVMWedge(unittest.TestCase):
         docker.exec.return_value = _ok(stdout=loadavg_output) if loadavg_output else _fail()
         # `run(["inspect", ...])`
         docker.run.return_value = _ok(stdout=inspect_output) if inspect_output else _fail()
-        return HealthChecker(docker)
+        return HealthChecker(docker, hub_reference=REGISTERED)
 
     def test_wedged_machine_returns_alarm_signals(self):
         # Snapshot: load=150.14, wp unhealthy, streak=32
@@ -999,7 +1013,7 @@ class TestCheckVMWedge(unittest.TestCase):
         docker = mock.MagicMock()
         docker.exec.return_value = _fail()
         docker.run.return_value = _fail()
-        checker = HealthChecker(docker)
+        checker = HealthChecker(docker, hub_reference=REGISTERED)
         self.assertIsNone(checker.check_vm_wedge())
 
     def test_malformed_loadavg_doesnt_crash(self):
@@ -1024,7 +1038,7 @@ class TestCheckVMWedge(unittest.TestCase):
         docker = mock.MagicMock()
         docker.exec.return_value = _ok(stdout="1.0 1.0 1.0 1/200 12345\n")
         docker.run.return_value = _ok(stdout='{"Status":"healthy","FailingStreak":0}')
-        checker = HealthChecker(docker)
+        checker = HealthChecker(docker, hub_reference=REGISTERED)
         checker.check_vm_wedge()
         for call in docker.exec.call_args_list:
             self.assertNotEqual(
@@ -1294,7 +1308,7 @@ class TestClassifyWedge(unittest.TestCase):
         if theirs is not None:
             table[("onionheaven", "ctl:GETINFO hs/client/desc/id")] = theirs
         docker.exec.side_effect = _dispatch(table)
-        return HealthChecker(docker), docker
+        return HealthChecker(docker, hub_reference=REGISTERED), docker
 
     def test_descriptor_missing(self):
         hc, docker = self._hc(FETCH_NOT_FOUND, None)
@@ -1371,7 +1385,7 @@ class TestClassifyWedge(unittest.TestCase):
             ("onionheaven", "ctl:HSFETCH"): FETCH_NOT_FOUND,
         })
         logs = []
-        hc = HealthChecker(docker, log_func=logs.append)
+        hc = HealthChecker(docker, hub_reference=REGISTERED, log_func=logs.append)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertFalse(reachable)
         self.assertEqual(hc.last_probe["why"], "desc-missing")
@@ -1398,7 +1412,7 @@ class TestClassifyWedge(unittest.TestCase):
             ("onionheaven", "ctl"): CIRCUITS_UP,
             ("onionheaven", HUB): _resp("200", body="hub"),
         })
-        hc = HealthChecker(docker)
+        hc = HealthChecker(docker, hub_reference=REGISTERED)
         reachable, code = hc.check_external_reachability(SITE)
         self.assertEqual(code, "takeover")
         keys = [k for k, _ in docker.exec.side_effect.calls]
@@ -1432,11 +1446,15 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         menubar = open(os.path.join(self.ROOT, "src/menubar.py"), encoding="utf-8").read()
         self.assertNotIn("def handle_wake(", menubar)
 
-    def test_linux_wake_resets_the_trigger(self):
-        body = self._body("src/onionpress/reachability.py",
-                          "    def note_wake(self) -> None:",
-                          "    def _slept_since_last_cycle(self)")
-        self.assertIn("self.recovery.note_wake()", body)
+    def test_linux_wake_is_the_daemons_too(self):
+        # One wake handler on both platforms since #407 (the daemon's
+        # handle_wake, run by power.LogindPowerHandler on Linux); the
+        # Linux ReachabilityLoop with its own reset is gone.
+        self.assertNotIn("class ReachabilityLoop", open(os.path.join(
+            self.ROOT, "src/onionpress/reachability.py"), encoding="utf-8").read())
+        daemon = open(os.path.join(self.ROOT, "src/onionpress/daemon.py"), encoding="utf-8").read()
+        self.assertIn("on_has_powered_on=lambda: None if self._quitting else self.handle_wake()", daemon)
+        self.assertIn("from .power import LogindPowerHandler", daemon)
 
     def test_the_shared_wake_reset_resets_the_window(self):
         from onionpress.reachability import RecoveryWindow
@@ -1450,12 +1468,11 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         window.note_wake()
         self.assertIsNone(window.trigger.failing_since)
 
-    def test_linux_heartbeat_wake_handler_calls_note_wake(self):
-        body = self._body("linux/onionpress-heartbeat.py",
-                          "    def _on_prepare_for_sleep(self, going_to_sleep):",
-                          "    def _signal_watchdogs(self, sig):")
-        wake = body[body.index("else:"):]
-        self.assertIn("_reachability.note_wake()", wake)
+    def test_the_logind_handler_runs_the_wake_callback(self):
+        src = open(os.path.join(self.ROOT, "src/onionpress/power.py"), encoding="utf-8").read()
+        body = src[src.index("    def _on_prepare_for_sleep(self, going_to_sleep) -> None:"):]
+        wake = body[body.index("self._acquire()"):]
+        self.assertIn("self._on_has_powered_on()", wake)
 
 
 if __name__ == "__main__":

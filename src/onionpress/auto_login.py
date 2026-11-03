@@ -1,6 +1,6 @@
 """One-time admin auto-login links that never sit on a command line.
 
-The menubar (Mac), the tray and `onionpress dashboard` (Linux) open the
+`onionpress open` (the menubar's and the tray's) and `onionpress dashboard` open the
 user's site already logged in as its administrator: they store a random
 token in WordPress for TOKEN_TTL seconds and open the site with
 `?op_login=<token>`, which the onionpress-auto-login.php mu-plugin trades
@@ -9,11 +9,12 @@ is the admin, so it must never appear in a process's argv: `ps` (macOS) and
 /proc/<pid>/cmdline (Linux) show every user's command lines, and several
 users can share one Mac.
 
-- mint() hands the token to a fixed `wp eval` PHP (MINT_PHP) on stdin.
-- On a Mac the URL reaches the browser through LaunchServices, called from
-  inside the menubar process (browser.open_url), not through `open`.
-- On Linux a browser takes URLs only on its command line, so it is given
-  the path of a 0600 page that redirects to the URL (write_redirect_page).
+- mint() hands the token to a fixed `wp eval` PHP (MINT_PHP) on stdin,
+  through the caller's onionpress.docker.Docker.
+- A browser is given the path of a 0600 page that redirects to the URL
+  (write_redirect_page), never the URL: on Linux a browser takes URLs only
+  on its command line, and since issue #527 the Mac opens the site through
+  `onionpress open` (launcher_ops.login_target) as Linux does.
 - A token is bound to where it is redeemed: a "local" token only over
   localhost and never through Tor, an "onion" token only on a .onion host
   (the mu-plugin checks).
@@ -29,7 +30,7 @@ import time
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from . import key_manager, wp_files
+from . import key_manager
 
 # The mu-plugin honours a token this many seconds after it is minted. MINT_PHP
 # spells the number out (it is fixed code); a test keeps the two equal.
@@ -83,25 +84,20 @@ def add_token(url: str, token: str) -> str:
     return f"{url}{sep}op_login={token}"
 
 
-def mint(scope: str, *, docker_bin: str = "docker", env=None,
-         container: str = "onionpress-wordpress", timeout: int = 15,
+def mint(scope: str, *, docker, timeout: int = 15,
          log_func: Optional[Callable[[str], None]] = None) -> Optional[str]:
     """Store a fresh token for *scope* in WordPress; return it, or None.
 
-    The token goes to MINT_PHP on stdin (`docker exec -i`): nothing that
-    names it is ever an argument. Failures are logged without the argv.
+    The token goes to MINT_PHP on stdin (`docker exec -i`, docker.wp as
+    www-data, offline: storing a transient needs no network): nothing
+    that names it is ever an argument. Failures are logged without the
+    argv (a DockerResult's stderr names none).
     """
     if scope not in SCOPES:
         raise ValueError(f"unknown auto-login scope {scope!r}")
     token = new_token()
-    try:
-        result = wp_files.wp_cli("eval", MINT_PHP, docker_bin=docker_bin,
-                                 env=env, input=f"{token}\n{scope}\n",
-                                 timeout=timeout, container=container)
-    except (subprocess.SubprocessError, OSError) as e:
-        if log_func:
-            log_func(f"Auto-login token error: {type(e).__name__}")
-        return None
+    result = docker.wp("eval", MINT_PHP, input=f"{token}\n{scope}\n",
+                       timeout=timeout, offline=True, quiet=True)
     if result.returncode != 0:
         if log_func:
             log_func(f"Auto-login token failed: {(result.stderr or '').strip()[-200:]}")
@@ -109,17 +105,18 @@ def mint(scope: str, *, docker_bin: str = "docker", env=None,
     return token
 
 
-def login_url(base_url: str, **mint_kwargs) -> Optional[str]:
+def login_url(base_url: str, *, docker,
+              log_func: Optional[Callable[[str], None]] = None) -> Optional[str]:
     """*base_url* with a freshly minted token, or None when no token could
     be minted (the caller opens *base_url* without auto-login)."""
     scope = scope_for(base_url)
     if scope is None:
         return None
-    token = mint(scope, **mint_kwargs)
+    token = mint(scope, docker=docker, log_func=log_func)
     return add_token(base_url, token) if token else None
 
 
-# ─── Linux: the redirect page ────────────────────────────────────────────
+# ─── The redirect page ────────────────────────────────────────────
 
 # Under a non-hidden top-level directory of $HOME: snap browsers (Ubuntu's
 # Firefox and Chromium) can read nothing in /tmp, $XDG_RUNTIME_DIR or a

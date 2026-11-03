@@ -425,7 +425,7 @@ exit 127
         enable = calls.index(self._enabled_onionpress(calls)[0])
         self.assertLess(reload_, enable)
         self.assertTrue(self._enabled_onionpress(calls)[0].endswith(
-            "onionpress.service onionpress-heartbeat.service onionpress-watcher.timer"))
+            "onionpress.service onionpress-daemon.service"))
 
     def test_docker_ces_tool_on_path_is_used(self):
         self._docker_ce_layout()

@@ -352,10 +352,13 @@ class TestResolvePortOffset(unittest.TestCase):
     nothing of ours is up yet.
     """
 
+    docker = object()   # the caller's Docker, handed on to the port lookup
+
     def test_reads_running_stack_port_without_bumping(self):
         with mock.patch("onionpress.ports.get_running_wp_port",
-                         return_value=8080):
-            pc = resolve_port_offset()
+                         return_value=8080) as lookup:
+            pc = resolve_port_offset(self.docker)
+        lookup.assert_called_once_with(docker=self.docker)
         self.assertEqual(pc, PortConfig(offset=0, wp_port=8080, socks_port=9050, proxy_port=9077))
 
     def test_reads_running_stack_on_nonzero_offset(self):
@@ -364,7 +367,7 @@ class TestResolvePortOffset(unittest.TestCase):
         # silently mis-addressed for the rest of the session.
         with mock.patch("onionpress.ports.get_running_wp_port",
                          return_value=18080):
-            pc = resolve_port_offset()
+            pc = resolve_port_offset(self.docker)
         self.assertEqual(pc, PortConfig(offset=10000, wp_port=18080, socks_port=19050, proxy_port=19077))
 
     def test_falls_back_to_detect_when_nothing_running(self):
@@ -373,7 +376,7 @@ class TestResolvePortOffset(unittest.TestCase):
                          return_value=None), \
              mock.patch("onionpress.ports.detect_port_offset",
                          return_value=sentinel) as m:
-            pc = resolve_port_offset()
+            pc = resolve_port_offset(self.docker)
         m.assert_called_once()
         self.assertEqual(pc, sentinel)
 
