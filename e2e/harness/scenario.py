@@ -8,6 +8,8 @@ session, so whatever T0 did is not done again.
 
 import secrets
 
+from .proc import wait_until
+
 ADMIN_USER = "op-e2e-admin"
 # One password per run, never written anywhere but the node; the harness
 # log replaces it with ***.
@@ -28,3 +30,28 @@ def ensure_ready(e2e, node):
     if not node.wp_admin_user:
         node.setup_wordpress(ADMIN_USER, ADMIN_PASSWORD)
     return node
+
+
+TOR_PAGE_TIMEOUT = 300        # a page right after the health file answered
+
+
+def tor_page(node, visitor, path, *, timeout=TOR_PAGE_TIMEOUT, every=10):
+    """*visitor*'s fetch of *path* on *node*'s address over Tor, retried
+    while no answer comes back. A request can time out on the circuit that
+    served the health file seconds before (seen once on Ubuntu right after
+    setup: the request never reached Apache), so only an answer counts;
+    its status is the caller's to judge. A fetch that needed retries is
+    noted in the report."""
+    attempts = []
+
+    def fetch():
+        attempts.append(path)
+        return visitor.tor_fetch(node.address, path, timeout=90)
+
+    resp = wait_until(fetch, timeout=timeout, every=every,
+                      label=f"{node.name}: {path} over Tor (visitor {visitor.name})",
+                      timings=node.timings, log=node.log)
+    if len(attempts) > 1:
+        node.notes.append(f"{path} over Tor answered only after {len(attempts) - 1} "
+                          f"failed attempts (the health file had answered)")
+    return resp
