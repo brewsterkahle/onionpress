@@ -42,6 +42,43 @@ class HostProbeTest(unittest.TestCase):
                                          which=_which({}), mac_app=app)
         self.assertEqual(facts.tools["limactl"], bundled)
 
+    def test_a_bundle_without_limactl_is_passed_over(self):
+        """A build still being made (`make dmg` beside a run) has no
+        limactl yet: the next candidate's is used, so the run does not
+        report "no limactl" while the installed app has one."""
+        with tempfile.TemporaryDirectory() as root:
+            half_built = os.path.join(root, "build", "OnionPress.app")
+            installed = os.path.join(root, "installed", "OnionPress.app")
+            os.makedirs(os.path.join(half_built, "Contents", "Resources"))
+            bundled = os.path.join(installed, "Contents", "Resources", "bin", "limactl")
+            os.makedirs(os.path.dirname(bundled))
+            open(bundled, "w").close()
+            facts = platforms.probe_host(sys_platform="darwin", mac_ver="27.0", machine="arm64",
+                                         which=_which({}), mac_app=[half_built, installed])
+            self.assertEqual(facts.tools["limactl"], bundled)
+            # The first bundle that has one wins.
+            first = os.path.join(half_built, "Contents", "Resources", "bin", "limactl")
+            os.makedirs(os.path.dirname(first))
+            open(first, "w").close()
+            facts = platforms.probe_host(sys_platform="darwin", mac_ver="27.0", machine="arm64",
+                                         which=_which({}), mac_app=[half_built, installed])
+            self.assertEqual(facts.tools["limactl"], first)
+
+    def test_app_candidates_order(self):
+        self.assertEqual(platforms.app_candidates("/co"),
+                         ["/co/OnionPress.app", platforms.INSTALLED_APP])
+        self.assertEqual(platforms.app_candidates("/co", "/x/OnionPress.app"),
+                         ["/x/OnionPress.app", "/co/OnionPress.app", platforms.INSTALLED_APP])
+
+    def test_probe_and_session_ask_the_same_bundles(self):
+        """The probe and the run once chose their bundle differently, so a
+        probe said linux-vm while the run found no limactl."""
+        for rel in ("e2e/probe.py", "e2e/harness/session.py"):
+            with open(os.path.join(PROJECT_DIR, rel), encoding="utf-8") as f:
+                src = f.read()
+            self.assertIn("platforms.app_candidates(PROJECT_DIR", src, rel)
+            self.assertNotIn("/Applications/OnionPress.app", src, rel)
+
     def test_mac_without_any_limactl_tests_only_macos(self):
         facts = platforms.probe_host(sys_platform="darwin", mac_ver="27.0", machine="arm64",
                                      which=_which({}))

@@ -130,14 +130,27 @@ def canonical_platform(name):
     return LEGACY_PLATFORM_NAMES.get(name, name)
 
 
+INSTALLED_APP = "/Applications/OnionPress.app"
+
+
+def app_candidates(project_dir, mac_app=""):
+    """The OnionPress.app bundles that may carry a limactl, in the order
+    they are asked: --mac-app, the checkout's build, the installed app.
+    Only their limactl is used (never the app itself)."""
+    return [p for p in (mac_app, os.path.join(project_dir, "OnionPress.app"), INSTALLED_APP) if p]
+
+
 def find_limactl(which=shutil.which, mac_app=None, exists=os.path.isfile):
-    """limactl on PATH, else the one inside a Mac OnionPress.app (it ships
-    Lima 2.x with its templates, debian-13 among them)."""
+    """limactl on PATH, else the one inside the first OnionPress.app (a
+    path or a list, see app_candidates) that has one: it ships Lima 2.x
+    with its templates, debian-13 among them. A bundle without one (a
+    build still being made) is passed over, never taken as "no limactl"."""
     found = which("limactl")
     if found:
         return found
-    if mac_app:
-        bundled = os.path.join(mac_app, "Contents", "Resources", "bin", "limactl")
+    apps = [mac_app] if isinstance(mac_app, str) else list(mac_app or ())
+    for app in apps:
+        bundled = os.path.join(app, "Contents", "Resources", "bin", "limactl")
         if exists(bundled):
             return bundled
     return None
