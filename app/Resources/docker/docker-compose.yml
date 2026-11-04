@@ -434,6 +434,13 @@ services:
       # worker its cap, and the heartbeat monitor here counts on it.
       - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
       - ONIONHEAVEN_MAX_SERVICES=${ONIONHEAVEN_MAX_SERVICES:-50}
+      # The fleet brake (onionheaven-heartbeat.py, issue #390): no takeover
+      # for a missed heartbeat while this share (or more) of at least this
+      # many online sites is stale at once, and at most this many stale
+      # takeovers per pass.
+      - ONIONHEAVEN_BRAKE_MIN_SITES=${ONIONHEAVEN_BRAKE_MIN_SITES:-5}
+      - ONIONHEAVEN_BRAKE_FRACTION=${ONIONHEAVEN_BRAKE_FRACTION:-0.5}
+      - ONIONHEAVEN_STALE_TAKEOVERS_PER_PASS=${ONIONHEAVEN_STALE_TAKEOVERS_PER_PASS:-25}
     # No Docker socket: its heartbeat monitor creates, inspects, execs into
     # and removes the takeover worker containers through onionheaven-farm
     # above, over the socket on the onionheaven-farm volume. It hosts no
