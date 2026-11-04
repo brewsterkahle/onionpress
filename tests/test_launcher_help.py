@@ -46,8 +46,9 @@ class TestText(unittest.TestCase):
         self.assertIn("a systemd user unit", linux)
         self.assertIn("move\n                OnionPress.app to the Trash", mac)
         self.assertIn("/opt/onionpress (sudo)", linux)
-        self.assertIn("  start-tor, launch,", mac)
+        self.assertIn("  start-vm, start-tor, launch,", mac)
         self.assertNotIn("start-tor", linux)
+        self.assertNotIn("start-vm", linux)
 
     def test_no_removed_command_and_the_protocol_lines(self):
         for os_name in ("macos", "linux"):

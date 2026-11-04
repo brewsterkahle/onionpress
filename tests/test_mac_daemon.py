@@ -282,12 +282,22 @@ class _DaemonCase(unittest.TestCase):
         self.d._hub_loops = lambda: None
         self.d._resync_ports = lambda: None
         self.d.run_launcher = self._run_launcher
+        # No real CLI subprocess either: a pass's archive.org-keys thread
+        # ran `onionpress --data-dir <this dir> ensure-archive-s3-keys`,
+        # whose port resolution removed the .previous-port-offset a later
+        # _shutdown had written (seen on the macOS runner, PR #565).
+        self.cli_calls = []
+        self.d.run_cli = self._run_cli
         self.d._settings_page_thread_sync = True
 
     def _run_launcher(self, args, timeout=60, env=None):
         self.launcher_calls.append(list(args))
         rc, out = self.launcher_answers.get(args[0], (0, ""))
         return rc, out
+
+    def _run_cli(self, args, timeout=60):
+        self.cli_calls.append(list(args))
+        return 0, ""
 
     def state(self):
         return op_daemon.read_state(self.dir)
@@ -699,6 +709,7 @@ class TestCliOnlySubcommands(_DaemonCase):
 
     def setUp(self):
         super().setUp()
+        del self.d.run_cli  # the real one, its subprocess.run mocked per test
         self.logged = []
         self.d._log_func = self.logged.append
 

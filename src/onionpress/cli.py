@@ -3068,8 +3068,9 @@ def launcher_help(os_name: str) -> str:
         "(or sets ONIONPRESS_CONFIRMED); without the confirmation they refuse.",
         "",
         "Advanced / internal (used by the menubar app, the tray or scripts):",
-        ("  start-tor, launch, upload-analytics, validate-oh-address, scrub," if mac
-         else "  upload-analytics, validate-oh-address, scrub,"),
+        *(["  start-vm, start-tor, launch, upload-analytics, validate-oh-address,",
+            "  scrub,"] if mac
+          else ["  upload-analytics, validate-oh-address, scrub,"]),
         "  daemon offline (the daemon tells the hub /offline before a stop),",
         "  handle-action (the WordPress Settings page's requests),",
         "  apply-config (its saved settings),",
