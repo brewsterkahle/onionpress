@@ -178,15 +178,15 @@ class EveryClientIsRootTest(unittest.TestCase):
         self.assertNotRegex(op_exec, r"--user|\"-u\"")
 
     def test_workers_run_as_the_image_user_root(self):
-        for rel, pattern in (
-                ("app/Resources/docker/tor/onionheaven-farm.py",
-                 r'\[\s*"run", "-d",.*?image,\s*\]'),
-                ("src/onionpress/containers.py", r'\[\s*"run", "-d",.*?image,\s*\]')):
-            spawns = re.findall(pattern, _read(rel), re.S)
-            self.assertTrue(spawns, rel)
-            for spawn in spawns:
-                self.assertNotRegex(spawn, r'--user|"-u"|\s-u\s', rel)
-        # The Mac launcher starts no worker (its _start_takeover_worker is gone).
+        rel = "app/Resources/docker/tor/onionheaven-farm.py"
+        spawns = re.findall(r'\[\s*"run", "-d",.*?image,\s*\]', _read(rel), re.S)
+        self.assertTrue(spawns, rel)
+        for spawn in spawns:
+            self.assertNotRegex(spawn, r'--user|"-u"|\s-u\s', rel)
+        # The farm controller is the one spawner: the host's
+        # ContainerManager.start_farm_worker went on 2026-11-04, and the
+        # Mac launcher's _start_takeover_worker before it.
+        self.assertNotIn('"run", "-d"', _read("src/onionpress/containers.py"))
         self.assertNotIn("TAKEOVER_WORKER=1", _read("app/MacOS/onionpress"))
         dockerfile = _read("app/Resources/docker/tor/Dockerfile")
         self.assertEqual(re.findall(r"^USER\s+(\S+)", dockerfile, re.M)[-1], "root")

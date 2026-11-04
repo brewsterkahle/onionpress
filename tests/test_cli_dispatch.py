@@ -475,12 +475,6 @@ ROWS = [
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=1, returns=False),
-    # Issue #345: what the Linux launcher's is_onionheaven_hub() ran (the
-    # function had no caller left and went).
-    Row("is-onionheaven-hub", ["is-onionheaven-hub", ONION],
-        "onionheaven.is_onionheaven_instance", mock.call(ONION), rc=0, returns=True),
-    Row("is-onionheaven-hub", ["is-onionheaven-hub"],
-        "onionheaven.is_onionheaven_instance", mock.call(""), rc=1, returns=False),
     # #442.3: the launchers' install_bundled_plugins() / setup_bundled_plugins()
     # are onionpress.bundled_plugins, never OnionPressCLI; best effort, so 0
     # whatever happens (a raised error is a logged WARNING).

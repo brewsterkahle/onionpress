@@ -40,7 +40,7 @@ src/onionpress/key_import.py 85
 src/onionpress/updater.py 89
 src/onionpress/start.py 86
 src/onionpress/bundled_plugins.py 95
-src/onionpress/containers.py 93
+src/onionpress/containers.py 95
 "
 
 # `python` is the interpreter that ran the tests (uv run / CI's venv).

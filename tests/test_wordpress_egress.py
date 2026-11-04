@@ -192,8 +192,8 @@ class TestComposeNetworks(unittest.TestCase):
 
     def test_takeover_workers_stay_off_it(self):
         """They face Tor and never need WordPress."""
+        # The farm controller is the one spawner (the host's went 2026-11-04).
         sources = {
-            "src/onionpress/containers.py": _read(os.path.join(ROOT, "src", "onionpress", "containers.py")),
             "onionheaven-farm.py": _read(os.path.join(DOCKER, "tor", "onionheaven-farm.py")),
         }
         for name, text in sources.items():

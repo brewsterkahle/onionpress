@@ -391,11 +391,12 @@ class TestRestore(_Case):
     def test_the_recovery_key_travels_in_the_environment(self):
         self.l.add_stubs('op_py() { _op_rec "hubkey ${ONIONPRESS_HUB_RECOVERY_KEY:-unset}"; _op_py "$@"; }\n'
                          'bundled_python() { shift 2; op_py "$@"; }')
-        r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_HUB_RECOVERY_KEY": "rk",
+        r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_HUB_RECOVERY_KEY": "RECOVERY-KEY",
                                                    "ONIONPRESS_BACKUP_PASSWORD": "pw"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("hubkey rk", self.l.calls())
-        self.assertNotIn("rk", " ".join(self.l.py_calls()))
+        self.assertIn("hubkey RECOVERY-KEY", self.l.calls())
+        # Not a lowercase word: the argv holds a random temp path.
+        self.assertNotIn("RECOVERY-KEY", " ".join(self.l.py_calls()))
 
 
 class TestStartTor(_Case):

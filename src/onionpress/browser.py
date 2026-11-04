@@ -16,15 +16,6 @@ BRAVE_BROWSER_PATH = "/Applications/Brave Browser.app"
 # Browsers we trust for open -a / osascript activate
 ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
 
-# Browsers that support the OnionPress extension
-EXTENSION_BROWSERS = {
-    "Firefox": "/Applications/Firefox.app",
-    "Google Chrome": "/Applications/Google Chrome.app",
-    "Brave Browser": "/Applications/Brave Browser.app",
-    "Microsoft Edge": "/Applications/Microsoft Edge.app",
-}
-
-
 def is_tor_browser_installed():
     """Check if Tor Browser is installed in /Applications."""
     return os.path.isdir(TOR_BROWSER_PATH)
@@ -131,12 +122,6 @@ def browser_menu_title(app_support):
     if btype == 'brave':
         return "Open in Brave Browser"
     return "Open in Browser"
-
-
-def installed_extension_browsers():
-    """Return list of installed browsers that support the OnionPress extension."""
-    return [name for name, path in EXTENSION_BROWSERS.items()
-            if os.path.exists(path)]
 
 
 def wait_for_app_install(app_path, executable_subpath, timeout=600,

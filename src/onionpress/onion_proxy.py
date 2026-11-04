@@ -450,14 +450,6 @@ def check_php_proxy(log_func=None, wp_port=None):
         return False
 
 
-def _script_json(value):
-    """*value* as a JavaScript literal safe inside an inline <script>:
-    json.dumps leaves '<', '>' and '&' alone, so a "</script>" in the value
-    would end the script element."""
-    return (json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e')
-            .replace('&', '\\u0026'))
-
-
 def own_hosts(port):
     """The Host values that name this proxy: its loopback names with its
     port (a bare name only when the port is 80, which it never is). A
@@ -892,47 +884,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_setup_form_with_error(self, params, error_msg):
-        """Re-render the setup form with an error banner and previously entered values."""
-        import html as html_mod
-
-        banner = (
-            '<div class="error-banner">'
-            + html_mod.escape(error_msg)
-            + '</div>'
-        )
-
-        # Preserve previously entered values. The password goes into a
-        # value="..." attribute: escape it.
-        admin_password = html_mod.escape(params.get('admin_password', [''])[0])
-
-        page = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', admin_password)
-        page = page.replace('{{SUGGESTED_USERNAME}}', '')
-        page = page.replace('{{ERROR_BANNER}}', banner)
-
-        # Also preserve other field values via JavaScript
-        blog_title = params.get('blog_title', ['My OnionPress Site'])[0]
-        user_name = params.get('user_name', [''])[0]
-        theme = params.get('theme_choice', ['blog'])[0]
-
-        # Inject script to restore form values
-        restore_script = (
-            '<script>'
-            f'document.getElementById("blog_title").value={_script_json(blog_title)};'
-            f'document.getElementById("user_name").value={_script_json(user_name)};'
-            f'var radios=document.querySelectorAll("input[name=theme_choice]");'
-            f'radios.forEach(function(r){{r.checked=r.value==={_script_json(theme)}}});'
-            '</script>'
-        )
-        page = page.replace('</body>', restore_script + '</body>')
-
-        body = page.encode('utf-8')
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
     def _setup_post_same_origin(self):
         """False for a POST a browser sent from any page but the setup page
         this proxy served: browsers send Origin with every POST, so any web
@@ -1146,7 +1097,3 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         return self._ports().wp_port
 
 
-def stop_proxy(server):
-    """Stop the proxy server."""
-    if server:
-        server.shutdown()

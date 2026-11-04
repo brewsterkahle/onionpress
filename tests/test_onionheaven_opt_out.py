@@ -242,7 +242,7 @@ class TestMacHeartbeatLoopFollowsTheChoice(_MacCase):
 class TestMacNothingGoesToTheHubUnlessYes(_MacCase):
     """_send_heartbeat is the one sender of the key; /offline makes the hub
     take the address over. Neither goes out for no or unset, whoever calls
-    (registration, the loop, the wake reclaim, sleep/stop/quit)."""
+    (registration, the loop, sleep/stop/quit)."""
 
     def test_heartbeat_and_notifications(self):
         self.registered(hub=HUB)
@@ -252,7 +252,6 @@ class TestMacNothingGoesToTheHubUnlessYes(_MacCase):
                 rec = _Recorder(lambda argv: '{"online": true, "offline": true}')
                 with answering(app, rec):
                     self.assertFalse(onionheaven._send_heartbeat(app))
-                    self.assertFalse(onionheaven.notify_onionheaven_online(app))
                     self.assertFalse(onionheaven.notify_onionheaven_offline(app))
                     self.assertFalse(onionheaven._send_onionheaven_notification(
                         app, "online", "online"))

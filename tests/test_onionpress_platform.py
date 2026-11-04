@@ -9,8 +9,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.platform import (
-    OS, Arch, OnionPressPaths,
-    detect_os, detect_arch, detect_timezone, resolve_paths, find_app_bundle, linux_docker_dir,
+    OS, OnionPressPaths,
+    detect_os, detect_timezone, resolve_paths, find_app_bundle, linux_docker_dir,
 )
 
 
@@ -27,31 +27,6 @@ class TestDetectOS(unittest.TestCase):
     def test_unsupported(self, _):
         with self.assertRaises(RuntimeError):
             detect_os()
-
-
-class TestDetectArch(unittest.TestCase):
-    @mock.patch("platform.system", return_value="Darwin")
-    @mock.patch("subprocess.run")
-    def test_macos_arm64(self, mock_run, _):
-        mock_run.return_value = mock.Mock(returncode=0, stdout="1\n")
-        self.assertEqual(detect_arch(), Arch.ARM64)
-
-    @mock.patch("platform.system", return_value="Darwin")
-    @mock.patch("platform.machine", return_value="x86_64")
-    @mock.patch("subprocess.run")
-    def test_macos_x86(self, mock_run, _machine, _system):
-        mock_run.return_value = mock.Mock(returncode=1, stdout="")
-        self.assertEqual(detect_arch(), Arch.X86_64)
-
-    @mock.patch("platform.system", return_value="Linux")
-    @mock.patch("platform.machine", return_value="aarch64")
-    def test_linux_arm64(self, _machine, _system):
-        self.assertEqual(detect_arch(), Arch.ARM64)
-
-    @mock.patch("platform.system", return_value="Linux")
-    @mock.patch("platform.machine", return_value="x86_64")
-    def test_linux_x86(self, _machine, _system):
-        self.assertEqual(detect_arch(), Arch.X86_64)
 
 
 class TestDetectTimezone(unittest.TestCase):

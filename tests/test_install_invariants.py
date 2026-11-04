@@ -1839,12 +1839,12 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("wait_for_docker",
                  "config_value",
-                 "using_local_images",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
     # Without a limactl on PATH they report the VM as not Running, so the
     # Docker-down cases below still stop without any recovery attempt.
-    OPTIONAL_FUNCTIONS = ("start_errors_file", "note_start_errors",
+    OPTIONAL_FUNCTIONS = ("using_local_images",  # Linux's start only
+                          "start_errors_file", "note_start_errors",
                           "wordpress_bind_host_for_start",
                           "lima_vm_running", "recover_lima_vm",
                           "wait_for_docker_or_recover_vm",

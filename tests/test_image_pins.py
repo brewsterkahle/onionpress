@@ -508,18 +508,11 @@ class TestLocalImageOverride(unittest.TestCase):
         containers = _read("src/onionpress/containers.py")
         self.assertRegex(
             containers,
-            r'image_override\("ONIONHEAVEN_IMAGE"[,)]',  # with or without config_file
-            "onionheaven_image() must prefer the ONIONHEAVEN_IMAGE override, "
-            "matching docker-compose.yml's resolution order.",
-        )
-        self.assertRegex(
-            containers,
             r'image_override\("ONIONPRESS_TOR_IMAGE"[,)]',
-            "onionheaven_image() must fall back to ONIONPRESS_TOR_IMAGE "
-            "before the pin.",
+            "tor_image() must prefer ONIONPRESS_TOR_IMAGE to the pin.",
         )
         self.assertIn(
-            '~/.onionpress/config', containers,
+            '~/.onionpress/config', _read("src/onionpress/image_overrides.py"),
             "image_override must also read ~/.onionpress/config. The bash "
             "launcher exports these after reading that file, but the "
             "MenubarApp is the launcher's PARENT — it spawns the launcher, "

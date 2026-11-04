@@ -920,20 +920,6 @@ class SetupProgressWindow(AppKit.NSObject):
             NSApp.activateIgnoringOtherApps_(True)
         _on_main(_show)
 
-    def show_progress(self):
-        """Switch to the progress phase (skip welcome)."""
-        def _show():
-            if not self.window:
-                self.create_window()
-            self._showing_welcome = False
-            if self.welcome_view:
-                self.welcome_view.setHidden_(True)
-            if self.progress_view:
-                self.progress_view.setHidden_(False)
-            self.window.makeKeyAndOrderFront_(None)
-            NSApp.activateIgnoringOtherApps_(True)
-        _on_main(_show)
-
     def hide(self):
         def _hide():
             if self.window:
@@ -995,10 +981,6 @@ class SetupProgressWindow(AppKit.NSObject):
                 self.status_label.setStringValue_(message)
         _on_main(_update)
 
-    def set_detail(self, message):
-        """Alias for set_status (compatibility)."""
-        self.set_status(message)
-
     def add_log(self, message, status="info"):
         """Append a line to the log tail area and auto-scroll."""
         def _update():
@@ -1039,19 +1021,6 @@ class SetupProgressWindow(AppKit.NSObject):
 
     # -- compatibility stubs ------------------------------------------------
 
-    def set_modem_active(self, active):
-        pass
-
-    def set_tor_final_hop_connected(self):
-        pass
-
-    def transition_to_progress(self):
-        self.show_progress()
-
-    def set_callbacks(self, on_continue=None, on_cancel=None):
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Thread-safe main-thread dispatch
 # ---------------------------------------------------------------------------
@@ -1076,20 +1045,11 @@ def get_setup_window():
         _setup_window = SetupProgressWindow.alloc().init()
     return _setup_window
 
-def show_setup_progress():
-    window = get_setup_window()
-    window.show_progress()
-    return window
-
 def show_welcome_screen(on_continue=None, on_cancel=None):
     """Show the welcome screen with credential fields."""
     window = get_setup_window()
     window.show_welcome()
     return window
-
-def hide_setup_progress():
-    window = get_setup_window()
-    window.hide()
 
 def close_setup_progress():
     global _setup_window

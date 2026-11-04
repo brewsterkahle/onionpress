@@ -10,9 +10,7 @@ an inline <script>.
 Nothing here talks to Docker: subprocess is mocked.
 """
 import io
-import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -198,25 +196,6 @@ class TestSetupPostOnlyOnFirstRun(_SetupTest):
 
 class TestSetupFormPages(unittest.TestCase):
 
-    def test_form_with_error_escapes_every_echoed_field(self):
-        h, _, _ = _handler()
-        params = {"admin_password": [XSS], "blog_title": ["</script><script>t()</script>"],
-                  "user_name": ["a&b"], "theme_choice": ["</script><img src=x onerror=y>"]}
-        h._send_setup_form_with_error(params, f"bad {XSS}")
-        page = h.wfile.getvalue().decode()
-        # The template's own script plus the restore script, nothing more.
-        template = onion_proxy.SETUP_PAGE_HTML
-        self.assertEqual(page.count("<script>"), template.count("<script>") + 1)
-        self.assertEqual(page.count("</script>"), template.count("</script>") + 1)
-        self.assertNotIn("<img", page)
-        m = re.search(r'name="admin_password" id="admin_password" value="([^"]*)"', page)
-        self.assertEqual(m.group(1), "&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;")
-        # Restored values are the submitted ones, not HTML entities.
-        script = page[page.rindex("<script>") + 8:page.rindex("</script>")]
-        values = re.findall(r'\.value=("(?:[^"\\]|\\.)*")', script)
-        self.assertEqual([json.loads(v) for v in values],
-                         ["</script><script>t()</script>", "a&b"])
-
     def test_generated_password_is_attribute_safe(self):
         h, _, sent = _handler(run=_run())
         with mock.patch.object(onion_proxy.subprocess, "run", _run()), \
@@ -225,12 +204,6 @@ class TestSetupFormPages(unittest.TestCase):
         page = h.wfile.getvalue().decode()
         self.assertEqual(sent, [200])
         self.assertIn('value="' + "&amp;" * 24 + '"', page)
-
-    def test_script_json(self):
-        self.assertEqual(onion_proxy._script_json("</script>&"),
-                         '"\\u003c/script\\u003e\\u0026"')
-        self.assertEqual(json.loads(onion_proxy._script_json("a<b>&c")), "a<b>&c")
-
 
 if __name__ == "__main__":
     unittest.main()

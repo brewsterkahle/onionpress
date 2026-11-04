@@ -84,12 +84,6 @@ class TestDetectOtherInstances(unittest.TestCase):
             with self.subTest(exc=type(exc).__name__):
                 self.assertEqual(self.detect(mock.Mock(side_effect=exc)), [])
 
-    def test_the_primary_user_is_the_first_other_one(self):
-        self.assertEqual(updater._primary_user([{"user": "bob", "pid": 1},
-                                                {"user": "carol", "pid": 2}]), "bob")
-        self.assertIsNone(updater._primary_user([]))
-
-
 class _Socket:
     """socket.socket stand-in: ports in *taken* refuse bind."""
 

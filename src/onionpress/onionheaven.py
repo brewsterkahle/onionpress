@@ -621,9 +621,6 @@ class OnionHeavenClient:
         self.registration_in_flight = False
         self.registration_succeeded = False
         self.heartbeat_succeeded = False
-        # A wake's /online (notify_online).
-        self.reclaim_succeeded = False
-        self.reclaim_in_flight = False
         # The opt-out's /unregister (maybe_unregister_after_opt_out).
         self.opt_out_in_flight = False
         self.opt_out_last_attempt = 0
@@ -693,18 +690,10 @@ class OnionHeavenClient:
             self.maintain_registration()
 
     def reset_session(self):
-        """The site stopped: the next start registers afresh, and no wake
-        reclaim is pending."""
+        """The site stopped: the next start registers afresh."""
         self.registration_succeeded = False
         self.heartbeat_succeeded = False
         self.registration_in_flight = False
-        self.reclaim_succeeded = False
-        self.reclaim_in_flight = False
-
-    def reset_reclaim(self):
-        """The site is reachable again: a later wake may reclaim anew."""
-        self.reclaim_succeeded = False
-        self.reclaim_in_flight = False
 
     def wake(self):
         """Back from sleep: register afresh, and supersede the running
@@ -1718,34 +1707,6 @@ class OnionHeavenClient:
         self.log("Notifying OnionHeaven: going offline")
         return self._send_notification("offline", "offline", max_attempts=1, max_time=max_time)
 
-    def notify_online(self):
-        """Notify OnionHeaven that this instance is back online (wake/reconnect).
-
-        Uses the same heartbeat code path that's proven to work — sends /online
-        with arti_key_pem, retries once on failure. Sets
-        self.reclaim_succeeded on success; clears
-        self.reclaim_in_flight when done.
-        """
-        if getattr(self.app, 'is_onionheaven', False):
-            self.reclaim_in_flight = False
-            return False
-        self.log("Notifying OnionHeaven: coming online (via heartbeat)")
-        try:
-            result = self.send_heartbeat()
-            if result:
-                self.reclaim_succeeded = True
-                self.log("OnionHeaven: reclaim succeeded")
-            return bool(result)
-        finally:
-            self.reclaim_in_flight = False
-
-    def start_online_notification_thread(self):
-        """Spawn a daemon thread to send /online notification."""
-        thread = threading.Thread(target=self.notify_online, daemon=True)
-        thread.start()
-        return thread
-
-
 # ---------------------------------------------------------------------------
 # The client's functions of an app
 # ---------------------------------------------------------------------------
@@ -1821,10 +1782,6 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
 
 def notify_onionheaven_offline(app, max_time=10):
     return client_of(app).notify_offline(max_time=max_time)
-
-
-def notify_onionheaven_online(app):
-    return client_of(app).notify_online()
 
 
 # ---------------------------------------------------------------------------

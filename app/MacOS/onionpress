@@ -325,17 +325,6 @@ for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do
 done
 unset _img_var _img_val
 
-# True when the stack points at images built on this machine rather than
-# published ones. Every `docker pull` / `docker compose pull` below is gated
-# on this: without the gate they overwrite a local tag with the registry's
-# copy, so a developer would build an image, start the app, and silently test
-# someone else's build. The rule itself (a reference not on ghcr.io, from the
-# environment or ~/.onionpress/config) is onionpress.containers.using_local_images,
-# asked through the CLI (Phase 4, #120).
-using_local_images() {
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" using-local-images
-}
-
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
