@@ -5,23 +5,20 @@ linux/onionpress's write_status set status.json's onionheaven.server_active
 whenever a container named `onionheaven` was running, and every node runs
 one (its heartbeat monitor idles off the hub): the status page said
 "Mode: Hub (server)" on every Linux node and the Settings page showed the
-hub's takeover tunables everywhere. The Mac daemon decides by the node's
-onion address (onionheaven.is_onionheaven_instance); the Linux launcher now
-asks the same rule through `onionpress is-onionheaven-hub <address>` and
+hub's takeover tunables everywhere. The daemon decides by the node's
+onion address (onionheaven.is_onionheaven_instance) on both platforms, and
 queries the hub's registry only on the hub.
 
 The status writer (onionpress.status_writer, one for both platforms since
 issue #523) decides by address too; its test runs it against a fake docker.
 """
 
-import io
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from unittest import mock
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -48,39 +45,31 @@ def _function(text, name):
     return text[start:end] + "\n}\n"
 
 
-class TestIsOnionheavenHubCommand(unittest.TestCase):
-    """`onionpress is-onionheaven-hub <address>`: the Mac daemon's rule,
-    without OnionPressCLI's setup (it runs on every status tick)."""
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="op-is-hub-")
-
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def _run(self, *argv):
-        buf = io.StringIO()
-        with mock.patch.object(cli, "OnionPressCLI", side_effect=AssertionError("setup ran")), \
-                redirect_stdout(buf):
-            return cli.main(["--data-dir", self.dir, "is-onionheaven-hub", *argv])
+class TestTheRuleIsByAddress(unittest.TestCase):
+    """onionheaven.is_onionheaven_instance: the hub's own address and
+    nothing else. The `onionpress is-onionheaven-hub` subcommand that put
+    the rule in front of the Linux launcher went with its last caller
+    (2026-11-04): the daemon asks the rule in-process on both platforms."""
 
     def test_the_hub_address_is_the_hub(self):
-        self.assertEqual(self._run(HUB), 0)
         self.assertTrue(onionheaven.is_onionheaven_instance(HUB))
 
     def test_any_other_address_is_a_client(self):
         for address in (NODE, "", "Generating...", HUB.upper(), HUB + "\n"):
             with self.subTest(address=address):
-                self.assertEqual(self._run(address), 1)
-        self.assertEqual(self._run(), 1)
-        self.assertFalse(os.listdir(self.dir), "the command wrote into the data dir")
+                self.assertFalse(onionheaven.is_onionheaven_instance(address))
+
+    def test_the_subcommand_is_gone(self):
+        with self.assertRaises(SystemExit):
+            cli.main(["is-onionheaven-hub", HUB])
+        self.assertNotIn('"is-onionheaven-hub"', _read("src/onionpress/cli.py"))
 
 
 class TestBothPlatformsDecideByAddress(unittest.TestCase):
     def test_linux_launcher_delegates_to_the_cli(self):
         launcher = _read("linux/onionpress")
-        # `onionpress is-onionheaven-hub` is the rule; the launcher's bash
-        # wrapper had no caller left after #523 and was removed.
+        # The launcher's bash wrapper had no caller left after #523 and
+        # was removed; so was the subcommand it ran.
         self.assertNotIn("\nis_onionheaven_hub() {", launcher)
         # The status is the writer's (#523): the rule by address there, and
         # never the old one (a running onionheaven container, which every

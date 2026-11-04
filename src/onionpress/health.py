@@ -1066,9 +1066,6 @@ class HealthChecker:
 # -- Thresholds (from menubar.py) --
 
 YELLOW_TO_STUCK_SECONDS = 300      # 5 min in yellow → display "stuck"
-YELLOW_TO_RESTART_SECONDS = 120    # 2 min in yellow → eligible for restart
-RESTART_COOLDOWN_SECONDS = 300     # 5 min between auto-restarts
-RECLAIM_RETRY_SECONDS = 60         # Retry OnionHeaven reclaim every 60s
 # Outcome-verified descriptor republish (issue #266, plan item 1). The
 # app's dual probe is the only component that measures real reachability
 # through the Tor network; when it fails continuously for this long while
@@ -1107,13 +1104,8 @@ class HealthState:
     wordpress_confirmed: bool = False  # WP responded at least once
     last_bootstrap_pct: int = 0
     bootstrap_stall_count: int = 0
-    last_auto_restart: float = 0
     has_internet: bool = True
     tor_internally_ready: bool = False
-    # OnionHeaven reclaim
-    reclaim_succeeded: bool = False
-    reclaim_in_flight: bool = False
-    reclaim_last_attempt: float = 0
 
 
 class RepublishTrigger:
@@ -1325,8 +1317,6 @@ class HealthMonitor:
             self.state.was_ready = True
             self.state.yellow_since = None
             self.state.bootstrap_stall_count = 0
-            self.state.reclaim_succeeded = False
-            self.state.reclaim_in_flight = False
             return ServiceState.AVAILABLE
 
         if self.state.was_ready and not result.ready:
@@ -1334,7 +1324,6 @@ class HealthMonitor:
             if self.state.yellow_since is None:
                 self.state.yellow_since = now
                 self.state.bootstrap_stall_count = 0
-                self.state.last_auto_restart = 0  # Allow immediate restart
                 self._log("Service became unreachable — reconnecting")
 
         # Track bootstrap progress
@@ -1356,55 +1345,6 @@ class HealthMonitor:
             return ServiceState.STUCK
 
         return ServiceState.STARTING
-
-    def should_restart_tor(self, tor_unhealthy: bool) -> bool:
-        """Decide whether to auto-restart the Tor container.
-
-        Args:
-            tor_unhealthy: Result of HealthChecker.tor_container_unhealthy().
-
-        Returns:
-            True if Tor should be restarted.
-        """
-        now = time.time()
-
-        if self.state.yellow_since is None:
-            return False
-
-        yellow_duration = now - self.state.yellow_since
-        cooldown = now - self.state.last_auto_restart
-
-        if (
-            yellow_duration > YELLOW_TO_RESTART_SECONDS
-            and cooldown > RESTART_COOLDOWN_SECONDS
-            and tor_unhealthy
-        ):
-            self.state.last_auto_restart = now
-            self._log("Tor container unhealthy after 2min — restarting")
-            return True
-
-        return False
-
-    def should_reclaim(self) -> bool:
-        """Decide whether to send OnionHeaven /online reclaim.
-
-        Returns True if internally ready but self-check failing,
-        and enough time has passed since last attempt.
-        """
-        now = time.time()
-
-        if not self.state.tor_internally_ready:
-            return False
-        if self.state.reclaim_succeeded:
-            return False
-        if self.state.reclaim_in_flight:
-            return False
-        if (now - self.state.reclaim_last_attempt) < RECLAIM_RETRY_SECONDS:
-            return False
-
-        self.state.reclaim_in_flight = True
-        self.state.reclaim_last_attempt = now
-        return True
 
     def poll_interval(self, state: ServiceState) -> int:
         """Return the recommended poll interval in seconds."""

@@ -139,16 +139,6 @@ def detect_active_offsets():
     return active
 
 
-def _primary_user(others):
-    """Return the username that owns port-offset 0, or None."""
-    for inst in others:
-        # We can't directly check which offset another user has, but the
-        # primary user is the one on offset 0.  Since we know our own offset,
-        # if we're not offset-0 then one of the others must be.
-        return inst["user"]
-    return None
-
-
 # ---------------------------------------------------------------------------
 # GitHub release lookup
 # ---------------------------------------------------------------------------

@@ -84,12 +84,6 @@ class TestLocalSuggestion(unittest.TestCase):
         name = onionnames_client.suggest_name_local("xx_YY")
         self.assertIsNotNone(name)
 
-    def test_suggest_names_local_returns_unique_list(self):
-        names = onionnames_client.suggest_names_local("en", count=5)
-        self.assertLessEqual(len(names), 5)
-        self.assertEqual(len(names), len(set(n.lower() for n in names)))
-
-
 # ---------------------------------------------------------------------------
 # onionnames_registrar — behavior with injected runner + keys
 # ---------------------------------------------------------------------------

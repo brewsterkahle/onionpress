@@ -1101,7 +1101,6 @@ class Daemon(PortAttributes):
                 self._reachability_stats.reset_session(_now)
             self.is_ready = True
             self._was_ready = True
-            self.hub_client.reset_reclaim()
             self._bootstrap_stall_count = 0
             self._yellow_since = None
             self._consecutive_fail_count = 0

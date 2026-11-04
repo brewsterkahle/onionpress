@@ -2849,27 +2849,6 @@ def _run_validate_oh_address(run):
     return 0 if answer["valid"] else 1
 
 
-def _add_is_onionheaven_hub(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Exit 0 when the onion address given is the OnionHeaven hub's "
-             "(onionheaven.is_onionheaven_instance, the Mac daemon's rule), "
-             "1 otherwise; the Linux launcher asks it, so "
-             "status.json's onionheaven.server_active is decided by the "
-             "node's address, never by the onionheaven container, which "
-             "every node runs (issue #345)")
-    p.add_argument("address", nargs="?", default="",
-                   help="The node's served onion address")
-
-
-def _run_is_onionheaven_hub(run):
-    # The Linux launcher's is_onionheaven_hub() (issue #345): the Mac
-    # daemon's rule, by address. No OnionPressCLI setup (every status
-    # tick, beside a live stack).
-    from .onionheaven import is_onionheaven_instance
-    return 0 if is_onionheaven_instance(run.args.address) else 1
-
-
 def _run_using_local_images(run):
     # The launchers' using_local_images(): the one copy of the rule
     # (containers.using_local_images; the start calls it in-process). Before the stack is up, so no OnionPressCLI
@@ -3500,7 +3479,6 @@ _COMMANDS = [
      _run_stop_containers),
     ("install-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("setup-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
-    ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),
     ("validate-oh-address", _add_validate_oh_address, _run_validate_oh_address),
     ("using-local-images",
      _plain("Exit 0 when the stack points at images built on this machine "

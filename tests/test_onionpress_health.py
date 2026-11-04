@@ -13,8 +13,7 @@ from onionpress.docker import DockerResult
 from onionpress.health import (
     HealthChecker, HealthResult, HealthMonitor, HealthState,
     ServiceState, SICK_PATTERNS, HEALTHY_PATTERNS, WedgeSignals,
-    YELLOW_TO_STUCK_SECONDS, YELLOW_TO_RESTART_SECONDS,
-    RESTART_COOLDOWN_SECONDS, RECLAIM_RETRY_SECONDS,
+    YELLOW_TO_STUCK_SECONDS,
     POLL_READY_SECONDS, POLL_STARTING_SECONDS, POLL_OFFLINE_SECONDS,
     WEDGE_LOAD_WARN, WEDGE_LOAD_ALARM, WEDGE_FAILING_STREAK_ALARM,
     REPUBLISH_AFTER_UNREACHABLE_SECONDS, REPUBLISH_COOLDOWN_SECONDS,
@@ -880,64 +879,6 @@ class TestHealthMonitorEvaluate(unittest.TestCase):
         # Progress → reset
         hm.evaluate(HealthResult(bootstrap_pct=75))
         self.assertEqual(hm.state.bootstrap_stall_count, 0)
-
-
-class TestShouldRestartTor(unittest.TestCase):
-    def test_no_restart_when_not_yellow(self):
-        hm = HealthMonitor()
-        self.assertFalse(hm.should_restart_tor(tor_unhealthy=True))
-
-    def test_restart_after_thresholds(self):
-        hm = HealthMonitor()
-        hm.state.yellow_since = time.time() - YELLOW_TO_RESTART_SECONDS - 1
-        hm.state.last_auto_restart = time.time() - RESTART_COOLDOWN_SECONDS - 1
-        self.assertTrue(hm.should_restart_tor(tor_unhealthy=True))
-        # Should update last_auto_restart
-        self.assertGreater(hm.state.last_auto_restart, 0)
-
-    def test_no_restart_during_cooldown(self):
-        hm = HealthMonitor()
-        hm.state.yellow_since = time.time() - YELLOW_TO_RESTART_SECONDS - 1
-        hm.state.last_auto_restart = time.time()  # Just restarted
-        self.assertFalse(hm.should_restart_tor(tor_unhealthy=True))
-
-    def test_no_restart_if_healthy(self):
-        hm = HealthMonitor()
-        hm.state.yellow_since = time.time() - YELLOW_TO_RESTART_SECONDS - 1
-        hm.state.last_auto_restart = time.time() - RESTART_COOLDOWN_SECONDS - 1
-        self.assertFalse(hm.should_restart_tor(tor_unhealthy=False))
-
-
-class TestShouldReclaim(unittest.TestCase):
-    def test_reclaim_when_internally_ready(self):
-        hm = HealthMonitor()
-        hm.state.tor_internally_ready = True
-        hm.state.reclaim_last_attempt = 0
-        self.assertTrue(hm.should_reclaim())
-        self.assertTrue(hm.state.reclaim_in_flight)
-
-    def test_no_reclaim_not_internally_ready(self):
-        hm = HealthMonitor()
-        hm.state.tor_internally_ready = False
-        self.assertFalse(hm.should_reclaim())
-
-    def test_no_reclaim_already_succeeded(self):
-        hm = HealthMonitor()
-        hm.state.tor_internally_ready = True
-        hm.state.reclaim_succeeded = True
-        self.assertFalse(hm.should_reclaim())
-
-    def test_no_reclaim_in_flight(self):
-        hm = HealthMonitor()
-        hm.state.tor_internally_ready = True
-        hm.state.reclaim_in_flight = True
-        self.assertFalse(hm.should_reclaim())
-
-    def test_no_reclaim_too_soon(self):
-        hm = HealthMonitor()
-        hm.state.tor_internally_ready = True
-        hm.state.reclaim_last_attempt = time.time()
-        self.assertFalse(hm.should_reclaim())
 
 
 class TestPollInterval(unittest.TestCase):

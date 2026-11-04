@@ -342,20 +342,12 @@ class TestWorkerMounts(unittest.TestCase):
         argv = farm.worker_run_argv("onionheaven-takeover-0", "img@sha256:" + "a" * 64)
         self.assertEqual(self._volume_args(argv), [f"{VOLUME}:{HUB_DIR}"])
 
-    def test_dead_code_spawners_agree(self):
-        """Not called today, but they must not bring the old mount back."""
+    def test_no_host_spawner_is_left(self):
+        """The farm controller is the one spawner: the host's unused
+        ContainerManager.start_farm_worker went on 2026-11-04, and the Mac
+        launcher's _start_takeover_worker before it."""
         from onionpress.containers import ContainerManager
-        from onionpress.docker import Docker
-        docker = mock.Mock(spec=Docker)
-        docker.run.return_value = mock.Mock(ok=True, stderr="")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        paths = mock.Mock(config_file=os.path.join(tmp, "config"), docker_dir=tmp)
-        cm = ContainerManager(docker, paths, port_config=mock.Mock())
-        cm.start_farm_worker(0, image="img")
-        self.assertEqual(self._volume_args(docker.run.call_args.args[0]),
-                         [f"{VOLUME}:{HUB_DIR}"])
-        # The Mac launcher's unused _start_takeover_worker is gone.
+        self.assertFalse(hasattr(ContainerManager, "start_farm_worker"))
         self.assertNotIn("TAKEOVER_WORKER=1", _read("app/MacOS/onionpress"))
 
 

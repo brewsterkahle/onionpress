@@ -135,8 +135,6 @@ class TestImageOverrideReadsTheConfigFile(unittest.TestCase):
         would silently read the wrong file under one. Callers that already
         hold an OnionPressPaths must pass it through.
         """
-        containers = _read("src/onionpress/containers.py")
-        self.assertIn("onionheaven_image(self.paths.config_file)", containers)
         # The start's pull and its image cleanup (onionpress.start).
         start = _read("src/onionpress/start.py")
         self.assertIn("using_local_images(paths.config_file)", start)
@@ -199,19 +197,19 @@ def _bash_function(text, name):
 
 class TestLaunchersDefineThePredicate(unittest.TestCase):
 
-    def test_both_launchers_define_it(self):
-        for path in LAUNCHERS:
-            with self.subTest(path=path):
-                self.assertIsNotNone(
-                    re.search(r"^using_local_images\(\) \{", _read(path), re.M),
-                    f"{path} must define using_local_images().",
-                )
+    def test_only_linux_defines_it(self):
+        # Linux's start asks it before its own pull; the Mac launcher pulls
+        # nothing of its own (the start is Python's), so its copy had no
+        # caller and went on 2026-11-04.
+        self.assertIsNotNone(
+            re.search(r"^using_local_images\(\) \{", _read("linux/onionpress"), re.M))
+        self.assertIsNone(
+            re.search(r"^using_local_images\(\) \{", _read("app/MacOS/onionpress"), re.M))
 
     def test_both_delegate_to_the_cli(self):
         """One rule, in Python: the bash function is the CLI call and
         nothing else (no second copy of the ghcr.io test to drift)."""
-        for path, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
-                             ("linux/onionpress", "op_py")):
+        for path, runner in (("linux/onionpress", "op_py"),):
             with self.subTest(path=path):
                 body = _bash_function(_read(path), "using_local_images")
                 code = [l.strip() for l in body.splitlines()
@@ -253,7 +251,7 @@ class TestLaunchersDefineThePredicate(unittest.TestCase):
             ({"CONFIG": "ONIONPRESS_TOR_IMAGE=onionpress-tor:dev\n"}, 0),
             ({"CONFIG": "ONIONPRESS_TOR_IMAGE=ghcr.io/x/onionpress-tor:latest\n"}, 1),
         )
-        for launcher in LAUNCHERS:
+        for launcher in ("linux/onionpress",):
             for env, expected in cases:
                 with self.subTest(launcher=launcher, env=env):
                     self.assertEqual(self._run_bash_predicate(launcher, dict(env)), expected)

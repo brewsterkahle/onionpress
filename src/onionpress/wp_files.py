@@ -295,9 +295,3 @@ def put_tree(src_dir: str, dest: str, *, docker, merge: bool = False,
     return DockerResult(rc, "", stderr)
 
 
-def shared_onion_address(hostname: str) -> str | None:
-    """The onion_address file's content for the tor container's *hostname*
-    output, or None unless it is one well-formed v3 address."""
-    from .key_manager import is_valid_onion_address
-    addr = (hostname or "").strip()
-    return addr + "\n" if is_valid_onion_address(addr) else None

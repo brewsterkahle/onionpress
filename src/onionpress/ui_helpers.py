@@ -150,44 +150,6 @@ class BackupProgressWindow:
         if on_done:
             main_thread(on_done)
 
-    def finish_with_restart(self, message):
-        """Close progress window, show alert with Restart Now button."""
-        if self._window:
-            self._window.orderOut_(None)
-            self._window = None
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("Done")
-        alert.setInformativeText_(message)
-        alert.addButtonWithTitle_("Restart Now")
-        alert.addButtonWithTitle_("Later")
-        # Set app icon
-        import os
-        bundle = AppKit.NSBundle.mainBundle()
-        if bundle and bundle.resourcePath():
-            icon_path = os.path.join(bundle.resourcePath(), "app-icon.png")
-            if os.path.exists(icon_path):
-                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                if icon:
-                    alert.setIcon_(icon)
-        response = alert.runModal()
-        if response == AppKit.NSAlertFirstButtonReturn:
-            # Restart: relaunch the outer OnionPress.app
-            # bundlePath() is MenubarApp inside OnionPress.app/Contents/Resources/MenubarApp
-            # Walk up to find the outer .app bundle
-            import subprocess
-            path = bundle.bundlePath()
-            while path and path != "/":
-                if path.endswith(".app") and not path.endswith("MenubarApp"):
-                    break
-                path = os.path.dirname(path)
-            if not path or path == "/":
-                # Fallback: try /Applications/OnionPress.app
-                path = "/Applications/OnionPress.app"
-            subprocess.Popen(["open", path])
-            import rumps
-            rumps.quit_application()
-
-
 class LogViewerActions(AppKit.NSObject):
     """Singleton handling custom log viewer menu actions."""
 

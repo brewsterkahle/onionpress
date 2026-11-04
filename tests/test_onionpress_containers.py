@@ -381,16 +381,6 @@ class TestFarmWorkers(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_start_farm_worker(self):
-        docker = mock.Mock(spec=Docker)
-        docker.run.return_value = _ok("container-id")
-        cm = ContainerManager(docker, self.paths, self.port_config)
-        result = cm.start_farm_worker(0)
-        self.assertTrue(result)
-        # Verify docker run was called with correct container name
-        call_args = docker.run.call_args[0][0]
-        self.assertIn("onionheaven-takeover-0", call_args)
-
     def test_stop_farm_no_workers(self):
         docker = mock.Mock(spec=Docker)
         docker.run.return_value = _ok("")  # no containers
@@ -411,20 +401,10 @@ class TestFarmWorkers(unittest.TestCase):
         # ps + 2*(stop+rm) = 5 calls
         self.assertEqual(docker.run.call_count, 5)
 
-    def test_list_farm_workers(self):
-        docker = mock.Mock(spec=Docker)
-        docker.run.return_value = _ok(
-            "onionheaven-takeover-0\nonionheaven-takeover-1\nonionpress-tor\n"
-        )
-        cm = ContainerManager(docker, self.paths, self.port_config)
-        workers = cm.list_farm_workers()
-        self.assertEqual(workers, ["onionheaven-takeover-0", "onionheaven-takeover-1"])
-
-    def test_list_farm_workers_empty(self):
-        docker = mock.Mock(spec=Docker)
-        docker.run.return_value = _fail()
-        cm = ContainerManager(docker, self.paths, self.port_config)
-        self.assertEqual(cm.list_farm_workers(), [])
+    def test_the_host_starts_no_worker(self):
+        # Workers are the farm controller's (onionheaven-farm.py's
+        # worker_run_argv); the host's unused spawner went 2026-11-04.
+        self.assertFalse(hasattr(ContainerManager, "start_farm_worker"))
 
 
 class TestGetStatus(unittest.TestCase):

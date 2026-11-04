@@ -199,18 +199,3 @@ def suggest_name_local(lang="en", max_attempts=20):
     return None
 
 
-def suggest_names_local(lang="en", count=5):
-    """Return up to `count` distinct local suggestions (best-effort)."""
-    seen = set()
-    out = []
-    for _ in range(count * 4):
-        name = suggest_name_local(lang)
-        if not name:
-            break
-        if name.lower() in seen:
-            continue
-        seen.add(name.lower())
-        out.append(name)
-        if len(out) >= count:
-            break
-    return out

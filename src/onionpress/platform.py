@@ -1,22 +1,16 @@
-"""OS/arch detection and path resolution for OnionPress.
+"""OS detection and path resolution for OnionPress.
 
 No side effects — no mkdir, no env var mutation.
 """
 
 import enum
 import os
-import subprocess
 from dataclasses import dataclass
 
 
 class OS(enum.Enum):
     MACOS = "macos"
     LINUX = "linux"
-
-
-class Arch(enum.Enum):
-    ARM64 = "aarch64"
-    X86_64 = "x86_64"
 
 
 def detect_os() -> OS:
@@ -28,35 +22,6 @@ def detect_os() -> OS:
     if system == "Linux":
         return OS.LINUX
     raise RuntimeError(f"Unsupported OS: {system}")
-
-
-def detect_arch() -> Arch:
-    """Detect the hardware architecture.
-
-    On macOS, uses sysctl to get the real hardware arch (uname lies under
-    Rosetta). On Linux, uses uname -m.
-    """
-    import platform as _platform
-    system = _platform.system()
-    if system == "Darwin":
-        try:
-            result = subprocess.run(
-                ["sysctl", "-n", "hw.optional.arm64"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip() == "1":
-                return Arch.ARM64
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-        # Fallback to uname
-        if _platform.machine() == "x86_64":
-            return Arch.X86_64
-        return Arch.ARM64
-    else:
-        machine = _platform.machine()
-        if machine in ("aarch64", "arm64"):
-            return Arch.ARM64
-        return Arch.X86_64
 
 
 def detect_timezone() -> str:

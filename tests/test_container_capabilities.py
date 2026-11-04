@@ -42,11 +42,9 @@ import ast
 import importlib.util
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
@@ -101,7 +99,6 @@ READ_USER_KEY = {"DAC_OVERRIDE"}             # root reads key files it does not 
 COPY_INTO_TOR_STATE = {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
 DOCKER_RUN_SITES = {
     ("app/Resources/docker/tor/onionheaven-farm.py", "worker_run_argv"): [WORKER],
-    ("src/onionpress/containers.py", "start_farm_worker"): [WORKER],
     # Reads arti's files (its own user's, 0700) into a copy root owns (the
     # launchers' migrate_key_volume runs it, Phase 4 #120).
     ("src/onionpress/containers.py", "migrate_key_volume"): [READ_USER_KEY],
@@ -133,13 +130,12 @@ PRIVILEGED_SITES = {
 # needs one, and the onion service key never gets the chance to leave.
 WORKER_SITES = {
     ("app/Resources/docker/tor/onionheaven-farm.py", "worker_run_argv"),
-    ("src/onionpress/containers.py", "start_farm_worker"),
 }
 
 # The image each run names. A shell helper runs KEY_HELPER_IMAGE (the
 # launchers had the last ones; TestKeyHelperImage), the macOS takeover worker the compose file's onionheaven reference, and every Python
 # site a variable named `image` (the pinned tor image: launcher_ops's
-# DEFAULT_TOR_IMAGE, ContainerManager.ensure_tor_image, onionheaven_image,
+# DEFAULT_TOR_IMAGE, ContainerManager.ensure_tor_image,
 # and the egress helper's caller; tests elsewhere hold each to that). Never
 # a floating tag such as `alpine`: a registry or a mirror could swap it for
 # an image that copies the key.
@@ -367,7 +363,8 @@ class TestDockerRunCensus(unittest.TestCase):
         # key seeds and the restore's one shared pair in containers.py;
         # #406 took Linux's key_volume_cat: the backup reads the key with
         # `docker exec`, key_manager.extract_keys).
-        self.assertGreaterEqual(sum(found.values()), 8)
+        # The host's unused worker spawner went on 2026-11-04.
+        self.assertGreaterEqual(sum(found.values()), 7)
 
     def test_only_the_listed_sites_are_privileged(self):
         for site, runs in self.sites.items():
@@ -689,21 +686,6 @@ class TestTakeoverWorkers(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         runs = [c.args[0] for c in run.call_args_list if c.args[0][0] == "run"]
         self.assertEqual(runs, [argv])
-
-    def test_dead_code_spawners_agree(self):
-        """Not called today, but they must not start a worker without it."""
-        from onionpress.containers import ContainerManager
-        from onionpress.docker import Docker
-        docker = mock.Mock(spec=Docker)
-        docker.run.return_value = mock.Mock(ok=True, stderr="")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        paths = mock.Mock(config_file=os.path.join(tmp, "config"), docker_dir=tmp)
-        cm = ContainerManager(docker, paths, port_config=mock.Mock())
-        cm.start_farm_worker(0, image="img")
-        argv = docker.run.call_args.args[0]
-        self.assertEqual(argv[-1], "img")
-        self.assertHardened(argv[:-1])
 
     def test_mac_launcher_starts_no_worker(self):
         """Its unused _start_takeover_worker is gone; a worker it started

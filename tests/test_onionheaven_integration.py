@@ -164,6 +164,10 @@ class ServerProcess:
         self.proc = subprocess.Popen(
             [sys.executable, "-c", f"""
 import importlib.util, os, sys
+# Where a start that never binds is stuck: every thread's stack on
+# stderr before the harness gives up at 30 s (cancelled once bound).
+import faulthandler
+faulthandler.dump_traceback_later(25)
 sys.path.insert(0, {SERVER_DIR!r})
 
 # Patch constants before importing the server
@@ -214,6 +218,11 @@ srv.OWN_ONION_ADDRESS = {self.own_address!r}
 srv._HOSTNAME_PATH = os.path.join({data_dir!r}, "no-such-hostname")
 if {self.trust_loopback_as_bridge!r}:
     srv.OnionHeavenHandler._docker_network_src_ok = lambda self: True
+class _BoundServer(srv.BoundedThreadingHTTPServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        faulthandler.cancel_dump_traceback_later()
+srv.BoundedThreadingHTTPServer = _BoundServer
 srv.main()
 """],
             stdout=subprocess.PIPE,
@@ -232,7 +241,12 @@ srv.main()
                     return
             except (ConnectionRefusedError, OSError):
                 pass
-        raise RuntimeError("Server did not start within 30 seconds")
+        # Say why: the process is still up, so stop it and show what it
+        # wrote (a server stuck before its bind says nothing otherwise).
+        self.proc.kill()
+        _, err = self.proc.communicate(timeout=10)
+        err = err.decode("utf-8", "replace")[-8000:]
+        raise RuntimeError(f"Server did not start within 30 seconds; stderr: {err}")
 
     def stop(self):
         if self.proc:

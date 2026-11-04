@@ -15,7 +15,7 @@ from typing import Callable
 from . import onion_hostname, platform, wordpress_egress
 from .docker import Docker, DockerError
 from .config import (
-    DEFAULTS, SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
+    SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
     read_value,
     PortConfig, detect_port_offset,
 )
@@ -33,24 +33,7 @@ ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 # Pinned to digest. The literal below is propagated from build/image-pins.env
 # by build/refresh-image-digests.sh, which writes every consumer at once;
 # tests/test_image_pins.py fails if any of them drift apart.
-#
-# Resolution order matches docker-compose.yml's `onionheaven` service, so the
-# menubar path and the compose path always agree: the service-specific
-# ONIONHEAVEN_IMAGE wins, then the stack-wide ONIONPRESS_TOR_IMAGE (what
-# build/build-images.sh exports for a locally built stack), then the pin.
 ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3"
-
-
-def onionheaven_image(config_file: str | None = None) -> str:
-    """The image to run OnionHeaven takeover workers from.
-
-    Resolved on each call rather than at import, so it picks up an override
-    written to ~/.onionpress/config without a restart — and so it sees the
-    same config the launchers do (see image_override).
-    """
-    return (image_override("ONIONHEAVEN_IMAGE", config_file)
-            or image_override("ONIONPRESS_TOR_IMAGE", config_file)
-            or ONIONHEAVEN_IMAGE_PIN)
 
 
 def tor_image(config_file: str | None = None) -> str:
@@ -774,71 +757,7 @@ class ContainerManager:
         output = result.stdout
         return "Bootstrapped 100%" in output or "Sufficiently bootstrapped" in output
 
-    def is_stack_running(self) -> bool:
-        """Quick check: are all core OnionPress containers running?"""
-        result = self.docker.run(
-            ["ps", "--filter", "name=onionpress-", "--format", "{{.State}}"],
-            timeout=10,
-        )
-        if not result.ok or not result.output.strip():
-            return False
-        states = [s.strip().lower() for s in result.output.splitlines() if s.strip()]
-        return len(states) > 0 and all(s == "running" for s in states)
-
     # -- OnionHeaven farm --
-
-    def start_farm_worker(self, idx: int, image: str | None = None) -> bool:
-        """Start a single OnionHeaven takeover worker container.
-
-        Args:
-            idx: Worker index (0, 1, 2, ...).
-            image: Docker image to use. Resolved per call when omitted, so a
-                locally built image set in the environment or in
-                ~/.onionpress/config is honoured — a module-level default
-                would have frozen the value at import time.
-
-        Returns True on success.
-        """
-        if image is None:
-            image = onionheaven_image(self.paths.config_file)
-        name = f"onionheaven-takeover-{idx}"
-        self._log(f"Starting farm worker {name}...")
-
-        max_services = read_value(
-            self.paths.config_file, "ONIONHEAVEN_MAX_SERVICES",
-            DEFAULTS["ONIONHEAVEN_MAX_SERVICES"],
-        )
-
-        result = self.docker.run([
-            "run", "-d",
-            "--name", name,
-            "--network", "onionpress-network",
-            "--ulimit", "nofile=10000:10000",
-            "--log-opt", "max-size=10m",
-            "--log-opt", "max-file=3",
-            # The same hardening and capabilities as _spawn_worker: su to
-            # debian-tor, the control cookie in its 0700 /var/lib/tor.
-            "--cap-drop", "ALL",
-            "--cap-add", "DAC_OVERRIDE",
-            "--cap-add", "SETGID",
-            "--cap-add", "SETUID",
-            "--security-opt", "no-new-privileges:true",
-            "-e", f"TZ={os.environ.get('TZ', 'UTC')}",
-            "-e", "TAKEOVER_WORKER=1",
-            "-e", f"CONTAINER_NAME={name}",
-            "-e", f"MAX_TAKEOVER_SERVICES={max_services}",
-            # The OnionHeaven data volume only, as onionheaven_common's
-            # _spawn_worker does — never WordPress's shared volume.
-            "-v", "onionpress-onionheaven-data:/var/lib/onionheaven",
-            "--restart", "unless-stopped",
-            image,
-        ], timeout=60)
-
-        if result.ok:
-            self._log(f"Farm worker {name} started")
-        else:
-            self._log(f"Farm worker {name} failed: {result.stderr.rstrip()}")
-        return result.ok
 
     def stop_farm(self) -> None:
         """Stop and remove all OnionHeaven farm worker containers."""
@@ -958,15 +877,3 @@ class ContainerManager:
                       f"({removed.stderr.strip()})")
         return removed.ok
 
-    def list_farm_workers(self) -> list[str]:
-        """List running farm worker container names."""
-        result = self.docker.run(
-            ["ps", "--format", "{{.Names}}"],
-            timeout=15,
-        )
-        if not result.ok:
-            return []
-        return [
-            name.strip() for name in result.output.splitlines()
-            if FARM_WORKER_NAME.fullmatch(name.strip())
-        ]

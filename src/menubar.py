@@ -1294,15 +1294,6 @@ class OnionPressApp(PortAttributes, rumps.App):
             lambda url: self._open_onion(),
         )
 
-    def monitor_brave_install(self):
-        """Monitor for Brave Browser installation and offer to open site when detected."""
-        self._monitor_browser_install(
-            "Brave Browser",
-            op_browser.BRAVE_BROWSER_PATH,
-            "Contents/MacOS/Brave Browser",
-            lambda url: self._open_onion(),
-        )
-
     def _monitor_browser_install(self, name, app_path, executable_subpath, open_func):
         """Generic browser install monitor."""
         if self.monitoring_tor_install:
@@ -2267,67 +2258,6 @@ class OnionPressApp(PortAttributes, rumps.App):
 
         # Full quit — stops containers, VM, and relaunches with new images
         self.quit_app(None)
-
-    def show_setup_dialog(self):
-        """Show a persistent setup dialog during first run that stays until service is ready"""
-        try:
-            # Dismiss any existing dialog first
-            self.dismiss_setup_dialog()
-
-            # Create and show dialog on main thread, storing reference for programmatic dismissal
-            def create_and_show():
-                try:
-                    alert = AppKit.NSAlert.alloc().init()
-                    alert.setMessageText_("OnionPress Setup")
-                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nThis window will close automatically to set up your WordPress.")
-                    alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
-
-                    btn_dismiss = alert.addButtonWithTitle_("Dismiss")
-                    btn_dismiss.setKeyEquivalent_("\r")
-                    btn_cancel = alert.addButtonWithTitle_("Cancel Setup")
-                    btn_cancel.setKeyEquivalent_("\x1b")
-
-                    # Set app icon
-                    icon_path = os.path.join(self.resources_dir, "app-icon.png")
-                    if os.path.exists(icon_path):
-                        icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                        if icon:
-                            alert.setIcon_(icon)
-
-                    # Store reference so dismiss_setup_dialog can close it
-                    self.setup_alert = alert
-
-                    # runModal blocks until button click or abortModal
-                    response = alert.runModal()
-
-                    # Close the alert window
-                    alert.window().close()
-                    self.setup_alert = None
-
-                    # NSModalResponseAbort = -1001 (from abortModal call)
-                    if response == AppKit.NSModalResponseAbort:
-                        self.log("Setup dialog auto-dismissed (service ready)")
-                    else:
-                        button_index = response - 1000
-                        if button_index == 1:
-                            self.log("User cancelled setup - stopping services")
-                            self.launcher.run("stop", timeout=30)
-                        elif button_index == 0:
-                            self.log("User dismissed setup dialog")
-
-                    self.setup_dialog_showing = False
-                except Exception as e:
-                    self.log(f"Error in setup dialog: {e}")
-                    self.setup_dialog_showing = False
-                    self.setup_alert = None
-
-            self.setup_dialog_showing = True
-            _main_thread(create_and_show)
-            self.log("Setup dialog shown (native NSAlert)")
-        except Exception as e:
-            self.log(f"Error showing setup dialog: {e}")
-            self.setup_dialog_showing = False
-            self.log("Setup dialog fallback - dialog failed to show")
 
     def dismiss_setup_dialog(self):
         """Dismiss the setup dialog if it's showing (native NSAlert)"""
