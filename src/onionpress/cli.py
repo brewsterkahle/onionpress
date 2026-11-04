@@ -370,7 +370,8 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
     or a downgrade) and its package matches the release's SHA256SUMS
     (updater.check_release, fetch_deb / download_and_install).
 
-    The install step is the platform's. A Mac's bundle is replaced by the
+    The install step is the platform's (_update_mac, _update_linux): the
+    checks and the question before it are shared. A Mac's bundle is replaced by the
     staged bundle swap (updater.download_and_install: the new bundle is
     copied beside the old one and renamed into place last, since this
     very process runs out of the bundle being replaced; the menubar
@@ -461,10 +462,20 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
             print("Aborted.")
             return 0
 
-    if not mac:
-        return _update_linux(paths, log, release, current, launcher, force=force,
-                             json_output=json_output)
+    if mac:
+        return _update_mac(paths, log, release, current, app_path,
+                           json_output=json_output)
+    return _update_linux(paths, log, release, current, launcher, force=force,
+                         json_output=json_output)
 
+
+def _update_mac(paths, log, release, current, app_path, *, json_output):
+    """A Mac's install: the staged bundle swap (updater.download_and_install:
+    the new bundle is copied beside the old one and renamed into place
+    last), the daemon stopped around the swap. {"error",
+    "permission_denied"} when another account owns the bundle."""
+    from . import confirm as _confirm, updater
+    latest = release.version
     log(f"Update: downloading and installing v{latest}...")
     if not json_output:
         print(f"Downloading and installing v{latest}...")
