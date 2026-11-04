@@ -43,6 +43,16 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         self._slots = threading.BoundedSemaphore(max_connections or self.max_connections)
         super().__init__(*args, **kwargs)
 
+    def server_bind(self):
+        """HTTPServer's bind without its socket.getfqdn(host): a reverse
+        lookup of the listen address that nothing here reads, and that
+        takes seconds on a macOS runner (web-server.py binds two servers
+        before the API answers, so the integration test's 30 s ran out)."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
             self.shutdown_request(request)
