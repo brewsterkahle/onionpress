@@ -10,7 +10,8 @@ in callers.
 
 Operations:
 - open_in_browser(url)                     — launch via xdg-open / open
-- open_onion(base_url, …)                  — the onion address in a Tor-capable browser, logged in
+- open_onion(base_url, …)                  — the onion address in a Tor-capable browser, logged in:
+                                             every choice of browser (issue #546)
 - login_target(base_url) / open_login(...) — auto-login without the token in any argv
 - tor_image_has_mkp224o(image, docker=…)   — verify the tor image bundles mkp224o
 - generate_vanity_in_container(...)        — docker run mkp224o, write to vanity-keys/
@@ -160,12 +161,6 @@ def _launch_default_web_browser(uri: str) -> bool:
         return False
 
 
-# Where Tor Browser is on a Mac (onionpress.browser.TOR_BROWSER_PATH, and
-# the user's own Applications folder).
-TOR_BROWSER_APPS = ("/Applications/Tor Browser.app",
-                    os.path.expanduser("~/Applications/Tor Browser.app"))
-
-
 def open_in_browser(url: str) -> None:
     """Spawn the default browser at `url`. Detached — does not wait.
 
@@ -196,13 +191,19 @@ def _spawn(cmd: list) -> None:
 # enough for torbrowser-launcher's first download (~80 MB, signature check)
 # and Tor's bootstrap.
 TOR_BROWSER_START_WAIT_SEC = 360
+# Where Tor Browser comes from: `onionpress open get-tor-browser` opens it,
+# and a `needs: tor-browser` answer names it.
+TOR_BROWSER_DOWNLOAD_URL = "https://www.torproject.org/download/"
 NO_TOR_BROWSER_MSG = ("No Tor-capable browser found: install Tor Browser "
-                      "(https://www.torproject.org/download/)")
+                      f"({TOR_BROWSER_DOWNLOAD_URL})")
+# The progress line a cold launch says; the tray watches for it.
+TOR_BROWSER_STARTING = "Tor Browser is starting"
 
 
 def open_onion(base_url: str, *, docker, data_dir: str,
                say: Callable[[str], None] = lambda message: None,
-               sleep: Callable[[float], None] = time.sleep) -> dict:
+               sleep: Callable[[float], None] = time.sleep,
+               extension_wait: int = 0) -> dict:
     """Open *base_url* (http://<address>/<onionname>) logged in as the
     owner in a browser that reaches onion services: the one implementation
     the menubar, the tray and `onionpress open onion` share (issue #527).
@@ -211,30 +212,37 @@ def open_onion(base_url: str, *, docker, data_dir: str,
     Browser runs and cannot be handed a tab (Linux: Tor Browser has no
     remoting), for the person to paste; {"ok": True, "launching": True}
     when a Tor Browser launch is already under way; {"error": …,
-    "no_browser": True} when there is none (a Mac with neither Tor
-    Browser, an extension browser nor Brave). *say* gets progress lines."""
+    "needs": "tor-browser", "download_url": …} when there is none (a Mac
+    with neither Tor Browser, an extension browser nor Brave: the UI offers
+    the download). *say* gets progress lines. On a Mac *extension_wait*
+    gives a browser extension that many seconds to check in when Tor
+    Browser is not installed (the menubar's first run)."""
     if sys.platform == "darwin":
-        return _open_onion_mac(base_url, docker=docker, data_dir=data_dir)
+        return _open_onion_mac(base_url, docker=docker, data_dir=data_dir,
+                               extension_wait=extension_wait, sleep=sleep)
     return _open_onion_linux(base_url, docker=docker, say=say, sleep=sleep)
 
 
-def _open_onion_mac(base_url: str, *, docker, data_dir: str) -> dict:
+def _open_onion_mac(base_url: str, *, docker, data_dir: str, extension_wait, sleep) -> dict:
+    # The choice is browser.detect_best_browser's, the one the menubar's
+    # menu title names.
     from . import browser
-    tor_app = next((a for a in TOR_BROWSER_APPS if os.path.isdir(a)), None)
-    if tor_app:
-        _spawn(["open", "-a", tor_app, login_target(base_url, docker=docker)])
+    kind, name = browser.detect_best_browser(data_dir, extension_wait=extension_wait,
+                                             sleep=sleep)
+    if kind == "tor_browser":
+        _spawn(["open", "-a", browser.tor_browser_app(), login_target(base_url, docker=docker)])
         return {"ok": True, "browser": "Tor Browser"}
-    extension = browser.extension_connected_recently(data_dir)
-    if extension:
-        _spawn(["open", "-a", extension, login_target(base_url, docker=docker)])
-        return {"ok": True, "browser": extension, "extension": True}
-    if browser.is_brave_installed():
+    if kind == "extension":
+        _spawn(["open", "-a", name, login_target(base_url, docker=docker)])
+        return {"ok": True, "browser": name, "extension": True}
+    if kind == "brave":
         # Brave's Tor window takes the URL only on Brave's command line,
         # which every local user can read: the site opens, not logged in.
         _spawn([os.path.join(browser.BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser"),
                 "--tor", base_url])
         return {"ok": True, "browser": "Brave Browser", "logged_in": False}
-    return {"error": NO_TOR_BROWSER_MSG, "no_browser": True}
+    return {"error": NO_TOR_BROWSER_MSG, "needs": "tor-browser",
+            "download_url": TOR_BROWSER_DOWNLOAD_URL}
 
 
 def _torbrowser_launcher_running() -> bool:
@@ -280,7 +288,7 @@ def _open_onion_linux(base_url: str, *, docker, say, sleep) -> dict:
     # circuit; the token is minted then, so its two minutes start when the
     # browser is there to use it.
     _spawn(["torbrowser-launcher"])
-    say("Tor Browser is starting: your site opens once it connects to Tor")
+    say(f"{TOR_BROWSER_STARTING}: your site opens once it connects to Tor")
     waited = 0
     while waited < TOR_BROWSER_START_WAIT_SEC:
         sleep(2)

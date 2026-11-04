@@ -621,8 +621,14 @@
   browser gets `login_target`'s file:// page, Brave the bare URL; a
   running Linux Tor Browser answers `{"paste_url"}`, a cold launch waits
   for firefox.real and sends the tab through `start-tor-browser`; a Mac
-  with none answers `no_browser`. `TestOpenOnion` in
+  with none answers `{"needs": "tor-browser"}`. `TestOpenOnion` in
   `tests/test_auto_login_off_argv.py`.
+- **`onionpress open` makes every choice of browser; the UIs launch
+  none** (#546): the Mac's choice is `browser.detect_best_browser` (the
+  menu title only names it), the first run's extension wait is
+  `--extension-wait`, the download page is `open get-tor-browser`. The
+  UIs keep the menu item, the install dialog and the install monitor.
+  `TestTheBrowserIsTheCLIs` in `tests/test_ui_client.py`.
 - **Each launcher's default case delegates to `onionpress.cli`**: a verb
   with no case of its own (`ensure-archive-s3-keys`, `check-for-update`)
   is the CLI's, and every verb the daemon, menubar, tray, `handle_action`,

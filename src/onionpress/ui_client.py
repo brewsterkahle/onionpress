@@ -42,6 +42,8 @@ from . import launcher_ops
 
 BACKUP_PASSWORD_ENV = launcher_ops.BACKUP_PASSWORD_ENV
 HUB_RECOVERY_KEY_ENV = launcher_ops.HUB_RECOVERY_KEY_ENV
+# The progress line `open onion` says while a cold Tor Browser starts.
+TOR_BROWSER_STARTING = launcher_ops.TOR_BROWSER_STARTING
 # `onionpress setup` / `provision`'s admin password (setup_logic's
 # SETUP_PASSWORD_ENV; a test keeps them equal): in the environment the
 # UIs hand the launcher, never on its argv.

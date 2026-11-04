@@ -66,7 +66,6 @@ class TestExtensionMarker(unittest.TestCase):
         with mock.patch.object(native_messaging_host, "APP_SUPPORT", self.dir):
             self.assertTrue(native_messaging_host.write_extension_marker("Firefox"))
         self.assertEqual(browser.extension_connected_recently(self.dir), "Firefox")
-        self.assertTrue(browser.wait_for_extension_active(self.dir, timeout=1))
 
     def test_both_writers_write_the_same_object(self):
         browser.write_extension_marker(self.dir, "Google Chrome")
