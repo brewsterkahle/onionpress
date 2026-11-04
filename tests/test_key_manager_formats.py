@@ -3,8 +3,8 @@
 
 What is held here:
 
-- read_ctor_keys strips C Tor's 32-byte headers and refuses a truncated
-  file rather than hand back a short key;
+- read_ctor_keys strips C Tor's 32-byte headers (onion_keys.parse_ctor_*)
+  and refuses a truncated file rather than hand back a short key;
 - ensure_key_formats derives whichever of C Tor's pair and the delivered
   PEM is missing from the other, byte for byte the same key (the key is
   the install's identity: a conversion that changed it would be a new
@@ -89,13 +89,13 @@ class TestReadCtorKeys(_KeyDirCase):
     def test_a_short_secret_is_refused(self):
         self.write(SECRET, key_manager.CTOR_HEADER_SECRET + b"x" * 10)
         self.write(PUBLIC, key_manager.CTOR_HEADER_PUBLIC + self.public)
-        with self.assertRaisesRegex(ValueError, "Secret key file too short"):
+        with self.assertRaisesRegex(ValueError, "hs_ed25519_secret_key is 42 bytes"):
             key_manager.read_ctor_keys(self.dir)
 
     def test_a_short_public_key_is_refused(self):
         self.write(SECRET, key_manager.CTOR_HEADER_SECRET + self.private)
         self.write(PUBLIC, b"short")
-        with self.assertRaisesRegex(ValueError, "Public key file too short"):
+        with self.assertRaisesRegex(ValueError, "hs_ed25519_public_key is 5 bytes"):
             key_manager.read_ctor_keys(self.dir)
 
     def test_a_missing_file_raises(self):

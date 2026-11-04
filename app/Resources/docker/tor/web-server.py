@@ -7,6 +7,8 @@ Lightweight HTTP server (Python stdlib only) that handles:
 - OnionHome analytics log collection (auto-detected, no config needed)
 
 Runs inside the tor container on port 8083, exposed through the onion service.
+It also answers the healthcheck onion service (127.0.0.1:8081, every node):
+a GET gets a plain 200, the node's sign of life for the hub's audits.
 
 Access rules. Port 8083 is published on every node's wordpress onion
 service, so everything below is reachable by anyone over Tor. Tor hands
@@ -61,7 +63,6 @@ MAX_LOG_UPLOAD_BODY = 10_485_760  # 10 MB, /logs/upload only
 # generous: onion circuits stall for minutes, so a body gets at least the
 # handler's idle timeout (300 s) and a slow circuit's rate; memory is
 # bounded by the two caps, not by it.
-MAX_CONNECTIONS = 1024
 MAX_LARGE_BODIES = 4  # concurrent bodies above MAX_REQUEST_BODY
 BODY_DEADLINE_FLOOR = 300  # seconds, plus one per BODY_MIN_RATE bytes
 BODY_MIN_RATE = 4096
@@ -76,11 +77,15 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 import onion_auth
 import onion_keys
+from http_listener import (  # noqa: F401  (MAX_CONNECTIONS: the API's cap, #461)
+    BoundedThreadingHTTPServer, MAX_CONNECTIONS, SERVICE_CONNECTIONS,
+    ServiceHandler, log_line,
+)
 from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
@@ -346,37 +351,6 @@ def _accepts_registrations():
 NOT_A_HUB_ERROR = ("This node is not an OnionHeaven hub and does not accept "
                    "registrations")
 
-# Linux launcher hint (linux/onionpress): keep the onionheaven container up.
-ACTIVATE_MARKER = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
-
-
-def _sync_activate_marker(poll_seconds=5):
-    """Make the activation marker follow hub admission, once it is known.
-
-    Written on a hub and removed on every other node; a registration never
-    writes it (it used to, from /online). Waits for the own address first,
-    as an unknown address cannot tell the two apart.
-    """
-    import time as _time
-    while _get_own_address() is None and not registrations_opted_in():
-        _time.sleep(poll_seconds)
-    if _accepts_registrations():
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        try:
-            with open(ACTIVATE_MARKER, "w") as f:
-                f.write(now + "\n")
-        except OSError as e:
-            log(f"WARNING: could not write activation flag: {e}")
-        return
-    try:
-        os.unlink(ACTIVATE_MARKER)
-        log("Removed the OnionHeaven activation flag — this node is not a hub")
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        log(f"WARNING: could not remove activation flag: {e}")
-
-
 # ---------------------------------------------------------------------------
 # Registrants' OpenSSH PEMs (read by onion_keys, as the takeover path reads them)
 # ---------------------------------------------------------------------------
@@ -629,33 +603,6 @@ def _note_verification_unavailable(error):
 # ---------------------------------------------------------------------------
 
 _large_bodies = threading.BoundedSemaphore(MAX_LARGE_BODIES)
-
-
-class BoundedThreadingHTTPServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer with at most MAX_CONNECTIONS connections; one
-    more is closed at once rather than given a thread (#461)."""
-
-    daemon_threads = True
-
-    def __init__(self, *args, **kwargs):
-        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
-        super().__init__(*args, **kwargs)
-
-    def process_request(self, request, client_address):
-        if not self._slots.acquire(blocking=False):
-            self.shutdown_request(request)
-            return
-        try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._slots.release()
-            raise
-
-    def process_request_thread(self, request, client_address):
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._slots.release()
 
 
 class OnionHeavenHandler(BaseHTTPRequestHandler):
@@ -1667,9 +1614,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         conn.close()
 
-        # No activation flag here: a registration comes from outside, and
-        # the flag follows hub admission only (_sync_activate_marker).
-
         self._send_json(200, {
             "online": True,
             "registered": True,  # backwards compat for old clients checking this
@@ -2147,10 +2091,76 @@ def _start_analytics_cleanup_thread():
 
 
 # ---------------------------------------------------------------------------
+# The healthcheck onion service
+# ---------------------------------------------------------------------------
+
+# Tor maps the healthcheck onion service's port 80 here (entrypoint.sh's
+# onion-services.json); nothing else connects to it.
+HEALTHCHECK_HOST = "127.0.0.1"
+HEALTHCHECK_PORT = 8081
+HEALTHCHECK_BODY = b"OK\n"
+
+
+class HealthcheckHandler(ServiceHandler):
+    """The healthcheck onion service: a GET (or HEAD) gets 200 and "OK".
+
+    A hub's takeover audit fetches it to tell a node that is up from one
+    that is gone, and reads only the status code (200 or 301), as every
+    hub in this repository's history has. The JSON body
+    healthcheck-server.sh used to send (the content address, version,
+    WordPress's last post and site count, gathered with three requests to
+    WordPress per uncached hit) had no reader, and it told anyone holding
+    a healthcheck address the content address it belongs to, which the
+    hub's own /status no longer does (#469). Nothing else is answered:
+    until 2.5.7 a POST stored an "OnionHeaven message" the apps showed the
+    owner.
+    """
+
+    SERVICE = "healthcheck"
+
+    def respond(self, request):
+        if request.method == "GET":
+            return 200, "OK", {"Content-Type": "text/plain"}, HEALTHCHECK_BODY, "200"
+        if request.method == "HEAD":
+            return 200, "OK", {"Content-Type": "text/plain"}, b"", "200"
+        return (405, "Method Not Allowed", {"Content-Type": "text/plain"},
+                b"Method Not Allowed", "405")
+
+
+def start_healthcheck():
+    """Serve the healthcheck in a thread of its own; None (logged) when its
+    port cannot be had, which leaves the API serving."""
+    try:
+        server = BoundedThreadingHTTPServer((HEALTHCHECK_HOST, HEALTHCHECK_PORT),
+                                            HealthcheckHandler,
+                                            max_connections=SERVICE_CONNECTIONS)
+    except OSError as e:
+        log_line("healthcheck", f"ERROR: cannot listen on "
+                 f"{HEALTHCHECK_HOST}:{HEALTHCHECK_PORT}: {e}")
+        return None
+    threading.Thread(target=server.serve_forever, daemon=True,
+                     name="healthcheck").start()
+    log_line("healthcheck", f"listening on {HEALTHCHECK_HOST}:{server.server_address[1]}")
+    return server
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    # Shrink per-thread stack from the 8MB default to 256KB before any
+    # request threads spawn. With HTTP/1.1 keep-alive each client now
+    # holds a thread for the connection's lifetime (not just a single
+    # request), so stack memory dominates at scale. 256KB × N clients
+    # gives us comfortable headroom into the low thousands; the request
+    # handlers are not stack-heavy (no deep recursion).
+    threading.stack_size(256 * 1024)
+
+    # The healthcheck first: it answers for the node, whatever the
+    # registry and OnionHome setup below run into.
+    start_healthcheck()
+
     # Ensure data directories exist
     os.makedirs(KEYS_DIR, exist_ok=True)
     if _is_onionhome():
@@ -2192,18 +2202,6 @@ def main():
                 onionnames.log(f"startup refresh failed: {e}")
             onionnames.start_refresh_thread()
         _start_analytics_cleanup_thread()
-
-    # Shrink per-thread stack from the 8MB default to 256KB before any
-    # request threads spawn. With HTTP/1.1 keep-alive each client now
-    # holds a thread for the connection's lifetime (not just a single
-    # request), so stack memory dominates at scale. 256KB × N clients
-    # gives us comfortable headroom into the low thousands; the request
-    # handlers are not stack-heavy (no deep recursion).
-    import threading
-    threading.stack_size(256 * 1024)
-
-    threading.Thread(target=_sync_activate_marker, daemon=True,
-                     name="activate-marker").start()
 
     # ThreadingHTTPServer: the register-local forward path can block up to
     # 30s waiting on Tor. Single-threaded serving would stall every other

@@ -696,8 +696,9 @@
   unless-stopped` under autoheal: every start brings it up on every node.
   **No launcher watcher for it** (the Linux 30 s poll forked from every CLI
   run outlived it, one orphan per `restart`/`setup`, each with its parent's
-  argv in ps); web-server.py's activation flag is read by nothing on the
-  host. `tests/test_start_sequence.py`, `tests/test_start_post_up.py`.
+  argv in ps); web-server.py writes no activation flag (nothing read it).
+  `tests/test_start_sequence.py`, `tests/test_start_post_up.py`,
+  `tests/test_onionheaven_hub_admission.py`.
 
 ## The Docker Socket Stays Out of onionheaven
 - Only `autoheal-proxy` and `onionheaven-farm` mount the socket (`:ro`,
@@ -708,8 +709,12 @@
 
 ## A Plain Node's Address Carries No Hub API (issue #393)
 - Port 8083 (web-server.py) is mapped onto the onion address only when
-  `hub_api_exposed()` (hub or OnionHome). socat listeners are
-  `-T 30 … max-children=64`. `tests/test_tor_node_surface.py`.
+  `hub_api_exposed()` (hub or OnionHome). **The image serves no HTTP from
+  shell**: the healthcheck (web-server.py's `HealthcheckHandler`,
+  127.0.0.1:8081, a plain 200 that asks WordPress nothing) and the redirect
+  (`onionheaven-redirect.py`) are `http_listener.ServiceHandler`s, at most
+  `SERVICE_CONNECTIONS` (64) each, `IDLE_TIMEOUT` 30 s.
+  `tests/test_tor_node_surface.py`, `tests/test_takeover_page_escaping.py`.
 - **do_POST checks every body's length before a handler runs** (digits
   only, the path's limit, no chunked); bodies are read under a deadline,
   at most `MAX_CONNECTIONS` connections (#461). Handlers read only via
@@ -960,8 +965,16 @@
 - **A v3 address is derived only by `onion_auth.derive_onion_address`; an
   onion key's OpenSSH PEM is read, built and checked only by
   `onion_keys`** (source in `src/onionpress/`, copied into the tor image by
-  the same script). No second parser or derivation in web-server.py,
-  key-convert.py, tor-watchdog.py or key_manager.py. `tests/test_onion_keys.py`.
+  the same script), **and C Tor's `hs_ed25519_*` files only by its
+  `parse_ctor_secret` / `parse_ctor_public` / `build_ctor`**. No second
+  parser or derivation in web-server.py, key-convert.py, tor-watchdog.py,
+  onionnames.py or key_manager.py (a `hostname` is decoded by
+  `onion_auth.decode_onion_address`, checksum checked). `tests/test_onion_keys.py`.
+- **`tor_control.py` is the image's one Tor control-port client** (cookie
+  auth, whole replies): the watchdog, the queue manager, the takeover
+  worker and the farm's `bootstrap-phase` / `onions-detached` verbs use
+  it. Every takeover and release in a worker goes through its queue
+  manager (no tor-manager script). `tests/test_tor_control.py`.
 - A verified request is accepted once (`note_signed_request`, replay →
   403). `tests/test_hub_signature_verification.py`.
 

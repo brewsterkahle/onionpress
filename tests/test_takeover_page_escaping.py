@@ -1,39 +1,35 @@
 #!/usr/bin/env python3
 """The hub's takeover page escapes what the client sent.
 
-app/Resources/docker/tor/onionheaven-redirect.sh answers visitors of a
+app/Resources/docker/tor/onionheaven-redirect.py answers visitors of a
 taken-over onion address with a 302 to the Wayback mirror and a small HTML
 page. The Host header and the request path went into that page and the
 Location header as they came. Browsers percent-encode most of a path, but
-not ' or &, and not every client is a browser: the page now gets them
+not ' or &, and not every client is a browser: the page gets them
 HTML-escaped, and the Location header only printable ASCII with the
-characters a URL may not carry literally percent-encoded. Under dash
-(Debian's sh, the image's) the header loop's `echo` also turned a "\\n"
-the client sent into a real line feed, which landed in Location.
+characters a URL may not carry literally percent-encoded. (Under dash the
+old shell handler's `echo` also turned a "\\n" the client sent into a real
+line feed, which landed in Location; the Python handler has no such step,
+and the case stays tested.)
 
-The handler runs under sh and, where present, dash, on canned requests;
-its registry path points at a temp dir. No Docker, no network.
+The handler runs on 127.0.0.1 on canned requests; its registry path points
+at a temp dir. No Docker, no network.
 """
 
 import os
 import re
 import shutil
-import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
-TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(TESTS_DIR)
-SCRIPT = os.path.join(PROJECT_DIR, "app", "Resources", "docker", "tor",
-                      "onionheaven-redirect.sh")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tor_listener_harness as harness  # noqa: E402
+
+redirect = harness.load("onionheaven_redirect_page", "onionheaven-redirect.py")
 WAYBACK = "web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
 SITE = "op2" + "a" * 53 + ".onion"
-SHELLS = [s for s in ("sh", shutil.which("dash")) if s and shutil.which(s)]
-
-
-def _read(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
 
 
 class TestTakeoverPage(unittest.TestCase):
@@ -41,21 +37,13 @@ class TestTakeoverPage(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.script = os.path.join(self.tmp, "redirect.sh")
-        with open(self.script, "w") as f:
-            f.write(_read(SCRIPT).replace("/var/lib/onionheaven/registry.db",
-                                          os.path.join(self.tmp, "registry.db")))
+        p = mock.patch.object(redirect, "DB_PATH", os.path.join(self.tmp, "registry.db"))
+        p.start()
+        self.addCleanup(p.stop)
 
-    def _handle(self, shell, request):
-        r = subprocess.run([shell, self.script, "--handle-request"], input=request,
-                           capture_output=True, timeout=30)
-        head, sep, body = r.stdout.partition(b"\r\n\r\n")
-        self.assertTrue(sep, r.stdout)
-        lines = head.split(b"\r\n")
-        headers = {}
-        for line in lines[1:]:
-            name, _, value = line.partition(b": ")
-            headers[name.decode()] = value
+    def _handle(self, request):
+        response, _log = harness.exchange(redirect.RedirectHandler, request)
+        _status, headers, body, lines = harness.parse(response)
         return lines, headers, body
 
     def _check_response(self, lines, headers, body):
@@ -82,61 +70,55 @@ class TestTakeoverPage(unittest.TestCase):
         return m.groups()
 
     def test_a_visitor_is_redirected_as_before(self):
-        for shell in SHELLS:
-            with self.subTest(shell=shell):
-                lines, headers, body = self._handle(
-                    shell, f"GET /2024/05/caf%C3%A9/?p=1&x=2 HTTP/1.1\r\nHost: {SITE}\r\n\r\n".encode())
-                self._check_response(lines, headers, body)
-                url = f"http://{WAYBACK}/web/http://{SITE}/2024/05/caf%C3%A9/?p=1&x=2"
-                self.assertEqual(headers["Location"], url.encode())
-                code, href, text = self._texts(body)
-                self.assertEqual(code, SITE.encode())
-                self.assertEqual(href, url.replace("&", "&amp;").encode())
-                self.assertEqual(text, href)
+        lines, headers, body = self._handle(
+            f"GET /2024/05/caf%C3%A9/?p=1&x=2 HTTP/1.1\r\nHost: {SITE}\r\n\r\n".encode())
+        self._check_response(lines, headers, body)
+        url = f"http://{WAYBACK}/web/http://{SITE}/2024/05/caf%C3%A9/?p=1&x=2"
+        self.assertEqual(headers["Location"], url.encode())
+        self.assertEqual(headers["X-OnionHeaven-Takeover"], b"1")
+        code, href, text = self._texts(body)
+        self.assertEqual(code, SITE.encode())
+        self.assertEqual(href, url.replace("&", "&amp;").encode())
+        self.assertEqual(text, href)
+
+    def test_a_port_in_the_host_is_left_out(self):
+        _lines, headers, _body = self._handle(
+            f"GET / HTTP/1.1\r\nHost: {SITE}:80\r\n\r\n".encode())
+        self.assertEqual(headers["Location"], f"http://{WAYBACK}/web/http://{SITE}/".encode())
 
     def test_markup_in_the_path_and_host_is_escaped(self):
         path = "/a'b&c\"d<script>alert(1)</script>`{|}^\\e"
         host = "x\"><img src=x onerror=alert(1)>'&"
-        for shell in SHELLS:
-            with self.subTest(shell=shell):
-                lines, headers, body = self._handle(
-                    shell, f"GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
-                self._check_response(lines, headers, body)
-                self.assertNotIn(b"<script", body)
-                self.assertNotIn(b"<img", body)
-                self.assertNotRegex(headers["Location"], rb'["<>\\^`{|}]')
-                self.assertIn(b"/a'b&c%22d%3Cscript%3Ealert(1)%3C/script%3E%60%7B%7C%7D%5E%5Ce",
-                              headers["Location"])
-                code, href, text = self._texts(body)
-                self.assertIn(b"a&#39;b&amp;c%22d%3Cscript%3E", href)
-                self.assertEqual(code, b"x%22%3E%3Cimgsrc=xonerror=alert(1)%3E&#39;&amp;")
+        lines, headers, body = self._handle(
+            f"GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+        self._check_response(lines, headers, body)
+        self.assertNotIn(b"<script", body)
+        self.assertNotIn(b"<img", body)
+        self.assertNotRegex(headers["Location"], rb'["<>\\^`{|}]')
+        self.assertIn(b"/a'b&c%22d%3Cscript%3Ealert(1)%3C/script%3E%60%7B%7C%7D%5E%5Ce",
+                      headers["Location"])
+        code, href, text = self._texts(body)
+        self.assertIn(b"a&#39;b&amp;c%22d%3Cscript%3E", href)
+        self.assertEqual(code, b"x%22%3E%3Cimgsrc=xonerror=alert(1)%3E&#39;&amp;")
 
     def test_a_backslash_escape_in_the_host_stays_text(self):
         # dash's echo made a real line feed of this: "Location: ...x" then
         # a blank line, and the client's markup became the response body.
-        for shell in SHELLS:
-            with self.subTest(shell=shell):
-                lines, headers, body = self._handle(
-                    shell, b"GET /p HTTP/1.1\r\nHost: x\\r\\n\\n<b>hi</b>\\0101\r\n\r\n")
-                self._check_response(lines, headers, body)
-                self.assertNotIn(b"<b>", body)
-                self.assertIn(b"x\\r\\n\\n%3Cb%3Ehi%3C/b%3E\\0101", body.replace(b"%5C", b"\\"))
+        lines, headers, body = self._handle(
+            b"GET /p HTTP/1.1\r\nHost: x\\r\\n\\n<b>hi</b>\\0101\r\n\r\n")
+        self._check_response(lines, headers, body)
+        self.assertNotIn(b"<b>", body)
+        self.assertIn(b"x\\r\\n\\n%3Cb%3Ehi%3C/b%3E\\0101", body.replace(b"%5C", b"\\"))
 
     def test_control_bytes_never_reach_the_response(self):
-        for shell in SHELLS:
-            with self.subTest(shell=shell):
-                lines, headers, body = self._handle(
-                    shell, b"GET /a\x0b\x0cb\x7f\xc3\xa9 HTTP/1.1\r\nHost: \x1bx\ty\r\n\r\n")
-                self._check_response(lines, headers, body)
-                self.assertTrue(headers["Location"].endswith(b"/web/http://xy/ab"),
-                                headers["Location"])
+        lines, headers, body = self._handle(
+            b"GET /a\x0b\x0cb\x7f\xc3\xa9 HTTP/1.1\r\nHost: \x1bx\ty\r\n\r\n")
+        self._check_response(lines, headers, body)
+        self.assertTrue(headers["Location"].endswith(b"/web/http://xy/ab"),
+                        headers["Location"])
 
-    def test_the_header_loop_has_no_echo(self):
-        src = _read(SCRIPT)
-        loop = src[src.index("    # Read headers to find Host"):src.index('    log_host=$(log_safe "$host")')]
-        code = [l for l in loop.splitlines() if not l.lstrip().startswith("#")]
-        self.assertTrue(code)
-        self.assertNotIn("echo", "\n".join(code))
+    def test_the_shell_handler_is_gone(self):
+        self.assertFalse(os.path.exists(os.path.join(harness.TOR_DIR, "onionheaven-redirect.sh")))
 
 
 if __name__ == "__main__":

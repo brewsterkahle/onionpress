@@ -45,13 +45,15 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import onion_auth  # noqa: E402  (the one address derivation)
+import onion_keys  # noqa: E402  (the one reader of C Tor's key files)
+import tor_control  # noqa: E402  (the one control-port client)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-CONTROL_HOST = "127.0.0.1"
-CONTROL_PORT = 9051
-COOKIE_PATH = "/var/lib/tor/control_auth_cookie"
+CONTROL_HOST = tor_control.CONTROL_HOST
+CONTROL_PORT = tor_control.CONTROL_PORT
+COOKIE_PATH = tor_control.COOKIE_PATH
 
 # Rate limits (seconds)
 DROPGUARDS_COOLDOWN = 300
@@ -159,56 +161,33 @@ def read_cookie():
 
 
 def connect_and_auth():
-    """Connect to control port and authenticate. Returns socket or None."""
+    """Connect to the control port and authenticate. Returns a
+    tor_control.Controller, or None."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(10)
-        s.connect((CONTROL_HOST, CONTROL_PORT))
-
+        ctl = tor_control.Controller.connect(CONTROL_HOST, CONTROL_PORT, cookie=False)
+    except OSError:
+        return None
+    try:
         cookie = read_cookie()
         if cookie is None:
             log("Could not read auth cookie — giving up")
-            s.close()
+            ctl.close()
             return None
-
-        s.sendall(b"AUTHENTICATE " + cookie.hex().encode() + b"\r\n")
-        resp = recv_response(s)
-        if not resp.startswith("250"):
-            log(f"Authentication failed: {resp.strip()}")
-            s.close()
-            return None
-
-        return s
-    except (ConnectionRefusedError, OSError) as e:
-        return None
+        ctl.authenticate(cookie)
+        return ctl
+    except ConnectionError as e:
+        log(f"Authentication failed: {e}")
+    except OSError:
+        pass
+    ctl.close()
+    return None
 
 
-def recv_response(s):
-    """Read a single control port response (may be multi-line)."""
-    buf = b""
-    while True:
-        try:
-            chunk = s.recv(4096)
-        except socket.timeout:
-            break
-        if not chunk:
-            break
-        buf += chunk
-        # Single-line response: "250 OK\r\n"
-        # Multi-line: "250-first\r\n250 last\r\n"
-        lines = buf.decode("utf-8", errors="replace").split("\r\n")
-        for line in lines:
-            if line and len(line) >= 4 and line[3] == " ":
-                return buf.decode("utf-8", errors="replace")
-    return buf.decode("utf-8", errors="replace")
-
-
-def send_cmd(s, cmd):
+def send_cmd(ctl, cmd):
     """Send a command and return the response."""
     try:
-        s.sendall((cmd + "\r\n").encode())
-        return recv_response(s)
-    except (BrokenPipeError, OSError) as e:
+        return ctl.command(cmd)
+    except (OSError, ValueError) as e:
         return f"ERROR: {e}"
 
 
@@ -219,11 +198,7 @@ def send_cmd(s, cmd):
 def _read_ed25519_key(secret_key_path):
     """Read a C Tor hs_ed25519_secret_key file and return base64 for ADD_ONION."""
     with open(secret_key_path, "rb") as f:
-        data = f.read()
-    if len(data) != 96:
-        raise ValueError(f"Secret key wrong size: {len(data)} (expected 96)")
-    # 32-byte header + 64-byte expanded key
-    expanded_key = data[32:]
+        expanded_key = onion_keys.parse_ctor_secret(f.read())
     return base64.b64encode(expanded_key).decode("ascii")
 
 
@@ -233,10 +208,7 @@ def _derive_onion_address(public_key_path):
     The address derivation is onion_auth's.
     """
     with open(public_key_path, "rb") as f:
-        data = f.read()
-    if len(data) != 64:
-        raise ValueError(f"Public key wrong size: {len(data)} (expected 64)")
-    return onion_auth.derive_onion_address(data[32:])  # 32-byte header + key
+        return onion_auth.derive_onion_address(onion_keys.parse_ctor_public(f.read()))
 
 
 def _read_hostname(path):
@@ -429,10 +401,9 @@ def _save_generated_key(service_dir, service_id, key_b64):
         # then the hostname, each in one step and never over an existing
         # file: a short key file left by a crash reads as no key, and an
         # existing one is an existing identity (issue #311).
-        key_bytes = base64.b64decode(key_b64)
-        header = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
+        secret, _ = onion_keys.build_ctor(base64.b64decode(key_b64))
         _write_new_file(os.path.join(service_dir, "hs_ed25519_secret_key"),
-                        header + key_bytes, 0o600)
+                        secret, 0o600)
         _write_new_file(os.path.join(service_dir, "hostname"),
                         (service_id + ".onion\n").encode("ascii"), 0o644)
         log(f"Saved generated key for {service_id[:16]}... to {service_dir}")
@@ -1077,7 +1048,6 @@ def run():
 
         log("Connected — monitoring Tor health")
         event_sock.settimeout(5)  # wake up frequently to check signals + stalls
-        buf = ""
 
         while True:
             touch_alive()
@@ -1133,12 +1103,11 @@ def run():
 
             # Read events
             try:
-                data = event_sock.recv(4096)
-                if not data:
-                    log("Control port connection closed — reconnecting")
-                    state.services_active = False
-                    break
-                buf += data.decode("utf-8", errors="replace")
+                lines = event_sock.read_events()
+            except tor_control.ControlClosed:
+                log("Control port connection closed — reconnecting")
+                state.services_active = False
+                break
             except socket.timeout:
                 # No events — check for stalls
                 check_stalls(cmd_sock, state)
@@ -1170,10 +1139,7 @@ def run():
                 break
 
             # Process complete lines
-            while "\r\n" in buf:
-                line, buf = buf.split("\r\n", 1)
-                if not line:
-                    continue
+            for line in lines:
                 if line.startswith("650"):
                     process_event(line, cmd_sock, state)
 
@@ -1181,14 +1147,8 @@ def run():
             check_stalls(cmd_sock, state)
 
         # Clean up and reconnect
-        try:
-            event_sock.close()
-        except OSError:
-            pass
-        try:
-            cmd_sock.close()
-        except OSError:
-            pass
+        event_sock.close()
+        cmd_sock.close()
         time.sleep(CONNECT_RETRY_DELAY)
 
 

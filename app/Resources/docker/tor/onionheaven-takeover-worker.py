@@ -3,9 +3,9 @@
 OnionHeaven Takeover Worker — runs inside onionheaven-takeover-N containers.
 
 Watches the registry DB for rows assigned to this container with
-release_pending flags set. Executes the actual
-tor-manager release commands locally (this container has its
-own Tor instance with a control port).
+release_pending flags set. Hands the releases to this container's own
+queue manager (onionheaven-queue-manager.py), which runs the DEL_ONION on
+this container's Tor.
 
 Each takeover container has its own Tor guard pool, preventing the
 circuit exhaustion cascade that occurs when a single Tor daemon handles
@@ -20,6 +20,7 @@ Main loop (every 2s):
   - Heartbeat every 30s
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -29,8 +30,9 @@ from datetime import datetime, timezone
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     _takeover_local, _release_local, onion_address_ok,
-    TOR_MANAGER, ONIONHEAVEN_DATA_DIR,
+    QUEUE_MANAGER, ONIONHEAVEN_DATA_DIR,
 )
+import tor_control
 
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")
 MAX_SERVICES = int(os.environ.get("MAX_TAKEOVER_SERVICES", "10"))
@@ -194,7 +196,7 @@ def process_audits(conn):
             (now_str, ca, ha)
         )
         db_commit_with_retry(conn)
-        # Release via local tor-manager and update DB
+        # Release via the local queue manager and update DB
         ok = _release_local(ca)
         if ok:
             conn.execute(
@@ -258,23 +260,33 @@ def wait_for_db():
     return True
 
 
+def _bootstrapped():
+    """Has this container's Tor bootstrapped to 100 %?"""
+    try:
+        with tor_control.Controller.connect(timeout=5) as ctl:
+            return "PROGRESS=100" in (ctl.getinfo("status/bootstrap-phase") or "")
+    except (OSError, ValueError):
+        return False
+
+
+def _queue_manager_up():
+    """Does the queue manager in this container answer `status`?"""
+    try:
+        result = subprocess.run(["python3", QUEUE_MANAGER, "status"],
+                                capture_output=True, text=True, timeout=10)
+        return result.returncode == 0 and "error" not in json.loads(result.stdout or "{}")
+    except Exception:
+        return False
+
+
 def wait_for_tor():
-    """Wait for C Tor's control port to be ready (bootstrapped)."""
+    """Wait for C Tor to bootstrap and the queue manager, which takes the
+    startup reconciliation's takeovers, to answer."""
     log("takeover-worker: waiting for Tor to bootstrap...")
     for attempt in range(60):
-        try:
-            result = subprocess.run(
-                ["sh", "-c",
-                 'cookie=$(xxd -p /var/lib/tor/control_auth_cookie 2>/dev/null | tr -d "\\n"); '
-                 '[ -n "$cookie" ] && printf "AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n" '
-                 '"$cookie" | nc -w 2 127.0.0.1 9051'],
-                capture_output=True, text=True, timeout=10,
-            )
-            if "PROGRESS=100" in result.stdout:
-                log("takeover-worker: Tor bootstrapped and ready")
-                return True
-        except Exception:
-            pass
+        if _bootstrapped() and _queue_manager_up():
+            log("takeover-worker: Tor bootstrapped and ready")
+            return True
         time.sleep(2)
     log("WARNING: Tor not bootstrapped after 120s, proceeding anyway")
     return False

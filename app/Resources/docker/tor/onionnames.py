@@ -562,31 +562,19 @@ def start_refresh_thread(db_path=DB_PATH, interval=DYNAMIC_REFRESH_INTERVAL):
 CTOR_SECRET_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"
 CTOR_PUBLIC_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
 
-# 32-byte fixed prefixes used by C Tor's key files. See key-convert.py for
-# the reference implementation.
-_CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 =="
-_CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 =="
-
-
 def read_local_hs_key(secret_path=CTOR_SECRET_PATH,
                       public_path=CTOR_PUBLIC_PATH):
-    """Load the local wordpress HS Ed25519 keys.
+    """Load the local wordpress HS Ed25519 keys (onion_keys reads C Tor's
+    format).
 
     Returns (expanded_64, public_32). Raises OSError / ValueError on any
     failure — callers should treat the endpoint as unavailable in that case.
     """
+    import onion_keys  # imported late like onion_auth in _sign, below
     with open(secret_path, "rb") as f:
-        sdata = f.read()
-    if len(sdata) != 96 or not sdata.startswith(_CTOR_SECRET_HEADER):
-        raise ValueError(f"unexpected secret key file format ({len(sdata)} bytes)")
-    expanded = sdata[32:]
-
+        expanded = onion_keys.parse_ctor_secret(f.read())
     with open(public_path, "rb") as f:
-        pdata = f.read()
-    if len(pdata) != 64 or not pdata.startswith(_CTOR_PUBLIC_HEADER):
-        raise ValueError(f"unexpected public key file format ({len(pdata)} bytes)")
-    public = pdata[32:]
-
+        public = onion_keys.parse_ctor_public(f.read())
     return expanded, public
 
 

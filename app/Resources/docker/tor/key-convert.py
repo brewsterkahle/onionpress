@@ -30,9 +30,9 @@ import onion_auth
 import onion_keys
 from onion_keys import SodiumUnavailable, keypair_error
 
-# C Tor key file headers (exactly 32 bytes each)
-CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
-CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
+# C Tor key file headers (exactly 32 bytes each): onion_keys' format.
+CTOR_SECRET_HEADER = onion_keys.CTOR_SECRET_HEADER
+CTOR_PUBLIC_HEADER = onion_keys.CTOR_PUBLIC_HEADER
 
 
 def parse_arti_pem(pem_path):
@@ -91,6 +91,7 @@ def build_arti_pem(expanded_key, public_key):
 def arti_to_ctor(pem_path, output_dir):
     """Convert Arti PEM to C Tor hs_ed25519_secret_key + hs_ed25519_public_key."""
     expanded_key, public_key = parse_arti_pem(pem_path)
+    secret, public = onion_keys.build_ctor(expanded_key, public_key)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -98,10 +99,10 @@ def arti_to_ctor(pem_path, output_dir):
     # secret key is missing, so the secret key is the one written last
     # before the hostname.
     public_path = os.path.join(output_dir, "hs_ed25519_public_key")
-    _write_atomic(public_path, CTOR_PUBLIC_HEADER + public_key)
+    _write_atomic(public_path, public)
 
     secret_path = os.path.join(output_dir, "hs_ed25519_secret_key")
-    _write_atomic(secret_path, CTOR_SECRET_HEADER + expanded_key)
+    _write_atomic(secret_path, secret)
 
     # The hostname too: one left from another key would be published as
     # the service ID, and the host reads it to learn the address.
@@ -152,11 +153,11 @@ def check_ctor_against_pem(pem_path, ctor_dir):
         return False, "hs_ed25519_secret_key is missing"
     except (OSError, ValueError) as e:
         return False, f"hs_ed25519_secret_key is unreadable ({e})"
-    if len(secret) != 96:
-        return False, f"hs_ed25519_secret_key is {len(secret)} bytes (expected 96)"
-    if secret[:32] != CTOR_SECRET_HEADER:
-        return False, "hs_ed25519_secret_key has an invalid header"
-    if secret[32:] != expanded_key:
+    try:
+        secret = onion_keys.parse_ctor_secret(secret)
+    except ValueError as e:
+        return False, str(e)
+    if secret != expanded_key:
         return False, "hs_ed25519_secret_key holds a different key than the delivered PEM"
 
     public_path = os.path.join(ctor_dir, "hs_ed25519_public_key")
@@ -166,7 +167,7 @@ def check_ctor_against_pem(pem_path, ctor_dir):
         return False, "hs_ed25519_public_key is missing"
     except (OSError, ValueError) as e:
         return False, f"hs_ed25519_public_key is unreadable ({e})"
-    if public != CTOR_PUBLIC_HEADER + public_key:
+    if public != onion_keys.build_ctor(expanded_key, public_key)[1]:
         return False, "hs_ed25519_public_key does not match the delivered PEM"
 
     # hostname is optional (the watchdog derives it from the public key),
@@ -191,25 +192,14 @@ def ctor_to_arti(secret_key_path, output_pem_path):
     otherwise derives the public key from the expanded key's first 32 bytes.
     """
     with open(secret_key_path, "rb") as f:
-        data = f.read()
-
-    if len(data) != 96:
-        raise ValueError(f"Secret key wrong size: {len(data)} (expected 96)")
-    if data[:32] != CTOR_SECRET_HEADER:
-        raise ValueError("Invalid C Tor secret key header")
-
-    expanded_key = data[32:]
+        expanded_key = onion_keys.parse_ctor_secret(f.read())
 
     # Try to read public key from same directory
     secret_dir = os.path.dirname(secret_key_path)
     public_path = os.path.join(secret_dir, "hs_ed25519_public_key")
     if os.path.exists(public_path):
         with open(public_path, "rb") as f:
-            pub_data = f.read()
-        if len(pub_data) == 64 and pub_data[:32] == CTOR_PUBLIC_HEADER:
-            public_key = pub_data[32:]
-        else:
-            raise ValueError("Invalid C Tor public key file")
+            public_key = onion_keys.parse_ctor_public(f.read())
     else:
         # Derive public key — the first 32 bytes of expanded key are the
         # clamped scalar; we need to do scalar multiplication to get the

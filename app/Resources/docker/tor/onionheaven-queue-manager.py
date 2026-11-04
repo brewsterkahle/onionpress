@@ -13,6 +13,7 @@ Interface:
   docker exec <worker> python3 /onionheaven-queue-manager.py status
 """
 
+import base64
 import json
 import os
 import re
@@ -23,17 +24,18 @@ import time
 import threading
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import onion_auth  # noqa: E402  (the one address derivation)
+import onion_keys  # noqa: E402  (the one PEM reader)
+import tor_control  # noqa: E402  (the one control-port client)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 MAX_IN_FLIGHT = int(os.environ.get("ONIONHEAVEN_MAX_IN_FLIGHT", "5"))
-CONTROL_HOST = "127.0.0.1"
-CONTROL_PORT = 9051
-COOKIE_PATH = "/var/lib/tor/control_auth_cookie"
 # onionheaven_common.KEYS_DIR, on the hub data volume (a test keeps them equal)
 KEYS_DIR = "/var/lib/onionheaven/keys"
-KEY_CONVERT = "/key-convert.py"
 REDIRECT_PORT = 8082
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")
 # The command socket: root's only. The daemon runs as root and, on a
@@ -70,9 +72,33 @@ def log(msg):
     sys.stderr.flush()
 
 
-def _read_cookie():
-    with open(COOKIE_PATH, "rb") as f:
-        return f.read().hex()
+def _control_port_open():
+    """Is Tor's control port accepting connections (no authentication)?"""
+    try:
+        tor_control.Controller.connect(timeout=2, cookie=False).close()
+        return True
+    except OSError:
+        return False
+
+
+def stored_key_b64(content_address, keys_dir=None):
+    """KEYS_DIR/<address>'s key as base64 for ADD_ONION, or None when there
+    is none, it cannot be read or it derives to another address (logged)."""
+    key_file = os.path.join(keys_dir or KEYS_DIR, content_address,
+                            "ks_hs_id.ed25519_expanded_private")
+    if not os.path.isfile(key_file):
+        return None
+    try:
+        expanded, public = onion_keys.parse_pem_file(key_file)
+    except (OSError, ValueError) as e:
+        log(f"key for {content_address[:20]}... is unreadable: {e}")
+        return None
+    derived = onion_auth.derive_onion_address(public)
+    if derived != content_address:
+        log(f"key mismatch for {content_address[:20]}...: the stored key "
+            f"derives to {derived[:20]}... (refusing takeover)")
+        return None
+    return base64.b64encode(expanded).decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -83,38 +109,17 @@ class TorCommandConn:
     """Synchronous control port connection for ADD_ONION / DEL_ONION."""
 
     def __init__(self):
-        self.sock = None
+        self.ctl = None
 
     def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((CONTROL_HOST, CONTROL_PORT))
-        self.sock.settimeout(10.0)
-        cookie = _read_cookie()
-        self._send(f"AUTHENTICATE {cookie}")
-        resp = self._read_response()
-        if "250 OK" not in resp:
-            raise RuntimeError(f"Command conn auth failed: {resp}")
+        try:
+            self.ctl = tor_control.Controller.connect()
+        except ConnectionError as e:
+            raise RuntimeError(f"Command conn auth failed: {e}") from e
         log("Command connection established")
 
-    def _send(self, cmd):
-        self.sock.sendall(f"{cmd}\r\n".encode())
-
-    def _read_response(self):
-        """Read a complete synchronous response (ends with 'NNN SP' line)."""
-        data = b""
-        while True:
-            try:
-                chunk = self.sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                text = data.decode("utf-8", errors="replace")
-                for line in text.split("\r\n"):
-                    if line and len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
-                        return text
-            except socket.timeout:
-                break
-        return data.decode("utf-8", errors="replace")
+    def _command(self, cmd):
+        return self.ctl.command(cmd)
 
     def add_onion(self, content_address, key_b64):
         """Send ADD_ONION. Returns (success, service_id_or_error).
@@ -128,25 +133,19 @@ class TorCommandConn:
         pre-542cb61b /online key-write bug and any future class of bug
         that lets a wrong key onto disk.
         """
-        cmd = (f"ADD_ONION ED25519-V3:{key_b64} Flags=Detach "
-               f"Port=80,127.0.0.1:{REDIRECT_PORT}")
-        self._send(cmd)
-        resp = self._read_response()
+        resp = self._command(f"ADD_ONION ED25519-V3:{key_b64} Flags=Detach "
+                             f"Port=80,127.0.0.1:{REDIRECT_PORT}")
 
         expected_sid = content_address.replace(".onion", "")
-        if "250-ServiceID=" in resp:
-            # Extract service ID from response
-            for line in resp.split("\r\n"):
-                if line.startswith("250-ServiceID="):
-                    sid = line.split("=", 1)[1]
-                    if sid != expected_sid:
-                        # Wrong key on disk. Roll back the ADD so we don't
-                        # leak a service into Tor under the wrong slot.
-                        self._send(f"DEL_ONION {sid}")
-                        self._read_response()
-                        return False, f"key_mismatch:expected={expected_sid} actual={sid}"
-                    return True, sid
-            return True, expected_sid
+        sid = next((line.split("=", 1)[1] for line in resp.split("\r\n")
+                    if line.startswith("250-ServiceID=")), None)
+        if sid is not None:
+            if sid != expected_sid:
+                # Wrong key on disk. Roll back the ADD so we don't
+                # leak a service into Tor under the wrong slot.
+                self._command(f"DEL_ONION {sid}")
+                return False, f"key_mismatch:expected={expected_sid} actual={sid}"
+            return True, sid
 
         if "Onion address collision" in resp:
             # Tor says the key already maps to a registered service. That's
@@ -166,8 +165,7 @@ class TorCommandConn:
     def del_onion(self, content_address):
         """Send DEL_ONION. Returns (success, response)."""
         service_id = content_address.replace(".onion", "")
-        self._send(f"DEL_ONION {service_id}")
-        resp = self._read_response()
+        resp = self._command(f"DEL_ONION {service_id}")
         success = "250 OK" in resp
         return success, resp.strip()
 
@@ -175,18 +173,14 @@ class TorCommandConn:
         """Check if Tor still has this onion service (detached or current)."""
         service_id = content_address.replace(".onion", "")
         for kind in ("onions/detached", "onions/current"):
-            self._send(f"GETINFO {kind}")
-            resp = self._read_response()
+            resp = self._command(f"GETINFO {kind}")
             if service_id in resp:
                 return True
         return False
 
     def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
+        if self.ctl:
+            self.ctl.close()
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +191,7 @@ class TorEventConn:
     """Async control port connection that monitors HS_DESC events."""
 
     def __init__(self):
-        self.sock = None
+        self.ctl = None
         self.uploaded = set()  # service_ids with HS_DESC UPLOADED
         self.failed = set()    # service_ids with HS_DESC FAILED
         self.lock = threading.Lock()
@@ -205,17 +199,11 @@ class TorEventConn:
         self._thread = None
 
     def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((CONTROL_HOST, CONTROL_PORT))
-        self.sock.settimeout(5.0)
-        cookie = _read_cookie()
-        self._send(f"AUTHENTICATE {cookie}")
-        resp = self._read_response()
-        if "250 OK" not in resp:
-            raise RuntimeError(f"Event conn auth failed: {resp}")
-
-        self._send("SETEVENTS HS_DESC")
-        resp = self._read_response()
+        try:
+            self.ctl = tor_control.Controller.connect(timeout=5.0)
+        except ConnectionError as e:
+            raise RuntimeError(f"Event conn auth failed: {e}") from e
+        resp = self.ctl.command("SETEVENTS HS_DESC")
         if "250 OK" not in resp:
             raise RuntimeError(f"SETEVENTS failed: {resp}")
 
@@ -224,41 +212,18 @@ class TorEventConn:
         self._thread.start()
         log("Event connection established, listening for HS_DESC events")
 
-    def _send(self, cmd):
-        self.sock.sendall(f"{cmd}\r\n".encode())
-
-    def _read_response(self):
-        data = b""
-        while True:
-            try:
-                chunk = self.sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                text = data.decode("utf-8", errors="replace")
-                for line in text.split("\r\n"):
-                    if line and len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
-                        return text
-            except socket.timeout:
-                break
-        return data.decode("utf-8", errors="replace")
-
     def _event_loop(self):
-        self.sock.settimeout(1.0)
-        buf = b""
+        self.ctl.settimeout(1.0)
         while self._running:
             try:
-                chunk = self.sock.recv(4096)
-                if not chunk:
-                    log("Event connection closed")
-                    self._running = False
-                    break
-                buf += chunk
-                while b"\r\n" in buf:
-                    line, buf = buf.split(b"\r\n", 1)
-                    self._handle_line(line.decode("utf-8", errors="replace"))
+                for line in self.ctl.read_events():
+                    self._handle_line(line)
             except socket.timeout:
                 continue
+            except tor_control.ControlClosed:
+                log("Event connection closed")
+                self._running = False
+                break
             except Exception as e:
                 log(f"Event loop error: {e}")
                 time.sleep(1)
@@ -300,11 +265,8 @@ class TorEventConn:
 
     def close(self):
         self._running = False
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
+        if self.ctl:
+            self.ctl.close()
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +297,7 @@ class QueueManager:
         """Add an address to the takeover queue.
 
         If in-memory state says active/in_flight but Tor doesn't actually have
-        the service (e.g. DEL_ONION'd via tor-manager out-of-band, or a
+        the service (e.g. DEL_ONION'd out-of-band, or a
         pre-#232 takeover_function race left the row marked taken-over without
         ADD_ONION ever firing), the stale entry is evicted so the address re-queues.
         """
@@ -550,13 +512,8 @@ class QueueManager:
         # Wait for Tor to bootstrap
         for _ in range(60):
             time.sleep(2)
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect((CONTROL_HOST, CONTROL_PORT))
-                s.close()
+            if _control_port_open():
                 break
-            except ConnectionRefusedError:
-                continue
         else:
             log("RECOVERY: Tor control port not available after 120s")
             return
@@ -585,8 +542,7 @@ class QueueManager:
         self._last_recovery_time = time.time()
         self._recovery_count += 1
         try:
-            self.cmd._send("SIGNAL NEWNYM")
-            resp = self.cmd._read_response()
+            resp = self.cmd._command("SIGNAL NEWNYM")
             if "250 OK" in resp:
                 log("RECOVERY: SIGNAL NEWNYM sent — waiting for new circuits")
             else:
@@ -625,19 +581,13 @@ class QueueManager:
         return None  # not in this worker
 
     def _get_key(self, content_address):
-        """Extract ed25519 key as base64 for ADD_ONION."""
-        key_file = os.path.join(KEYS_DIR, content_address,
-                                "ks_hs_id.ed25519_expanded_private")
-        if not os.path.isfile(key_file):
-            return None
-        try:
-            result = subprocess.run(
-                ["python3", KEY_CONVERT, "pem-to-ed25519-base64", key_file],
-                capture_output=True, text=True, timeout=10
-            )
-            return result.stdout.strip() if result.returncode == 0 else None
-        except Exception:
-            return None
+        """The address's ed25519 key as base64 for ADD_ONION, or None.
+
+        A key that derives to another address is refused before Tor sees
+        it (add_onion's ServiceID check is the second guard): Tor would
+        serve it under that other address, in this address's slot.
+        """
+        return stored_key_b64(content_address)
 
 
 # ---------------------------------------------------------------------------
@@ -704,13 +654,9 @@ def run_daemon():
     """Run as daemon — listen for commands on Unix socket."""
     log("Waiting for Tor control port...")
     for _ in range(60):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((CONTROL_HOST, CONTROL_PORT))
-            s.close()
+        if _control_port_open():
             break
-        except ConnectionRefusedError:
-            time.sleep(2)
+        time.sleep(2)
     else:
         log("ERROR: Tor control port not available after 120s")
         sys.exit(1)

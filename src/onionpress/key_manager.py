@@ -30,8 +30,8 @@ CONTAINER = "onionpress-tor"
 CTOR_SECRET_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"
 CTOR_PUBLIC_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
 CTOR_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
-CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
-CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
+CTOR_SECRET_HEADER = onion_keys.CTOR_SECRET_HEADER
+CTOR_PUBLIC_HEADER = onion_keys.CTOR_PUBLIC_HEADER
 
 def parse_openssh_key(data):
     """(private_key_64bytes, public_key_32bytes) of an unencrypted OpenSSH
@@ -54,51 +54,18 @@ def _docker_cat(docker, path):
     return True, result.stdout
 
 
-def _parse_ctor_secret(data):
-    """Parse a C Tor hs_ed25519_secret_key: 32-byte header + 64-byte expanded."""
-    if len(data) != 96:
-        raise Exception(
-            f"C Tor secret key wrong size: {len(data)} (expected 96)"
-        )
-    if data[:32] != CTOR_SECRET_HEADER:
-        raise Exception("C Tor secret key has bad header")
-    return data[32:]
-
-
-def _parse_ctor_public(data):
-    """Parse a C Tor hs_ed25519_public_key: 32-byte header + 32-byte pubkey."""
-    if len(data) != 64:
-        raise Exception(
-            f"C Tor public key wrong size: {len(data)} (expected 64)"
-        )
-    if data[:32] != CTOR_PUBLIC_HEADER:
-        raise Exception("C Tor public key has bad header")
-    return data[32:]
-
-
 def _pubkey_from_hostname(hostname_bytes):
-    """Recover the 32-byte ed25519 public key from a v3 .onion hostname.
+    """The 32-byte ed25519 public key a `hostname` file names: its one v3
+    address, checksum and version checked (onion_auth.decode_onion_address).
 
     C Tor writes `hostname` but often doesn't write `hs_ed25519_public_key`
     (newer tor relies on the secret key + on-demand derivation, plus the
-    hostname file as the canonical public artifact). An onion v3 address
-    is base32(pubkey[32] || checksum[2] || version[1]) + ".onion" — the
-    pubkey is the first 32 bytes of the decoded payload.
+    hostname file as the canonical public artifact).
     """
     text = hostname_bytes.decode("utf-8", errors="replace").strip().lower()
     if not text.endswith(".onion"):
-        raise Exception(f"hostname file is not a .onion address: {text!r}")
-    b32 = text[:-len(".onion")].upper()
-    if len(b32) != 56:
-        raise Exception(
-            f"onion address wrong length: {len(b32)} chars (expected 56)"
-        )
-    decoded = base64.b32decode(b32)
-    if len(decoded) != 35:
-        raise Exception(
-            f"decoded onion address wrong size: {len(decoded)} (expected 35)"
-        )
-    return decoded[:32]
+        raise ValueError(f"hostname file is not a .onion address: {text[:80]!r}")
+    return onion_auth.decode_onion_address(text)
 
 
 def extract_keys(docker):
@@ -127,13 +94,13 @@ def extract_keys(docker):
     sec_ok, sec_data = _docker_cat(docker, CTOR_SECRET_PATH)
     if sec_ok:
         try:
-            expanded = _parse_ctor_secret(sec_data)
+            expanded = onion_keys.parse_ctor_secret(sec_data)
         except Exception as e:
             raise Exception(f"Failed to parse C Tor secret key: {e}")
         pub_ok, pub_data = _docker_cat(docker, CTOR_PUBLIC_PATH)
         if pub_ok:
             try:
-                return expanded, _parse_ctor_public(pub_data)
+                return expanded, onion_keys.parse_ctor_public(pub_data)
             except Exception as e:
                 raise Exception(f"Failed to parse C Tor public key: {e}")
         host_ok, host_data = _docker_cat(docker, CTOR_HOSTNAME_PATH)
@@ -233,8 +200,8 @@ def write_private_key(docker, private_key, public_key):
         raise Exception(f"Failed to write private key: {e}")
 
 
-CTOR_HEADER_SECRET = b'== ed25519v1-secret: type0 ==\x00\x00\x00'  # 32 bytes
-CTOR_HEADER_PUBLIC = b'== ed25519v1-public: type0 ==\x00\x00\x00'  # 32 bytes
+CTOR_HEADER_SECRET = onion_keys.CTOR_SECRET_HEADER  # 32 bytes
+CTOR_HEADER_PUBLIC = onion_keys.CTOR_PUBLIC_HEADER  # 32 bytes
 
 
 def read_ctor_keys(key_dir):
@@ -250,34 +217,27 @@ def read_ctor_keys(key_dir):
     hostname_path = os.path.join(key_dir, 'hostname')
 
     with open(secret_path, 'rb') as f:
-        secret_data = f.read()
-    if len(secret_data) < 64:
-        raise ValueError(f"Secret key file too short: {len(secret_data)} bytes")
-    private_key = secret_data[32:]  # skip 32-byte C Tor header
+        private_key = onion_keys.parse_ctor_secret(f.read())
 
     if not os.path.isfile(public_path) and os.path.isfile(hostname_path):
         with open(hostname_path, 'rb') as f:
             return private_key, _pubkey_from_hostname(f.read())
     with open(public_path, 'rb') as f:
-        public_data = f.read()
-    if len(public_data) < 32:
-        raise ValueError(f"Public key file too short: {len(public_data)} bytes")
-    public_key = public_data[32:]  # skip 32-byte C Tor header
-
-    return private_key, public_key
+        return private_key, onion_keys.parse_ctor_public(f.read())
 
 
 def write_ctor_keys(key_dir, private_key, public_key):
     """Write C Tor format hs_ed25519_secret_key + hs_ed25519_public_key."""
     import os
+    secret, public = onion_keys.build_ctor(private_key, public_key)
     secret_path = os.path.join(key_dir, 'hs_ed25519_secret_key')
     with open(secret_path, 'wb') as f:
-        f.write(CTOR_HEADER_SECRET + private_key)
+        f.write(secret)
     os.chmod(secret_path, 0o600)
 
     public_path = os.path.join(key_dir, 'hs_ed25519_public_key')
     with open(public_path, 'wb') as f:
-        f.write(CTOR_HEADER_PUBLIC + public_key)
+        f.write(public)
     os.chmod(public_path, 0o644)
 
 
@@ -335,8 +295,8 @@ def decode_base32_key(key_b32):
         key_bytes = base64.b32decode(key_b32, casefold=True)
     except Exception as e:
         raise ValueError(f"The key is not valid base32 ({e})") from e
-    if len(key_bytes) == 96 and key_bytes[:29] == b'== ed25519v1-secret: type0 ==':
-        key_bytes = key_bytes[32:]
+    if len(key_bytes) == 96:
+        key_bytes = onion_keys.parse_ctor_secret(key_bytes)
     elif len(key_bytes) != 64:
         raise ValueError(f"Key must be exactly 64 bytes (or 96 with header), got {len(key_bytes)}")
     check_expanded_secret_key(key_bytes)
@@ -564,18 +524,18 @@ def staged_key_address(key_dir):
                 addresses.add(key_pair_onion_address(*parse_openssh_key(f.read())))
         if os.path.isfile(secret_path):
             with open(secret_path, 'rb') as f:
-                private_key = _parse_ctor_secret(f.read())
+                private_key = onion_keys.parse_ctor_secret(f.read())
             public_key = check_expanded_secret_key(private_key)
             if os.path.isfile(public_path):
                 with open(public_path, 'rb') as f:
-                    if _parse_ctor_public(f.read()) != public_key:
+                    if onion_keys.parse_ctor_public(f.read()) != public_key:
                         raise ValueError("hs_ed25519_public_key does not belong "
                                          "to hs_ed25519_secret_key")
             addresses.add(derive_onion_address(public_key))
     except ValueError:
         raise
     except Exception as e:
-        # _parse_ctor_* raise bare Exception; struct/base64 errors too.
+        # struct/base64 errors.
         raise ValueError(f"Unreadable onion service key: {e}") from e
     if len(addresses) > 1:
         raise ValueError("The backup's key files belong to different onion "
@@ -672,10 +632,9 @@ def keep_replaced_key(root, private_key, public_key, when=None):
         try:
             _write_new_file(dir_fd, "ks_hs_id.ed25519_expanded_private",
                             build_openssh_key(private_key, public_key))
-            _write_new_file(dir_fd, "hs_ed25519_secret_key",
-                            CTOR_HEADER_SECRET + bytes(private_key))
-            _write_new_file(dir_fd, "hs_ed25519_public_key",
-                            CTOR_HEADER_PUBLIC + bytes(public_key))
+            secret, public = onion_keys.build_ctor(private_key, public_key)
+            _write_new_file(dir_fd, "hs_ed25519_secret_key", secret)
+            _write_new_file(dir_fd, "hs_ed25519_public_key", public)
             _write_new_file(dir_fd, "hostname", (address + "\n").encode())
             os.fsync(dir_fd)
         finally:
@@ -701,7 +660,7 @@ def _key_dir_pair(key_dir):
         with open(pem_path, 'rb') as f:
             return parse_openssh_key(f.read())
     with open(os.path.join(key_dir, 'hs_ed25519_secret_key'), 'rb') as f:
-        private_key = _parse_ctor_secret(f.read())
+        private_key = onion_keys.parse_ctor_secret(f.read())
     return private_key, check_expanded_secret_key(private_key)
 
 
@@ -717,7 +676,7 @@ def served_key_pairs(docker):
     ok, data = _docker_cat(docker, CTOR_SECRET_PATH)
     if ok:
         try:
-            private_key = _parse_ctor_secret(data)
+            private_key = onion_keys.parse_ctor_secret(data)
         except Exception as e:
             raise ValueError(f"Tor's key file could not be read: {e}") from e
         pairs.append((private_key, check_expanded_secret_key(private_key)))

@@ -2,8 +2,9 @@
 """
 OnionHeaven Heartbeat Monitor — passive takeover orchestrator
 
-Runs inside the onionheaven container alongside C Tor (SOCKS + control port),
-web-server.py (registration API), and onionheaven-redirect.sh (302 redirects).
+Runs inside the onionheaven container alongside C Tor (SOCKS + control port)
+and onionheaven-redirect.py (302 redirects); the registration API
+(web-server.py) runs in onionpress-tor.
 
 Unlike the old poller, this does NOT actively ping OnionPress instances.
 Instead, OnionPress instances send periodic /online heartbeats to the server,
@@ -19,7 +20,8 @@ All operations are local:
   - SQLite via Python sqlite3 (the hub data volume, shared with
     onionpress-tor and the takeover workers only)
   - Post-takeover audits via curl through the local Tor SOCKS port (127.0.0.1:9050)
-  - Takeover/release via /onionheaven-tor-manager.sh (same container)
+  - Takeover/release through the farm controller, by the queue manager in
+    each takeover worker
 
 Only on the OnionHeaven hub (see "Hub admission" in onionheaven_common).
 The onionheaven container runs on every node, so on any other node the

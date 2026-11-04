@@ -1,13 +1,14 @@
 """
-The one place an onion service key's OpenSSH PEM is read, written and
-checked against its public key.
+The one place an onion service key's OpenSSH PEM and C Tor's key files
+are read, written and checked against its public key.
 
 The delivered key (the onionpress-onion-keys volume's
 ks_hs_id.ed25519_expanded_private, and OnionHeaven's wire format) is an
 unencrypted OpenSSH private key of type ed25519-expanded@spec.torproject.org
-holding a 64-byte expanded secret key and its 32-byte public key. The app
-(key_manager), the tor image's key-convert.py, tor-watchdog.py and
-web-server.py all go through here.
+holding a 64-byte expanded secret key and its 32-byte public key. C Tor's
+own key files (hs_ed25519_secret_key, hs_ed25519_public_key) are read and
+built here too. The app (key_manager), the tor image's key-convert.py,
+tor-watchdog.py, onionnames.py and web-server.py all go through here.
 
 The v3 address of a public key is onion_auth.derive_onion_address; this
 module derives nothing and computes no curve arithmetic: keypair_error asks
@@ -152,6 +153,49 @@ def build_pem(expanded_key, public_key):
     b64 = base64.b64encode(binary).decode("ascii")
     lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
     return (PEM_BEGIN + "\n" + "\n".join(lines) + "\n" + PEM_END + "\n").encode("ascii")
+
+
+# C Tor's own copy of the key: hs_ed25519_secret_key is CTOR_SECRET_HEADER
+# and the 64-byte expanded key, hs_ed25519_public_key CTOR_PUBLIC_HEADER and
+# the 32-byte public key. Each header is exactly 32 bytes.
+CTOR_SECRET_NAME = "hs_ed25519_secret_key"
+CTOR_PUBLIC_NAME = "hs_ed25519_public_key"
+CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
+CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
+
+
+def _parse_ctor(data, header, name, size):
+    if len(data) != len(header) + size:
+        raise ValueError(f"{name} is {len(data)} bytes (expected {len(header) + size})")
+    if data[:len(header)] != header:
+        raise ValueError(f"{name} has an invalid header")
+    return bytes(data[len(header):])
+
+
+def parse_ctor_secret(data):
+    """The 64-byte expanded key of an hs_ed25519_secret_key's bytes, or
+    ValueError for anything but exactly the header and 64 bytes."""
+    return _parse_ctor(data, CTOR_SECRET_HEADER, CTOR_SECRET_NAME, 64)
+
+
+def parse_ctor_public(data):
+    """The 32-byte public key of an hs_ed25519_public_key's bytes, or
+    ValueError for anything but exactly the header and 32 bytes."""
+    return _parse_ctor(data, CTOR_PUBLIC_HEADER, CTOR_PUBLIC_NAME, 32)
+
+
+def build_ctor(expanded_key, public_key=None):
+    """(hs_ed25519_secret_key bytes, hs_ed25519_public_key bytes) of an
+    expanded key and its public key; the second is None without one (Tor
+    needs only the secret key)."""
+    if len(expanded_key) != 64:
+        raise ValueError(f"Private key must be 64 bytes, got {len(expanded_key)}")
+    if public_key is None:
+        return CTOR_SECRET_HEADER + bytes(expanded_key), None
+    if len(public_key) != 32:
+        raise ValueError(f"Public key must be 32 bytes, got {len(public_key)}")
+    return (CTOR_SECRET_HEADER + bytes(expanded_key),
+            CTOR_PUBLIC_HEADER + bytes(public_key))
 
 
 def keypair_error(expanded_key, public_key):
