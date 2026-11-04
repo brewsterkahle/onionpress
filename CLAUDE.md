@@ -455,6 +455,17 @@
   `onionpress …` subcommand run through the launcher; it imports none of
   `backup`, `hub_backup`, `updater`. A new menu action gets its subcommand
   first. `tests/test_menubar_actions.py`.
+- **Neither UI runs a program of its own** (#547) beyond
+  `UI_SUBPROCESS_ALLOWED` (desktop openers, the menubar's pid-file boot
+  time and relaunch, the tray's uninstall terminal): the bundle's
+  admin-group sharing is `updater.share_bundle_with_admins` (the staged
+  copy, and once per Mac daemon start), the host cloudflared check the
+  daemon's on both platforms (`host_cloudflared` in its state, shown via
+  `ui_client.host_cloudflared_notice`), the tray's Quit the Linux
+  launcher's `quit --leave-tray`. `TestTheMenubarRunsNoOperation` in
+  `tests/test_menubar_actions.py`, `TestTheTrayRunsNoOperation` and
+  `TestQuit` in `tests/test_launcher_dispatch_linux.py`,
+  `tests/test_host_cloudflared.py`.
 - **The menubar and the Linux tray are widgets of one client** (#526,
   `src/onionpress/ui_client.py`: stdlib + `confirm` + `launcher_ops`, so
   the menubar's docker-free import closure holds): both call the

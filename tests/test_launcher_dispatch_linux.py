@@ -174,6 +174,46 @@ class TestStopAndRestart(_Case):
         self.assertEqual(self.l.fn_calls()[-1], "start_daemon")
 
 
+class TestQuit(_Case):
+    """`quit`, the Mac's verb (issue #547): the daemon (its stop sends
+    /offline), the containers, the site's unit, then the tray unless the
+    tray is the caller. The tray's Quit is `quit --leave-tray`."""
+    STUBS = ("setup_db_passwords",)
+
+    def test_the_daemon_then_the_stack_then_the_unit(self):
+        r = self.l.run("quit", "--leave-tray")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon stop",
+                                             f"{self.dd()} stop-containers"])
+        calls = self.l.calls()
+        unit = "bin systemctl --user stop onionpress.service"
+        self.assertIn(unit, calls)
+        self.assertLess(calls.index(f"py {self.dd()} stop-containers"), calls.index(unit))
+        self.assertNotIn("bin docker", " ".join(calls))
+
+    def test_a_failed_stop_is_the_exit_status_and_the_rest_still_runs(self):
+        r = self.l.run("quit", env={"STUB_RC_STOP_CONTAINERS": "3"})
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("bin systemctl --user stop onionpress.service", self.l.calls())
+
+    def test_a_daemon_that_does_not_stop_does_not_stop_the_quit(self):
+        r = self.l.run("quit", env={"STUB_RC_PY": "1"})
+        self.assertIn("WARNING: quit: the daemon did not stop", r.stdout)
+        self.assertIn(f"{self.dd()} stop-containers", self.l.py_calls())
+
+    def test_unknown_options_are_ignored(self):
+        r = self.l.run("quit", "--bogus")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ignoring unknown option --bogus", r.stderr)
+
+    def test_the_tray_quits_through_it(self):
+        with open(TRAY, encoding="utf-8") as f:
+            text = f.read()
+        quit_handler = text[text.index("    def _on_quit("):text.index("# ─── 8. main")]
+        self.assertIn('Launcher.run("quit", "--leave-tray"', quit_handler)
+        self.assertNotIn("systemctl", quit_handler)
+
+
 class TestStatusAndLogs(_Case):
     def test_status_is_the_clis(self):
         # #529: `onionpress status` (cmd_status's JSON), no bash compose ps.
@@ -417,6 +457,15 @@ class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
         for line, args in self._tray_calls():
             if args[0] == "handle-action":
                 self.assertEqual(args, ["handle-action"], f"onionpress-tray:{line}")
+
+
+from test_menubar_actions import UISubprocessCensus  # noqa: E402
+
+
+class TestTheTrayRunsNoOperation(UISubprocessCensus, unittest.TestCase):
+    """The tray's side of the census (issue #547): xdg-open and the
+    uninstall terminal only; its Quit is the launcher's `quit`."""
+    REL = "linux/onionpress-tray"
 
 
 if __name__ == "__main__":

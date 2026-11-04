@@ -454,6 +454,49 @@ def _deb_field(deb_path, name):
     return r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ""
 
 
+def share_bundle_with_admins(app_path, log=None, run=subprocess.run):
+    """Make an app bundle in /Applications group-writable for the admin
+    group, so another admin account's update can replace it (the bundle
+    belongs to whoever installed it; multi-user Macs). Only a bundle this
+    account owns, only once (a group-writable top folder is done), never
+    a bundle outside /Applications. True when it changed the bundle.
+
+    Called on the staged bundle before the swap (stage_new_bundle) and,
+    for a bundle dragged in from the DMG, once per daemon start (issue
+    #547: until then a menubar step). chmod and chgrp change the files'
+    modes and group, not one byte of them: the code signature seals
+    contents, so this is not the in-place write "Never write into
+    /Applications/OnionPress.app while the app runs" is about.
+    """
+    import grp
+    import stat
+    try:
+        real = os.path.realpath(app_path)
+        if not real.startswith("/Applications/"):
+            return False
+        st = os.stat(real)
+        if st.st_mode & stat.S_IWGRP or st.st_uid != os.getuid():
+            return False
+        try:
+            grp.getgrnam("admin")
+        except KeyError:
+            return False
+        if log:
+            log(f"Multi-user: making {real} group-writable for admin")
+        ok = True
+        for argv in (["chmod", "-R", "g+w", real], ["chgrp", "-R", "admin", real]):
+            r = run(argv, capture_output=True, text=True, timeout=30)
+            ok = ok and r.returncode == 0
+        if log:
+            log("Multi-user: app bundle permissions updated" if ok
+                else "Multi-user: could not update every file's permissions")
+        return ok
+    except (OSError, subprocess.SubprocessError) as e:
+        if log:
+            log(f"Multi-user: could not fix app bundle permissions: {e}")
+        return False
+
+
 def stage_new_bundle(source_app, install_path):
     """Copy *source_app* (inside the mounted DMG) into a hidden folder beside
     *install_path* and return the staged bundle's path.
@@ -463,7 +506,8 @@ def stage_new_bundle(source_app, install_path):
     macOS 26/27's Gatekeeper revokes a process's access to a bundle it is
     writing the moment something executes out of it. A sibling folder is on
     the same volume as install_path, so the staged bundle can be renamed
-    into place. Quarantine is stripped here, before the bundle is live. On
+    into place. Quarantine is stripped and the bundle made group-writable
+    for admin here, before the bundle is live. On
     any failure the staging folder is removed and install_path has not been
     touched.
     """
@@ -483,6 +527,9 @@ def stage_new_bundle(source_app, install_path):
             ["xattr", "-dr", "com.apple.quarantine", staged_app],
             capture_output=True, timeout=10,
         )
+        # Another admin account can update it next: done on the copy,
+        # before it is live (share_bundle_with_admins).
+        share_bundle_with_admins(staged_app)
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise

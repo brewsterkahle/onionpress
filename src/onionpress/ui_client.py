@@ -374,6 +374,37 @@ def uninstall_warning(tail: str) -> str:
             f"{tail}")
 
 
+# ─── A host cloudflared ──────────────────────────────────────────────────
+
+class Notice(NamedTuple):
+    title: str
+    body: str
+
+
+HOST_CLOUDFLARED_FIX = {
+    "macos": "  sudo cloudflared service uninstall\n  brew uninstall cloudflared",
+    "linux": "  sudo cloudflared service uninstall\n"
+             "  (or: sudo systemctl disable --now cloudflared)",
+}
+
+
+def host_cloudflared_notice(state: Optional[dict], os_name: str) -> Optional[Notice]:
+    """What both UIs show when the daemon's state says a cloudflared
+    serves the tunnel from the host too (`host_cloudflared`, the daemon's
+    check: onionpress.host_cloudflared, issue #547), else None."""
+    if not (isinstance(state, dict) and state.get("host_cloudflared") is True):
+        return None
+    where = "Mac (likely installed via Homebrew)" if os_name == "macos" else "computer"
+    return Notice(
+        "Host cloudflared Conflicts with OnionPress",
+        f"A system-level cloudflared service is running on this {where}.\n\n"
+        "OnionPress runs its own cloudflared inside Docker. Having both "
+        "causes intermittent 502 errors — about half of visitors will "
+        "see an error page.\n\n"
+        f"To fix, run in a terminal:\n{HOST_CLOUDFLARED_FIX.get(os_name, HOST_CLOUDFLARED_FIX['linux'])}\n\n"
+        "Then restart OnionPress.")
+
+
 # ─── Backup ──────────────────────────────────────────────────────────────
 
 class BackupUI:

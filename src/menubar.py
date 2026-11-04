@@ -400,6 +400,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         self._collision_handled = None
         self._settings_error_shown = ""
         self._port_conflict_shown = False
+        self._host_cloudflared_shown = False
         last_state = op_daemon.read_state(self.app_support) or {}
         _offset = os.environ.get("ONIONPRESS_PORT_OFFSET")
         if _offset is None:
@@ -425,9 +426,6 @@ class OnionPressApp(PortAttributes, rumps.App):
             self.version = self.get_version()
             self.log(f"Version: {self.version}")
 
-            # Multi-user: ensure app bundle is group-writable so either user can update
-            self._fix_app_bundle_permissions()
-
             # Update browser menu title after checking filesystem
             self.update_browser_menu_title()
 
@@ -448,8 +446,6 @@ class OnionPressApp(PortAttributes, rumps.App):
             if self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"):
                 self.cloudflare_tunnel_enabled = True
                 self.log("Cloudflare Tunnel configured")
-                # Detect host-level cloudflared that would conflict with container
-                self._check_host_cloudflared()
 
         # Start background initialization
         threading.Thread(target=background_init, daemon=True).start()
@@ -712,6 +708,15 @@ class OnionPressApp(PortAttributes, rumps.App):
             self._collision_handled = collision
             threading.Thread(target=self._resolve_onionname_collision,
                              args=(collision,), daemon=True).start()
+
+        # A host cloudflared on the same tunnel: the daemon's check
+        # (onionpress.host_cloudflared), shown once while it lasts.
+        notice = ui_client.host_cloudflared_notice(state, "macos")
+        if notice and not self._host_cloudflared_shown:
+            self._host_cloudflared_shown = True
+            self.show_native_alert(notice.title, notice.body, style="warning")
+        elif state.get("host_cloudflared") is False:
+            self._host_cloudflared_shown = False
 
         error = state.get("settings_page_error") or ""
         if error and error != self._settings_error_shown:
@@ -1175,40 +1180,6 @@ class OnionPressApp(PortAttributes, rumps.App):
 
 
 
-
-
-
-
-    def _check_host_cloudflared(self):
-        """Warn if a host-level cloudflared is running outside Docker.
-
-        When OnionPress runs cloudflared inside a container, a second
-        host-level cloudflared (e.g. installed via Homebrew) using the
-        same tunnel token causes intermittent 502 errors — the host
-        connector can't resolve the Docker-internal 'wordpress' hostname.
-        """
-        try:
-            result = subprocess.run(
-                ["pgrep", "-u", "root", "-f", "cloudflared.*tunnel.*run"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                self.log("WARNING: Host-level cloudflared detected — this causes intermittent 502 errors")
-                _main_thread(lambda: self.show_native_alert(
-                    "Host cloudflared Conflicts with OnionPress",
-                    "A system-level cloudflared service is running on this Mac "
-                    "(likely installed via Homebrew).\n\n"
-                    "OnionPress runs its own cloudflared inside Docker. Having both "
-                    "causes intermittent 502 errors — about half of visitors will "
-                    "see an error page.\n\n"
-                    "To fix, run in Terminal:\n"
-                    "  sudo cloudflared service uninstall\n"
-                    "  brew uninstall cloudflared\n\n"
-                    "Then restart OnionPress.",
-                    style="warning"
-                ))
-        except Exception as e:
-            self.log(f"Host cloudflared check failed: {e}")
 
 
 
@@ -2069,49 +2040,6 @@ class OnionPressApp(PortAttributes, rumps.App):
         self.onion_address = restored_addr
         return restored_addr
 
-
-    def _fix_app_bundle_permissions(self):
-        """Make app bundle group-writable so any admin user can update it.
-
-        On multi-user Macs, /Applications/OnionPress.app is owned by whoever
-        installed it.  The other user can't replace the bundle on update.
-        Fix: set group to 'admin' and add group-write, which is safe because
-        only admin-group users can write, and all interactive macOS users are
-        typically in admin.
-        """
-        try:
-            app_path = os.path.dirname(self.contents_dir)  # /Applications/OnionPress.app
-            if not app_path.startswith("/Applications"):
-                return  # Only fix apps in /Applications
-
-            import stat
-            st = os.stat(app_path)
-            # Check if group-writable already
-            if st.st_mode & stat.S_IWGRP:
-                return
-
-            import grp
-            try:
-                admin_gid = grp.getgrnam("admin").gr_gid
-            except KeyError:
-                return  # No admin group (unusual)
-
-            # Only attempt if we own the app bundle
-            if st.st_uid != os.getuid():
-                return
-
-            self.log("Multi-user: fixing app bundle permissions (adding group-write for admin)")
-            subprocess.run(
-                ["chmod", "-R", "g+w", app_path],
-                capture_output=True, timeout=30
-            )
-            subprocess.run(
-                ["chgrp", "-R", "admin", app_path],
-                capture_output=True, timeout=30
-            )
-            self.log("Multi-user: app bundle permissions updated")
-        except Exception as e:
-            self.log(f"Multi-user: could not fix app bundle permissions: {e}")
 
     @rumps.clicked("Check for Updates...")
     def check_for_updates(self, _):

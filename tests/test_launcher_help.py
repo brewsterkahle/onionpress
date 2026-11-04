@@ -17,7 +17,7 @@ ROOT = os.path.dirname(HERE)
 COMMON = ("start", "stop", "daemon", "restart", "status", "version", "address", "open", "logs",
           "check-reachability", "check-docker", "get", "update", "backup", "restore", "setup",
           "import-key", "onionname", "config", "onionheaven", "hub-recovery-key", "uninstall",
-          "reset")
+          "reset", "quit")
 
 
 def _verbs(text):
@@ -34,8 +34,11 @@ class TestText(unittest.TestCase):
 
     def test_the_platforms_own_lines(self):
         mac, linux = cli.launcher_help("macos"), cli.launcher_help("linux")
+        # Both have a quit (Linux's since #547), each its own line.
         self.assertIn("quit", _verbs(mac))
-        self.assertNotIn("quit", _verbs(linux))
+        self.assertIn("quit", _verbs(linux))
+        self.assertIn("Colima VM + MenubarApp", mac)
+        self.assertIn("the units + the tray", linux)
         for verb in ("provision", "dashboard", "admin-password", "generate-vanity", "reset-onionheaven"):
             self.assertIn(verb, _verbs(linux), verb)
             self.assertNotIn(verb, _verbs(mac), verb)

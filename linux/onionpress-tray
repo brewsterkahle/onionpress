@@ -219,6 +219,7 @@ class Status:
         self.containers = {}
         self.wp_port = 8080
         self.raw = {}
+        self.host_cloudflared_notice = None
         self._doc = None
         self._daemon_seen = False
         self._mtime = 0.0
@@ -238,17 +239,19 @@ class Status:
             self._doc = daemon_client.read_state(DATA_DIR) if mtime else None
 
         old = (self.view, self.wp_installed, self.onboarded,
-               self.onion_address, self.serving_from_wayback)
+               self.onion_address, self.serving_from_wayback, self.host_cloudflared_notice)
         now = time.time()
         self.view = ui_client.status_view(self._doc, now, daemon_seen=self._daemon_seen)
         self.state = self.view.category
         if daemon_client.state_is_fresh(self._doc, now):
             self._daemon_seen = True
+            # The daemon's host check (onionpress.host_cloudflared, #547).
+            self.host_cloudflared_notice = ui_client.host_cloudflared_notice(self._doc, "linux")
             data = self._doc.get("status")
             if isinstance(data, dict):
                 self._take(data)
         new = (self.view, self.wp_installed, self.onboarded,
-               self.onion_address, self.serving_from_wayback)
+               self.onion_address, self.serving_from_wayback, self.host_cloudflared_notice)
 
         if old != new:
             try:
@@ -1351,6 +1354,7 @@ class OnionPressTray:
         self._update_status_line()
 
         self._announced_starting = False
+        self._host_cloudflared_warned = False
         self._announced_online = False
         self._setup_shown = False
 
@@ -1406,7 +1410,20 @@ class OnionPressTray:
         self._update_icon()
         self._update_status_line()
         self._maybe_announce()
+        self._maybe_warn_host_cloudflared()
         self._maybe_show_setup()
+
+    def _maybe_warn_host_cloudflared(self):
+        """A cloudflared on the host serving the same tunnel (the daemon's
+        state says so): a notification, once while it lasts."""
+        notice = self.status.host_cloudflared_notice
+        if notice and not self._host_cloudflared_warned:
+            self._host_cloudflared_warned = True
+            log("host cloudflared detected (the daemon's state)")
+            self.notifier.notify("host-cloudflared", notice.title, notice.body,
+                                 urgency="critical")
+        elif not notice:
+            self._host_cloudflared_warned = False
 
     def _update_icon(self):
         view = self.status.view
@@ -1782,9 +1799,8 @@ class OnionPressTray:
             return
 
         # Tear the UI down NOW, before launching the background stop.
-        # The Launcher.run / systemctl-stop chain can take up to ~30s
-        # (longer if the launcher binary is missing post-uninstall and
-        # systemctl waits for a non-existent unit), and Gtk.main_quit
+        # The launcher's quit can take a while (the hub's /offline, the
+        # containers, the units), and Gtk.main_quit
         # alone only unwinds one nested loop — any open About / Setup /
         # Backup / Log dialog would keep its own dlg.run() loop alive
         # and the tray icon would linger via the AppIndicator's D-Bus
@@ -1802,17 +1818,12 @@ class OnionPressTray:
                 log(f"destroying window on quit: {e}")
 
         def _run():
+            # The launcher's `quit` (the Mac's verb, issue #547): the
+            # daemon, the site and its unit; this tray quits itself.
             try:
-                Launcher.run("stop", capture=True, timeout=120)
+                Launcher.run("quit", "--leave-tray", capture=True, timeout=240)
             except Exception as e:
-                log(f"stop on quit: {e}")
-            try:
-                subprocess.run(
-                    ["systemctl", "--user", "stop", "onionpress"],
-                    capture_output=True, text=True, timeout=30,
-                )
-            except Exception as e:
-                log(f"systemctl stop on quit: {e}")
+                log(f"quit: {e}")
             # os._exit (not Gtk.main_quit) — guarantees the process
             # terminates and the StatusNotifierItem D-Bus name drops
             # even if some other main loop is still on the stack.

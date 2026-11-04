@@ -83,6 +83,8 @@ from . import ports
 from . import redact
 from . import status_writer
 from . import thumbnails
+from . import host_cloudflared
+from . import updater
 from .docker import Docker
 from .platform import OS, detect_os
 from .health import (
@@ -317,6 +319,10 @@ class Daemon(PortAttributes):
         self._onionname_retry_giveup = False
         self._onionname_collision = None
         self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
+        # A host connector for the same tunnel (host_cloudflared, #547):
+        # True / False / None (not asked, or could not be), the views show it.
+        self.host_cloudflared = None
+        self._host_cloudflared_checked_at = 0.0
         self._quitting = False
         # Set by `daemon offline` (the launcher's stop): no probe until the
         # stop has taken the stack down (_stop_hold).
@@ -505,6 +511,8 @@ class Daemon(PortAttributes):
         self._log_version_info()
         self._setup_environment()
         self._resolve_ports_at_start()
+        if self.os_name != OS.LINUX:
+            self._share_app_bundle()
         self.publish_state()
 
         self._power = None
@@ -868,6 +876,38 @@ class Daemon(PortAttributes):
     def _read_served_address(self):
         return onion_hostname.read_served_address(self._docker)
 
+    HOST_CLOUDFLARED_INTERVAL = 300
+
+    def _check_host_cloudflared(self, now=None):
+        """While the tunnel is on, every HOST_CLOUDFLARED_INTERVAL: is a
+        host cloudflared serving the same tunnel (issue #547: the
+        menubar's launch-time pgrep, now the daemon's on both platforms;
+        the views show `host_cloudflared` from the state)."""
+        if not self.cloudflare_tunnel_enabled:
+            self.host_cloudflared = None
+            self._host_cloudflared_checked_at = 0.0
+            return
+        now = time.time() if now is None else now
+        if now - self._host_cloudflared_checked_at < self.HOST_CLOUDFLARED_INTERVAL:
+            return
+        self._host_cloudflared_checked_at = now
+        found = host_cloudflared.running(self.os_name)
+        if found is None:
+            self.log("Host cloudflared check failed (no answer)")
+        elif found and not self.host_cloudflared:
+            self.log("WARNING: Host-level cloudflared detected — this causes intermittent 502 errors")
+        elif not found and self.host_cloudflared:
+            self.log("Host-level cloudflared no longer running")
+        if found is not None:
+            self.host_cloudflared = found
+
+    def _share_app_bundle(self):
+        """Once per start on a Mac: the app bundle group-writable for the
+        admin group, so another admin user's update can replace it
+        (updater.share_bundle_with_admins; until #547 the menubar's)."""
+        if self.paths.app_bundle:
+            updater.share_bundle_with_admins(self.paths.app_bundle, log=self.log)
+
     def check_status(self):
         """One pass: containers, address, internet, WordPress, the dual
         probe and the republish trigger, the hub's loops, the captures,
@@ -889,6 +929,8 @@ class Daemon(PortAttributes):
                     "`descriptor republish` lines (REPUBLISH_ON_UNREACHABLE="
                     f"{'yes' if self._recovery.republish_enabled() else 'no'}).")
                 self._wedge_warning_fired = True
+
+            self._check_host_cloudflared()
 
             if not self.runtime_ready:
                 self.runtime_ready = self._runtime_ready()
