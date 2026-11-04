@@ -1,28 +1,35 @@
 """Issue #393: a plain node's onion address carries no hub API, and the
-two socat servers are bounded.
+two small listeners are bounded.
 
 Every node's onion service mapped port 8083 to web-server.py (the hub's
 HTTP API: stdlib HTTP, JSON, SQLite, PEM parsing), running as root in
 the container that holds the site's key and Tor's control cookie,
 whether or not the node was a hub. The healthcheck and redirect services
-forked a root sh per connection with no idle timeout and no cap, and the
-healthcheck GET made three requests to WordPress per anonymous hit.
+forked a root sh per connection under socat with no idle timeout and no
+cap, and the healthcheck GET made three requests to WordPress per
+anonymous hit.
 
 Now: 8083 goes on the onion address only when onionheaven_common's
 hub_api_exposed says the node is a hub (the opt-in or the canonical
-address) or OnionHome; both listeners run with `-T 30` and
-`max-children=64` (the Dockerfile checks socat knows the option); and the
-healthcheck keeps its WordPress facts for CACHE_TTL seconds.
+address) or OnionHome. The healthcheck is a thread of web-server.py
+(HealthcheckHandler on 127.0.0.1:8081) and the redirect is
+onionheaven-redirect.py, both http_listener.ServiceHandler: at most
+SERVICE_CONNECTIONS (64) connections, each closed after IDLE_TIMEOUT (30 s)
+without a request, as socat's `max-children=64` and `-T 30` were. The
+healthcheck answers a plain 200 and asks WordPress nothing (its JSON body
+had no reader; see HealthcheckHandler's docstring).
 Running web-server.py as a dedicated uid is still open in the issue.
 """
 
+import io
 import os
 import re
 import shutil
-import stat
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -120,102 +127,115 @@ class TestEntrypoint(unittest.TestCase):
         self.assertIn("python3 /web-server.py &", self.src)
 
 
-class TestSocatServers(unittest.TestCase):
+class TestSmallListeners(unittest.TestCase):
 
-    def test_both_listeners_time_out_idle_connections_and_cap_children(self):
-        for name, port in (("healthcheck-server.sh", "HEALTHCHECK_PORT"),
-                           ("onionheaven-redirect.sh", "REDIRECT_PORT")):
-            with self.subTest(script=name):
-                src = _read(name)
-                self.assertRegex(src, r"(?m)^exec socat -T 30 TCP-LISTEN:\$\{" + port
-                                 + r"\},reuseaddr,fork,max-children=64 SYSTEM:")
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tests"))
+        import tor_listener_harness as harness
+        import http_listener
+        cls.harness = harness
+        cls.hl = http_listener
+        cls.ws = harness.load("web_server_node_surface", "web-server.py")
+        cls.rd = harness.load("onionheaven_redirect_node_surface", "onionheaven-redirect.py")
 
-    def test_the_image_checks_socat_knows_max_children(self):
-        self.assertIn("RUN socat -hhh 2>&1 | grep -q 'max-children'", _read("Dockerfile"))
+    def test_both_listeners_are_bounded_as_socat_was(self):
+        self.assertEqual(self.hl.SERVICE_CONNECTIONS, 64)
+        self.assertEqual(self.hl.IDLE_TIMEOUT, 30)
+        for handler in (self.ws.HealthcheckHandler, self.rd.RedirectHandler):
+            with self.subTest(handler=handler.SERVICE):
+                self.assertTrue(issubclass(handler, self.hl.ServiceHandler))
+                self.assertEqual(handler.timeout, 30)
+        self.assertIn("max_connections=SERVICE_CONNECTIONS", _read("web-server.py"))
+        serve = _read("http_listener.py")
+        serve = serve[serve.index("def serve("):]
+        self.assertIn("max_connections=SERVICE_CONNECTIONS", serve)
+        self.assertIn("http_listener.serve(RedirectHandler", _read("onionheaven-redirect.py"))
+
+    def test_connections_beyond_the_cap_are_closed(self):
+        with mock.patch.object(sys, "stderr", io.StringIO()), \
+                self.harness.serving(self.ws.HealthcheckHandler, max_connections=2) as port:
+            held = [socket.create_connection(("127.0.0.1", port), timeout=10) for _ in range(2)]
+            for s in held:
+                self.addCleanup(s.close)
+            time.sleep(0.2)
+            extra = socket.create_connection(("127.0.0.1", port), timeout=10)
+            self.addCleanup(extra.close)
+            extra.sendall(b"GET / HTTP/1.0\r\n\r\n")
+            try:
+                self.assertEqual(extra.recv(1), b"")
+            except ConnectionResetError:
+                pass
+
+    def test_an_idle_connection_is_closed(self):
+        with mock.patch.object(self.ws.HealthcheckHandler, "timeout", 0.3), \
+                self.harness.serving(self.ws.HealthcheckHandler) as port:
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+                start = time.monotonic()
+                self.assertEqual(s.recv(1), b"")   # closed unanswered
+                self.assertLess(time.monotonic() - start, 5)
+
+    def test_an_endless_header_block_is_refused(self):
+        request = b"GET / HTTP/1.0\r\n" + b"X: y\r\n" * 200 + b"\r\n"
+        out, _err = self.harness.exchange(self.ws.HealthcheckHandler, request)
+        self.assertEqual(out, b"")
+        out, _err = self.harness.exchange(self.ws.HealthcheckHandler,
+                                          b"GET /" + b"a" * 9000 + b" HTTP/1.0\r\n\r\n")
+        self.assertEqual(out, b"")
 
     def test_the_wordpress_forward_is_untouched(self):
         self.assertIn("socat TCP-LISTEN:8080,reuseaddr,fork TCP:wordpress:80 &", _read("entrypoint.sh"))
 
+    def test_the_shell_listeners_are_gone(self):
+        for name in ("healthcheck-server.sh", "onionheaven-redirect.sh"):
+            self.assertFalse(os.path.exists(os.path.join(TOR_DIR, name)), name)
+            self.assertNotIn(name, _read("entrypoint.sh"))
+            self.assertNotIn(name, _read("Dockerfile"))
+        self.assertIn("python3 /onionheaven-redirect.py &", _read("entrypoint.sh"))
+        for name in ("http_listener.py", "onionheaven-redirect.py", "tor_control.py"):
+            self.assertIn(f"COPY {name} /{name}", _read("Dockerfile"))
 
-class TestHealthcheckCache(unittest.TestCase):
-    """handle_get under sh with a fake wget: the three WordPress probes
-    run once per CACHE_TTL, whatever the number of hits."""
 
-    FAKE_WGET = """#!/bin/sh
-echo "wget $*" >> "$WGET_LOG"
-case "$*" in
-  *wp/v2/posts*) printf '[{"date":"2026-10-25T10:00:00"}]' ;;
-  *wp/v2/sites*) printf '[{"id":1},{"id":2}]' ;;
-esac
-exit 0
-"""
+class TestHealthcheck(unittest.TestCase):
+    """A plain 200 to a GET, whatever WordPress is doing: it asks WordPress
+    nothing and names no address."""
 
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="op-hc-cache-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.cache_dir = os.path.join(self.tmp, "cache")
-        self.bin = os.path.join(self.tmp, "bin")
-        os.makedirs(self.bin)
-        os.makedirs(os.path.join(self.tmp, "msgs"))
-        with open(os.path.join(self.bin, "wget"), "w") as f:
-            f.write(self.FAKE_WGET)
-        os.chmod(os.path.join(self.bin, "wget"), stat.S_IRWXU)
-        self.log = os.path.join(self.tmp, "wget.log")
-        self.script = os.path.join(self.tmp, "svc.sh")
-        with open(self.script, "w") as f:
-            f.write(_read("healthcheck-server.sh")
-                    .replace('CACHE_DIR="/run/healthcheck"', f'CACHE_DIR="{self.cache_dir}"')
-                    .replace("/var/lib/tor/healthcheck-messages", os.path.join(self.tmp, "msgs")))
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "tests"))
+        import tor_listener_harness as harness
+        cls.harness = harness
+        cls.ws = harness.load("web_server_healthcheck", "web-server.py")
 
-    def _get(self):
-        r = subprocess.run(["sh", self.script, "--handle-request"], input="GET / HTTP/1.0\r\n\r\n",
-                           capture_output=True, text=True, timeout=30,
-                           env={"PATH": self.bin + ":/usr/bin:/bin", "WGET_LOG": self.log})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(r.stdout.startswith("HTTP/1.0 200 OK"), r.stdout)
-        return r.stdout
+    def test_a_get_is_a_plain_200(self):
+        out, _err = self.harness.exchange(self.ws.HealthcheckHandler,
+                                          b"GET / HTTP/1.1\r\nHost: x.onion\r\n\r\n")
+        status, headers, body, _lines = self.harness.parse(out)
+        self.assertEqual(status, b"HTTP/1.0 200 OK")
+        self.assertEqual(body, b"OK\n")
+        self.assertEqual(int(headers["Content-Length"]), len(body))
+        self.assertNotIn(b".onion", out)
 
-    def _wget_calls(self):
-        try:
-            with open(self.log) as f:
-                return sum(1 for _ in f)
-        except OSError:
-            return 0
+    def test_a_head_is_a_200_without_a_body(self):
+        out, _err = self.harness.exchange(self.ws.HealthcheckHandler, b"HEAD / HTTP/1.0\r\n\r\n")
+        status, _headers, body, _lines = self.harness.parse(out)
+        self.assertEqual(status, b"HTTP/1.0 200 OK")
+        self.assertEqual(body, b"")
 
-    def test_three_probes_once_per_ttl(self):
-        out = self._get()
-        self.assertEqual(self._wget_calls(), 3)
-        self.assertIn('"wordpress":true', out)
-        self.assertIn('"last_post":"2026-10-25T10:00:00"', out)
-        self.assertIn('"sites":2', out)
-        for _ in range(5):
-            self.assertIn('"sites":2', self._get())
-        self.assertEqual(self._wget_calls(), 3, "the cache answered the next hits")
-        with open(os.path.join(self.cache_dir, "wordpress-facts")) as f:
-            self.assertEqual(f.read(), "true\nok\n\"2026-10-25T10:00:00\"\n2\n")
+    def test_it_asks_wordpress_nothing(self):
+        handler = _read("web-server.py")
+        handler = handler[handler.index("class HealthcheckHandler"):handler.index("def start_healthcheck")]
+        for word in ("wordpress", "urlopen", "wget", "subprocess"):
+            self.assertNotIn(word, handler.split('"""')[2])
 
-    def test_a_stale_or_damaged_cache_is_probed_again(self):
-        self._get()
-        cache = os.path.join(self.cache_dir, "wordpress-facts")
-        old = os.path.getmtime(cache) - 120
-        os.utime(cache, (old, old))
-        self._get()
-        self.assertEqual(self._wget_calls(), 6)
-        with open(cache, "w") as f:
-            f.write("junk\n")
-        self._get()
-        self.assertEqual(self._wget_calls(), 9)
-        self.assertIn('"sites":2', self._get())
-        self.assertEqual(self._wget_calls(), 9)
+    def test_tor_maps_the_healthcheck_to_its_listener(self):
+        self.assertEqual((self.ws.HEALTHCHECK_HOST, self.ws.HEALTHCHECK_PORT), ("127.0.0.1", 8081))
+        self.assertIn('{"name": "healthcheck", "ports": ["80,127.0.0.1:8081"]}', _read("entrypoint.sh"))
 
-    def test_an_unwritable_cache_dir_still_answers(self):
-        with open(self.script) as f:
-            text = f.read()
-        with open(self.script, "w") as f:
-            f.write(text.replace(f'CACHE_DIR="{self.cache_dir}"', 'CACHE_DIR="/proc/no-such-dir"'))
-        self.assertIn('"sites":2', self._get())
-        self.assertIn('"sites":2', self._get())
-        self.assertEqual(self._wget_calls(), 6)
+    def test_it_starts_before_the_registry(self):
+        main = _read("web-server.py")
+        main = main[main.index("def main():"):]
+        self.assertLess(main.index("start_healthcheck()"), main.index("db_connect()"))
 
 
 if __name__ == "__main__":

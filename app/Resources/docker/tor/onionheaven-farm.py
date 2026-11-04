@@ -96,30 +96,8 @@ MAX_SERVICES_PER_WORKER = int(os.environ.get("ONIONHEAVEN_MAX_SERVICES", "50"))
 # --- exec verbs: argv run inside a worker, whether an address is taken,
 # and the docker timeout. The strings are what onionheaven_common and the
 # heartbeat used to pass to `docker exec` themselves.
-_BOOTSTRAP_PHASE_SH = (
-    "COOKIE=$(xxd -p -c 64 /var/lib/tor/control_auth_cookie 2>/dev/null) && "
-    "printf 'AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n' "
-    "\"$COOKIE\" | nc -q 1 127.0.0.1 9051 2>/dev/null || true")
-_ONIONS_DETACHED_PY = (
-    "import socket, binascii\n"
-    "cookie = open('/var/lib/tor/control_auth_cookie','rb').read()\n"
-    "s = socket.socket()\n"
-    "s.settimeout(10)\n"
-    "s.connect(('127.0.0.1',9051))\n"
-    "s.send(('AUTHENTICATE ' + binascii.hexlify(cookie).decode() + '\\r\\n').encode())\n"
-    "s.recv(256)\n"
-    "s.send(b'GETINFO onions/detached\\r\\n')\n"
-    "data = b''\n"
-    "while True:\n"
-    "    chunk = s.recv(8192)\n"
-    "    if not chunk: break\n"
-    "    data += chunk\n"
-    "    if b'250 OK' in data: break\n"
-    "s.close()\n"
-    "for l in data.decode().strip().split('\\n'):\n"
-    "    l = l.strip()\n"
-    "    if l and not l.startswith('250') and l != '.':\n"
-    "        print(l + '.onion')\n")
+# Tor's answers come from the image's one control-port client.
+TOR_CONTROL = "/tor_control.py"
 _WORKER_ALIVE_SH = "ps aux | grep '[o]nionheaven-takeover-worker\\.py' | grep -v grep"
 
 EXEC_VERBS = {
@@ -129,8 +107,8 @@ EXEC_VERBS = {
     "has": (["python3", QUEUE_MANAGER, "has"], True, 10),
     "addr_state": (["python3", QUEUE_MANAGER, "addr_state"], True, 10),
     "status": (["python3", QUEUE_MANAGER, "status"], False, 10),
-    "bootstrap-phase": (["sh", "-c", _BOOTSTRAP_PHASE_SH], False, 10),
-    "onions-detached": (["python3", "-c", _ONIONS_DETACHED_PY], False, 15),
+    "bootstrap-phase": (["python3", TOR_CONTROL, "getinfo", "status/bootstrap-phase"], False, 10),
+    "onions-detached": (["python3", TOR_CONTROL, "onions", "onions/detached"], False, 15),
     "alive": (["sh", "-c", _WORKER_ALIVE_SH], False, 10),
 }
 
@@ -210,8 +188,8 @@ def worker_run_argv(name, image, tz="UTC"):
     what the worker uses, no raw packets on onionpress-network, and no
     setuid way back to root. The entrypoint drops to debian-tor with su as
     root (SETGID, SETUID), which no-new-privileges leaves alone; the
-    watchdog, the queue manager and the tor-manager read the control cookie
-    in debian-tor's 0700 /var/lib/tor (DAC_OVERRIDE).
+    watchdog and the queue manager read the control cookie in
+    debian-tor's 0700 /var/lib/tor (DAC_OVERRIDE).
     tests/test_container_capabilities.py holds the set."""
     return [
         "run", "-d",

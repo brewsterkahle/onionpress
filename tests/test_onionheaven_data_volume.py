@@ -189,10 +189,9 @@ class TestPaths(unittest.TestCase):
     def test_image_scripts_agree(self):
         qm = _read("app/Resources/docker/tor/onionheaven-queue-manager.py")
         self.assertRegex(qm, rf'(?m)^KEYS_DIR = "{re.escape(oc.KEYS_DIR)}"$')
-        tm = _read("app/Resources/docker/tor/onionheaven-tor-manager.sh")
-        self.assertIn(f'ONIONHEAVEN_KEYS_DIR="{oc.KEYS_DIR}"', tm)
-        redirect = _read("app/Resources/docker/tor/onionheaven-redirect.sh")
-        self.assertEqual(redirect.count(f"sqlite3 {oc.DB_PATH}"), 2)
+        redirect = _read("app/Resources/docker/tor/onionheaven-redirect.py")
+        self.assertIn("from onionheaven_common import DB_PATH", redirect)
+        self.assertNotIn("/var/lib/", redirect)
         entrypoint = _read("app/Resources/docker/tor/entrypoint.sh")
         self.assertIn(f"mkdir -p {oc.KEYS_DIR}", entrypoint)
         self.assertIn(f'HEARTBEAT_LOG="{HUB_DIR}/heartbeat.log"', entrypoint)
@@ -301,7 +300,7 @@ class TestImage(unittest.TestCase):
         start = self.entrypoint.index('if [ "${ONIONHEAVEN}" = "1" ]; then')
         branch = self.entrypoint[start:self.entrypoint.index("SOCKS-only mode", start)]
         call = branch.index("migrate_onionheaven_data")
-        self.assertLess(call, branch.index("/onionheaven-redirect.sh &"))
+        self.assertLess(call, branch.index("/onionheaven-redirect.py &"))
         self.assertLess(call, branch.index("python3 /onionheaven-heartbeat.py"))
 
     def test_workers_do_not_migrate(self):

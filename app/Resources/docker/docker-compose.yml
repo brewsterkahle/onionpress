@@ -448,11 +448,11 @@ services:
     # Starts Tor with su (SETGID, SETUID). DAC_OVERRIDE: the data migration
     # reads and clears the old location in /var/lib/onionpress (www-data's,
     # 0750; without it a first move with keys at stake refuses to start), and
-    # the watchdog and the tor-manager read the control cookie in
-    # debian-tor's /var/lib/tor. /var/lib/tor comes from the image, already
-    # debian-tor's and private, so the entrypoint's chown -R and chmod 700 of
-    # it change nothing: no CHOWN or FOWNER (the chmod logs "Operation not
-    # permitted" and Tor starts). The Docker socket needs no capability: it
+    # the watchdog reads the control cookie in debian-tor's /var/lib/tor.
+    # /var/lib/tor comes from the image, already debian-tor's and private,
+    # so the entrypoint's chown -R and chmod 700 of it change nothing: no
+    # CHOWN or FOWNER (the chmod logs "Operation not permitted" and Tor
+    # starts). The Docker socket needs no capability: it
     # is root's (the user's under rootless Docker), and so is this process.
     cap_drop:
       - ALL

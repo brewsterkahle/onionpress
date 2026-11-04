@@ -220,9 +220,9 @@ RUN tor --version | head -n 1
 # a hand-edited string that invalidated the layers least in need of it. Now
 # that the drifting stages are pinned, bump the pin instead.
 COPY entrypoint.sh /entrypoint.sh
-COPY healthcheck-server.sh /healthcheck-server.sh
-COPY onionheaven-redirect.sh /onionheaven-redirect.sh
-COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
+COPY http_listener.py /http_listener.py
+COPY onionheaven-redirect.py /onionheaven-redirect.py
+COPY tor_control.py /tor_control.py
 COPY onion_auth.py /onion_auth.py
 COPY onion_keys.py /onion_keys.py
 COPY onionheaven_common.py /onionheaven_common.py
@@ -237,11 +237,7 @@ COPY tor-watchdog.py /tor-watchdog.py
 COPY onionnames.py /onionnames.py
 COPY onionheaven-data-migrate.py /onionheaven-data-migrate.py
 COPY wordlists /wordlists
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /onionheaven-farm.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
-# The healthcheck and redirect listeners cap their children and time idle
-# connections out (socat's max-children, issue #393): a socat without the
-# option would refuse to start them.
-RUN socat -hhh 2>&1 | grep -q 'max-children'
+RUN chmod +x /entrypoint.sh /onionheaven-redirect.py /onionheaven-heartbeat.py /onionheaven-farm.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
 # onion_auth signs on libsodium here, never on its pure-Python fallback.
 RUN python3 -c "import sys; sys.path.insert(0, '/'); import onion_auth as a; k = bytes(range(64)); p = a.derive_public_key(k); sys.exit(None if a.signing_uses_libsodium() and a.verify(p, b'x', a.sign_expanded(k, p, b'x')) else 'onion_auth does not sign on libsodium')"
 # Mount point of the OnionHeaven hub data volume (registry and registrants'

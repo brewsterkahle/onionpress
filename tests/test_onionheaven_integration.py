@@ -118,7 +118,7 @@ class ServerProcess:
     """Manages a local web-server.py process for testing."""
 
     def __init__(self, port=None, trust_loopback_as_bridge=False,
-                 hub_opt_in=True, own_address=None, stale_marker=False,
+                 hub_opt_in=True, own_address=None,
                  docker_available=True):
         self.port = port or _find_free_port()
         self.proc = None
@@ -130,8 +130,6 @@ class ServerProcess:
         # in for the Tor hostname file, which does not exist here.
         self.hub_opt_in = hub_opt_in
         self.own_address = own_address
-        # Leave an activation marker from an earlier registration behind.
-        self.stale_marker = stale_marker
         # Test clients can only connect from 127.0.0.1. The Docker-bridge
         # guard must reject that (it is how Tor-origin traffic arrives), so
         # the bridge-only endpoints can only be exercised past the guard by
@@ -149,9 +147,6 @@ class ServerProcess:
         keys_dir = os.path.join(data_dir, "keys")
         os.makedirs(keys_dir, exist_ok=True)
         self.data_dir = data_dir
-        if self.stale_marker:
-            with open(os.path.join(data_dir, "activate"), "w") as f:
-                f.write("2026-01-01T00:00:00Z\n")
 
         env = os.environ.copy()
         env["PYTHONPATH"] = SERVER_DIR
@@ -213,6 +208,7 @@ sys.modules["onionheaven_server"] = srv
 spec.loader.exec_module(srv)
 
 srv.LISTEN_PORT = {self.port}
+srv.HEALTHCHECK_PORT = 0  # any free port: several servers run at once
 srv.KEYS_DIR = {keys_dir!r}
 srv.OWN_ONION_ADDRESS = {self.own_address!r}
 srv._HOSTNAME_PATH = os.path.join({data_dir!r}, "no-such-hostname")
@@ -853,8 +849,7 @@ class TestNotAHub(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = ServerProcess(hub_opt_in=False,
-                                   own_address=_make_test_keypair()[2],
-                                   stale_marker=True)
+                                   own_address=_make_test_keypair()[2])
         cls.server.start()
 
     @classmethod
@@ -908,11 +903,6 @@ class TestNotAHub(unittest.TestCase):
             self.assertIs(conn.sock, sock)
         finally:
             conn.close()
-
-    def test_stale_activation_marker_removed(self):
-        marker = os.path.join(self.server.data_dir, "activate")
-        self.assertTrue(_wait_for(lambda: not os.path.exists(marker)),
-                        "activation marker left on a node that is not a hub")
 
 
 class TestResetNotAHub(unittest.TestCase):
@@ -977,9 +967,10 @@ class TestCanonicalHub(unittest.TestCase):
         self.assertEqual(code, 200, data)
         self.assertTrue(data.get("registered"))
 
-    def test_activation_marker_written_at_startup(self):
-        marker = os.path.join(self.server.data_dir, "activate")
-        self.assertTrue(_wait_for(lambda: os.path.exists(marker)))
+    def test_no_activation_flag(self):
+        # Nothing read /var/lib/onionheaven/activate; it is no longer written.
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(os.path.join(self.server.data_dir, "activate")))
 
 
 class TestPeerClaim(unittest.TestCase):

@@ -267,54 +267,15 @@ class PeerClaimTest(unittest.TestCase):
                          ("online", "register", "offline", "unregister", "logs"))
 
 
-class ActivateMarkerTest(unittest.TestCase):
-    """The marker follows hub admission; /online no longer writes it."""
+class HubOnlyHandlersTest(unittest.TestCase):
 
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="op-activate-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.marker = os.path.join(self.tmp, "activate")
-        for p in (mock.patch.object(ws, "ACTIVATE_MARKER", self.marker),
-                  mock.patch.object(ws, "_HOSTNAME_PATH", "/nonexistent/hostname"),
-                  mock.patch.object(ws, "log"),
-                  mock.patch.dict(os.environ, {}, clear=False)):
-            p.start()
-            self.addCleanup(p.stop)
-        os.environ.pop(OPT_IN, None)
-
-    def test_written_on_the_hub(self):
-        with mock.patch.object(ws, "OWN_ONION_ADDRESS", HUB):
-            ws._sync_activate_marker()
-        self.assertTrue(os.path.exists(self.marker))
-
-    def test_stale_marker_removed_elsewhere(self):
-        with open(self.marker, "w") as f:
-            f.write("2026-01-01T00:00:00Z\n")
-        with mock.patch.object(ws, "OWN_ONION_ADDRESS", OTHER):
-            ws._sync_activate_marker()
-        self.assertFalse(os.path.exists(self.marker))
-
-    def test_waits_for_the_address(self):
-        calls = []
-
-        def sleep_then_learn(_seconds):
-            calls.append(1)
-            ws.OWN_ONION_ADDRESS = OTHER
-
-        with open(self.marker, "w") as f:
-            f.write("x\n")
-        with mock.patch.object(ws, "OWN_ONION_ADDRESS", None), \
-                mock.patch("time.sleep", sleep_then_learn):
-            ws._sync_activate_marker(poll_seconds=0)
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(os.path.exists(self.marker))
-
-    def test_online_handler_does_not_write_it(self):
+    def test_no_activation_flag(self):
+        # /var/lib/onionheaven/activate was a hint for a Linux launcher
+        # watcher that is gone (#504); nothing read it, and nothing writes it.
         src = _read("app/Resources/docker/tor/web-server.py")
-        body = src[src.index("    def _handle_online(self):"):
-                   src.index("    def _handle_offline(self):")]
-        self.assertNotIn('"activate"', body)
-        self.assertNotIn("ACTIVATE_MARKER", body)
+        self.assertNotIn("ACTIVATE_MARKER", src)
+        self.assertNotIn('"activate"', src)
+        self.assertNotIn("_sync_activate_marker", src)
 
     def test_hub_only_endpoints_refuse_before_parsing_the_body(self):
         src = _read("app/Resources/docker/tor/web-server.py")

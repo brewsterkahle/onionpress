@@ -141,11 +141,11 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
     CONTAINER_NAME="${CONTAINER_NAME:-onionheaven-takeover-unknown}"
 
     # Start OnionHeaven redirect service in background (port 8082)
-    /onionheaven-redirect.sh &
+    python3 /onionheaven-redirect.py &
     ONIONHEAVEN_REDIRECT_PID=$!
     sleep 1
     if ! kill -0 $ONIONHEAVEN_REDIRECT_PID 2>/dev/null; then
-        echo "ERROR: onionheaven-redirect.sh failed to start"
+        echo "ERROR: onionheaven-redirect.py failed to start"
     fi
 
     # C Tor with SOCKS + control port for ADD_ONION/DEL_ONION
@@ -192,11 +192,11 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
         migrate_onionheaven_data
 
         # Start OnionHeaven redirect service in background (port 8082)
-        /onionheaven-redirect.sh &
+        python3 /onionheaven-redirect.py &
         ONIONHEAVEN_REDIRECT_PID=$!
         sleep 1
         if ! kill -0 $ONIONHEAVEN_REDIRECT_PID 2>/dev/null; then
-            echo "ERROR: onionheaven-redirect.sh failed to start"
+            echo "ERROR: onionheaven-redirect.py failed to start"
         fi
 
         # C Tor with control port for ADD_ONION/DEL_ONION (no SIGHUP needed)
@@ -300,9 +300,6 @@ migrate_onionhome_registry
 mkdir -p /var/lib/tor/hidden_service/wordpress
 mkdir -p /var/lib/tor/hidden_service/healthcheck
 
-# Write version for healthcheck server
-echo "${ONIONPRESS_VERSION:-unknown}" > /var/lib/tor/healthcheck-version
-
 # Forward 127.0.0.1:8080 → wordpress:80 (the onion service target must be an IP)
 socat TCP-LISTEN:8080,reuseaddr,fork TCP:wordpress:80 &
 SOCAT_PID=$!
@@ -314,20 +311,13 @@ fi
 # OnionHeaven API server — runs on every node (status, OnionHome endpoints),
 # but only the OnionHeaven hub accepts registrations: the canonical hub
 # address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes (onionheaven_common.py).
+# It also answers the healthcheck onion service on 127.0.0.1:8081.
 mkdir -p /var/lib/onionheaven/keys
 python3 /web-server.py &
 ONIONHEAVEN_SERVER_PID=$!
 sleep 1
 if ! kill -0 $ONIONHEAVEN_SERVER_PID 2>/dev/null; then
     echo "ERROR: web-server.py failed to start"
-fi
-
-# Start healthcheck HTTP server in background (port 8081)
-/healthcheck-server.sh &
-HC_PID=$!
-sleep 1
-if ! kill -0 $HC_PID 2>/dev/null; then
-    echo "ERROR: healthcheck-server.sh failed to start"
 fi
 
 echo "Starting C Tor..."

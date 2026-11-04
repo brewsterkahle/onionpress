@@ -73,7 +73,7 @@ NEVER = {"ALL", "NET_RAW", "NET_ADMIN", "SYS_ADMIN", "SYS_PTRACE",
          "SYS_MODULE", "DAC_READ_SEARCH", "SYS_RAWIO", "BPF", "MAC_ADMIN"}
 
 # The tor image as a takeover worker: su to debian-tor (SETGID, SETUID); the
-# watchdog, queue manager and tor-manager read the control cookie in
+# watchdog and the queue manager read the control cookie in
 # debian-tor's 0700 /var/lib/tor (DAC_OVERRIDE). /var/lib/tor comes from the
 # image, so the entrypoint's chown and chmod of it change nothing.
 WORKER = {"DAC_OVERRIDE", "SETGID", "SETUID"}

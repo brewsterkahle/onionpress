@@ -6,7 +6,8 @@
 OnionHome's memory before a signature was checked. Now do_POST checks the
 length of every POST before a handler runs (digits only, the path's limit,
 no chunked bodies), bodies are read under a deadline, and the server
-holds at most MAX_CONNECTIONS connections.
+holds at most MAX_CONNECTIONS connections (http_listener's
+BoundedThreadingHTTPServer, shared with the healthcheck and redirect).
 """
 
 import importlib.util
@@ -129,7 +130,7 @@ class DeadlineToleratesSlowCircuitsTest(unittest.TestCase):
 
 class ConnectionCapTest(unittest.TestCase):
     def test_connections_beyond_the_cap_are_closed(self):
-        with mock.patch.object(ws, "MAX_CONNECTIONS", 2):
+        with mock.patch.object(ws.BoundedThreadingHTTPServer, "max_connections", 2):
             srv = _Server(self)
         held = [srv.connect() for _ in range(2)]
         for s in held:

@@ -46,7 +46,10 @@ ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
 HUB_DATA_VOLUME = "onionpress-onionheaven-data"
 DB_PATH = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.db")
 KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
-TOR_MANAGER = "/onionheaven-tor-manager.sh"
+# The queue manager in a takeover worker (onionheaven-queue-manager.py), the
+# one path to that worker's Tor: the farm's exec verbs and, inside the
+# worker, _takeover_local / _release_local.
+QUEUE_MANAGER = "/onionheaven-queue-manager.py"
 
 # The farm controller's socket (onionheaven-farm.py), on the
 # onionpress-onionheaven-farm volume that docker-compose.yml mounts into the
@@ -1482,26 +1485,45 @@ def clear_takeover_request(conn, content_address, healthcheck_address, requested
     db_commit_with_retry(conn)
 
 
-def _takeover_local(content_address):
-    """Execute takeover via local tor-manager (takeover worker containers only).
-
-    ADD_ONION via the control port — no config reload involved.
-    """
-    log(f"Taking over {content_address} via tor-manager (local)")
+def _queue_manager_local(verb, content_address):
+    """The local queue manager's JSON reply to `verb content_address`
+    (takeover worker containers only), or None when it gave none."""
     try:
         result = subprocess.run(
-            [TOR_MANAGER, "takeover", content_address],
+            ["python3", QUEUE_MANAGER, verb, content_address],
             capture_output=True, text=True, timeout=30
         )
-        if result.returncode == 0:
-            log(f"Takeover complete for {content_address}")
-            return True
-        else:
-            log(f"Takeover failed for {content_address}: {result.stderr.strip()}")
-            return False
     except Exception as e:
-        log(f"Takeover error for {content_address}: {e}")
+        log(f"Queue manager {verb} error for {content_address}: {e}")
+        return None
+    try:
+        reply = json.loads(result.stdout.strip() or "{}")
+    except (json.JSONDecodeError, ValueError):
+        reply = None
+    if not isinstance(reply, dict) or not reply or "error" in reply:
+        log(f"Queue manager {verb} failed for {content_address}: "
+            f"rc={result.returncode} {result.stdout.strip()[:200]}")
+        return None
+    return reply
+
+
+def _takeover_local(content_address):
+    """Queue a takeover on this worker's own queue manager (takeover worker
+    containers only), as _exec_takeover does through the farm controller.
+
+    ADD_ONION via the control port — no config reload involved. The
+    queue manager reads the key and refuses one that derives to another
+    address.
+    """
+    if not onion_address_ok(content_address, "take over"):
         return False
+    log(f"Taking over {content_address} via the queue manager (local)")
+    reply = _queue_manager_local("takeover", content_address)
+    if reply and reply.get("status") in ("queued", "already_queued",
+                                         "already_active", "in_flight"):
+        log(f"Takeover queued for {content_address} ({reply['status']})")
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1601,25 +1623,22 @@ def release_function(conn, content_address, healthcheck_address):
 
 
 def _release_local(content_address):
-    """Execute release via local tor-manager (takeover worker containers only).
+    """Release on this worker's own queue manager (takeover worker
+    containers only): DEL_ONION via the control port, no config reload.
 
-    DEL_ONION via the control port — no config reload involved.
+    A release the queue manager could not confirm (release_warning) still
+    counts, as it did when this ran a shell DEL_ONION that ignored the
+    answer: the service may already be gone (a Tor restart), and the
+    heartbeat's RECONCILE pass removes any orphan from the worker's Tor.
     """
-    log(f"Releasing {content_address} via tor-manager (local)")
-    try:
-        result = subprocess.run(
-            [TOR_MANAGER, "release", content_address],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            log(f"Release complete for {content_address}")
-            return True
-        else:
-            log(f"Release failed for {content_address}: {result.stderr.strip()}")
-            return False
-    except Exception as e:
-        log(f"Release error for {content_address}: {e}")
+    if not onion_address_ok(content_address, "release"):
         return False
+    log(f"Releasing {content_address} via the queue manager (local)")
+    reply = _queue_manager_local("release", content_address)
+    if reply is None:
+        return False
+    log(f"Release complete for {content_address} ({reply.get('status')})")
+    return True
 
 
 # ---------------------------------------------------------------------------

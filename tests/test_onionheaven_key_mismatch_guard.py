@@ -10,16 +10,15 @@ key into ADD_ONION and Tor registered the service under the derived
 address (B) rather than the expected slot (A), driving the RECONCILE
 loop forever.
 
-Two guards pin this down:
-  1. key-convert.py pem-to-onion-address — pure derivation, used as
-     ground truth by the shell-side guards.
-  2. queue-manager.py TorCommandConn.add_onion — verifies Tor's returned
+Three guards pin this down:
+  1. key-convert.py pem-to-onion-address — pure derivation.
+  2. queue-manager.py stored_key_b64 — the stored key must derive to the
+     address it is stored under before ADD_ONION sees it (the check
+     onionheaven-tor-manager.sh made; that script is gone and every
+     takeover goes through the queue manager).
+  3. queue-manager.py TorCommandConn.add_onion — verifies Tor's returned
      ServiceID matches the address the caller asked for, rolls back the
      ADD on mismatch.
-
-The shell tor-manager.sh guards are exercised indirectly via the same
-derivation logic; this file targets the Python pieces that have unit
-test infrastructure.
 """
 
 import base64
@@ -66,8 +65,8 @@ def _write_pem(tmpdir, name, expanded, public):
 
 
 class TestPemToOnionAddress(unittest.TestCase):
-    """The shell-side guards rely on key-convert.py pem-to-onion-address
-    producing the exact base32 v3 address. Pin the derivation."""
+    """key-convert.py pem-to-onion-address produces the exact base32 v3
+    address. Pin the derivation."""
 
     def test_matches_locally_computed_address(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,12 +118,12 @@ class TestAddOnionGuard(unittest.TestCase):
         spec.loader.exec_module(self.qm)
 
     def _make_conn(self, responses):
-        """Build a TorCommandConn whose _send/_read_response is mocked
-        to deliver `responses` (a list of strings) in order."""
+        """Build a TorCommandConn whose _command is mocked to deliver
+        `responses` (a list of strings) in order."""
         conn = self.qm.TorCommandConn()
-        conn.sock = mock.Mock()
-        conn._send = mock.Mock()
-        conn._read_response = mock.Mock(side_effect=list(responses))
+        conn.ctl = mock.Mock()
+        conn._command = mock.Mock(side_effect=list(responses))
+        conn._send = conn._command   # the commands sent, for the assertions
         return conn
 
     def test_match_returns_success(self):
@@ -171,6 +170,53 @@ class TestAddOnionGuard(unittest.TestCase):
         ok, result = conn.add_onion(addr, "AAAAAA==")
         self.assertTrue(ok)
         self.assertEqual(result, addr.replace(".onion", ""))
+
+
+class TestStoredKeyGuard(unittest.TestCase):
+    """The queue manager reads a takeover's key itself and refuses one
+    that derives to another address before Tor sees it."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "queue_manager_stored_key",
+            os.path.join(DOCKER_TOR_DIR, "onionheaven-queue-manager.py"),
+        )
+        self.qm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.qm)
+        self.qm.log = lambda msg: None
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+
+    def _store(self, address, seed):
+        expanded, public, _ = _synthetic_keypair(seed)
+        os.makedirs(os.path.join(self.tmp, address))
+        _write_pem(os.path.join(self.tmp, address), "ks_hs_id.ed25519_expanded_private",
+                   expanded, public)
+        return expanded
+
+    def test_the_right_key_is_handed_over(self):
+        _, _, addr = _synthetic_keypair(seed=5)
+        expanded = self._store(addr + ".onion", 5)
+        self.assertEqual(self.qm.stored_key_b64(addr + ".onion", self.tmp),
+                         base64.b64encode(expanded).decode())
+
+    def test_a_key_of_another_address_is_refused(self):
+        _, _, addr = _synthetic_keypair(seed=5)
+        self._store(addr + ".onion", 6)
+        self.assertIsNone(self.qm.stored_key_b64(addr + ".onion", self.tmp))
+
+    def test_no_key_or_a_damaged_one_is_none(self):
+        _, _, addr = _synthetic_keypair(seed=5)
+        self.assertIsNone(self.qm.stored_key_b64(addr + ".onion", self.tmp))
+        os.makedirs(os.path.join(self.tmp, addr + ".onion"))
+        with open(os.path.join(self.tmp, addr + ".onion", "ks_hs_id.ed25519_expanded_private"), "wb") as f:
+            f.write(b"junk")
+        self.assertIsNone(self.qm.stored_key_b64(addr + ".onion", self.tmp))
+
+    def test_no_subprocess_reads_the_key(self):
+        with open(os.path.join(DOCKER_TOR_DIR, "onionheaven-queue-manager.py")) as f:
+            self.assertNotIn("key-convert", f.read())
 
 
 if __name__ == "__main__":
