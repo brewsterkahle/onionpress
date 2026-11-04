@@ -94,7 +94,7 @@ OPTIONS = {
                  'onionpress.analytics_sharing', 'onionpress.power',
                  'onionpress.onion_proxy', 'onionpress.onion_auth',
                  'onionpress.onion_keys',
-                 'onionpress.onionheaven', 'onionpress.updater',
+                 'onionpress.onionheaven', 'onionpress.updater', 'onionpress.host_cloudflared',
                  'onionpress.install_native_messaging', 'onionpress.native_messaging_host',
                  'onionpress.onion_hostname',
                  'onionpress.onionnames_client',

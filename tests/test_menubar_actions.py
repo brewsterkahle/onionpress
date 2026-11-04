@@ -68,6 +68,104 @@ def _src():
         return f.read()
 
 
+# Issue #547: what either UI may still run itself, by (method, program).
+# Everything else is a launcher run through ui_client.Launcher (which is
+# not here: it is ui_client's subprocess, never the UI's). The menubar's
+# bundle-permissions fix and host cloudflared check, and the tray's
+# `systemctl --user stop`, were operations of their own: now the
+# updater's and the daemon's, and the launcher's `quit`.
+SUBPROCESS_CALLS = ("run", "Popen", "call", "check_call", "check_output",
+                    "getoutput", "getstatusoutput")
+UI_SUBPROCESS_ALLOWED = {
+    "src/menubar.py": {
+        # The menubar's own single-instance pid file: a pid file older
+        # than the boot is stale (a read of the host, for the UI itself).
+        ("__init__", "sysctl"),
+        # Desktop openers: the clipboard, a URL, a browser app.
+        ("copy_address", "pbcopy"),
+        ("show_browser_install_dialog", "open"),
+        ("_auto_open_browser_inner", "open"),
+        # After an update: waits for this process to exit, then `open`s
+        # the new bundle (the menubar relaunching itself).
+        ("_relaunch_app", "bash"),
+    },
+    "linux/onionpress-tray": {
+        # Desktop openers: the data folder, a release page.
+        ("_open_data_folder", "xdg-open"),
+        ("_run", "xdg-open"),
+        # A terminal emulator running the launcher's `uninstall` (argv
+        # from the tray's list of terminals, so not a literal).
+        ("_on_uninstall", None),
+    },
+}
+
+
+def ui_subprocess_calls(rel):
+    """Every subprocess call in *rel*, as (enclosing function, the argv's
+    first word when it is a literal, else None)."""
+    with open(os.path.join(PROJECT_ROOT, rel), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    found = []
+
+    def visit(node, fn):
+        for child in ast.iter_child_nodes(node):
+            name = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and child.func.attr in SUBPROCESS_CALLS
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id in ("subprocess", "_sp")):
+                prog = None
+                first = child.args[0] if child.args else None
+                if (isinstance(first, (ast.List, ast.Tuple)) and first.elts
+                        and isinstance(first.elts[0], ast.Constant)):
+                    prog = first.elts[0].value
+                found.append((fn, prog))
+            visit(child, name)
+    visit(tree, None)
+    return found
+
+
+class UISubprocessCensus:
+    """Mixed into a TestCase with REL: the UI runs no program but its
+    allowed ones, and no other way to start one."""
+
+    REL = ""
+
+    def test_every_subprocess_call_is_allowed(self):
+        allowed = UI_SUBPROCESS_ALLOWED[self.REL]
+        calls = ui_subprocess_calls(self.REL)
+        for call in calls:
+            with self.subTest(call=call):
+                self.assertIn(call, allowed, f"{self.REL} runs {call[1]!r} in {call[0]}: "
+                              "an operation is a launcher verb (ui_client.Launcher) "
+                              "or a daemon step, not the UI's own subprocess")
+        # The list stays exact: a removed call leaves the list.
+        self.assertEqual(set(calls), allowed)
+
+    def test_no_other_way_to_run_a_program(self):
+        with open(os.path.join(PROJECT_ROOT, self.REL), encoding="utf-8") as f:
+            text = f.read()
+        for needle in ("from subprocess import", "os.system(", "os.popen(", "os.spawn",
+                       "os.exec", "pty.spawn", "asyncio.create_subprocess"):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, text)
+        for m in re.finditer(r"^\s*import subprocess(?: as (\w+))?$", text, re.M):
+            self.assertIn(m.group(1), (None, "_sp"))
+
+
+class TestTheMenubarRunsNoOperation(UISubprocessCensus, unittest.TestCase):
+    REL = "src/menubar.py"
+
+    def test_the_moved_operations_are_gone(self):
+        src = _src()
+        for gone in ("_fix_app_bundle_permissions", "_check_host_cloudflared",
+                     '"chmod"', '"chgrp"', '"pgrep"'):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, src)
+        # It shows the daemon's answer.
+        self.assertIn('ui_client.host_cloudflared_notice(state, "macos")', src)
+
+
 def _method(src, name):
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.FunctionDef) and node.name == name:

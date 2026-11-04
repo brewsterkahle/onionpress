@@ -1129,6 +1129,46 @@ main() {
             start_daemon
             ;;
 
+        quit)
+            # Take OnionPress fully off, the Mac's `quit` (issue #547; the
+            # tray's Quit runs `quit --leave-tray`, it exits itself): the
+            # daemon first (`daemon stop` tells the hub /offline while the
+            # tor container is still up and stops its unit, which
+            # Restart= does not bring back), the containers, the site's
+            # unit (a oneshot that stays active; its ExecStop finds the
+            # stack down), then the tray. A terminal's quit; the next
+            # `start` or login brings it all back. Unknown options are
+            # ignored with a warning: a teardown never stops on a flag.
+            QUIT_LEAVE_TRAY=no
+            for _arg in "${@:2}"; do
+                case "$_arg" in
+                    --leave-tray) QUIT_LEAVE_TRAY=yes ;;
+                    *) echo "onionpress quit: ignoring unknown option $_arg" >&2 ;;
+                esac
+            done
+            setup_db_passwords
+            log "quit: stopping the OnionPress daemon"
+            op_py --data-dir "$DATA_DIR" daemon stop >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: quit: the daemon did not stop"
+            quit_rc=0
+            stop_containers || quit_rc=$?
+            if command_exists systemctl; then
+                systemctl --user stop onionpress.service >/dev/null 2>&1 || true
+            fi
+            if [ "$QUIT_LEAVE_TRAY" != yes ]; then
+                # The tray's own pid file, held to a pid whose command line
+                # is the tray's (a recycled pid is left alone).
+                tray_pid=$(cat "$DATA_DIR/tray.pid" 2>/dev/null | tr -d '[:space:]') || tray_pid=""
+                if [[ "$tray_pid" =~ ^[0123456789]{1,10}$ ]] \
+                        && tr '\0' ' ' 2>/dev/null < "/proc/$tray_pid/cmdline" | grep -q 'onionpress-tray'; then
+                    log "quit: SIGTERM to the tray (pid $tray_pid)"
+                    kill -TERM "$tray_pid" 2>/dev/null || true
+                fi
+            fi
+            log "quit: done"
+            exit "$quit_rc"
+            ;;
+
         status)
             op_py --data-dir "$DATA_DIR" status
             ;;

@@ -410,6 +410,7 @@ def state_document(app, now=None):
         "is_onionheaven": bool(app.is_onionheaven),
         "bootstrap_pct": 100 if app.is_ready else app._last_bootstrap_pct,
         "cloudflare_tunnel_enabled": app.cloudflare_tunnel_enabled,
+        "host_cloudflared": app.host_cloudflared,
         "wp_installed": app._wp_installed,
         "wordpress_up": app._wordpress_confirmed,
         "images_present": dict(app._images_present),

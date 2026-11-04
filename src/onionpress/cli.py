@@ -2989,6 +2989,11 @@ def launcher_help(os_name: str) -> str:
             "  quit          Fully shut down: daemon + containers + Colima VM + MenubarApp",
             "                (equivalent of clicking Quit in the menubar)",
         ]
+    else:
+        lines += [
+            "  quit          Fully shut down: daemon + containers + the units + the tray",
+            "                (equivalent of clicking Quit in the tray)",
+        ]
     lines += [
         "  daemon        The OnionPress daemon (status loop, probe, heartbeat, the",
         "                Settings page's requests, log captures, the extension",

@@ -55,6 +55,9 @@ REVIEWED = {
     # The first-time setup checks that the bundle ships its binaries
     # (docker, colima, limactl); it runs none of them.
     ("src/menubar.py", "_run_first_time_setup"): 1,
+    # A cgroup path fragment: a process in Docker's cgroup is a
+    # container's, not the host's cloudflared (issue #547).
+    ("src/onionpress/host_cloudflared.py", "<module>"): 1,
 }
 
 # Identifiers that hand the binary or the environment around by hand.

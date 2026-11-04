@@ -143,6 +143,7 @@ class StatusApp(PortAttributes):
         self._status_fields = {}
         self._last_status_payload = None
         self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
+        self.host_cloudflared = None
         self._wordpress_confirmed = False
         self._images_present = {}
         self.proxy_server = None
