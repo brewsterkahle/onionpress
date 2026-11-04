@@ -132,7 +132,10 @@ class TestImports(unittest.TestCase):
                      "_release_onionheaven_before_restore", "_prune_dangling_images",
                      "_write_result", "_run_launcher_json", "_launcher_failure",
                      "_ask_hub_recovery_key", "_ask_to_replace_address", "_short_onion",
-                     "run_command"):
+                     "run_command",
+                     # The onionname is `onionpress onionname set`'s, the
+                     # admin's login the CLI's (backup.find_admin_username).
+                     "_save_onionname", "_rename_wp_admin", "_read_onion_address"):
             with self.subTest(name=name):
                 self.assertNotIn(f"def {name}(", self.src)
         self.assertNotIn("create_backup(", self.src)
@@ -141,6 +144,9 @@ class TestImports(unittest.TestCase):
         self.assertNotIn("apply_settings_updates(", self.src)
         self.assertNotIn("/var/lib/onionpress/requested-action", self.src)
         self.assertNotIn("config-updates.json", self.src)
+        self.assertNotIn("UPDATE wp_users", self.src)
+        self.assertNotIn("Registrar(", self.src)
+        self.assertNotIn("validate_name", self.src)
 
     def test_every_action_is_a_launcher_subprocess(self):
         for argv in ACTIONS:
@@ -168,6 +174,30 @@ class TestImports(unittest.TestCase):
         daemon = open(os.path.join(PROJECT_ROOT, "src", "onionpress", "daemon.py"), encoding="utf-8").read()
         self.assertIn("self.write_status_to_volume()\n                self.poll_settings_page()", daemon)
         self.assertIn('self.launcher.run_json("handle-action", "--json", *args)', self.src)
+
+
+class TestSettingsDialog(unittest.TestCase):
+    """The Mac settings dialog (settings_ui.py) runs the launcher through
+    the menubar's ui_client.Launcher and checks VM_MEMORY / VM_CPU with
+    config's own checks (what `config set` takes), no limits of its own."""
+
+    def setUp(self):
+        with open(os.path.join(os.path.dirname(MENUBAR), "onionpress", "settings_ui.py"),
+                  encoding="utf-8") as f:
+            self.src = f.read()
+
+    def test_the_hub_check_goes_through_the_client(self):
+        self.assertIn('launcher.run_json("validate-oh-address", oh_addr, timeout=90)', self.src)
+        self.assertNotIn("subprocess", self.src)
+        self.assertNotIn("json.loads", self.src)
+        self.assertIn("launcher=self.launcher,", _src())
+
+    def test_vm_limits_are_configs(self):
+        self.assertIn('for key, title in (("VM_MEMORY", "Invalid VM Memory"), ("VM_CPU", "Invalid VM CPUs")):',
+                      self.src)
+        self.assertIn("op_config.check_config_value(key, new_values[key])", self.src)
+        self.assertNotIn('int(new_values["VM_MEMORY"])', self.src)
+        self.assertNotIn('int(new_values["VM_CPU"])', self.src)
 
 
 class TestViewTickKeepsTheState(unittest.TestCase):

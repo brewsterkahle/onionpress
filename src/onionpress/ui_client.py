@@ -21,10 +21,12 @@ stub launcher:
   `restore_summary`: the backup and restore flows, their dialogs an object
   the caller supplies (`BackupUI`, `RestoreUI`).
 - `update_outcome`: what an update check's answer means.
+- `status_view`: what the menu shows of the daemon's state (category,
+  title, icon, the actions it enables), freshness included.
 - `short_onion`, `site_url`, `about_text`: the copy both UIs show.
 
-Imports: the standard library, `onionpress.confirm` and
-`onionpress.launcher_ops` only, so the menubar's docker-free import
+Imports: the standard library, `onionpress.confirm`,
+`onionpress.daemon_client` and `onionpress.launcher_ops` only, so the menubar's docker-free import
 closure (tests/test_mac_daemon.py) holds; `onionheaven` is imported
 lazily where a restore's summary names a hub.
 """
@@ -35,6 +37,7 @@ import threading
 from typing import Callable, NamedTuple, Optional
 
 from . import confirm as _confirm
+from . import daemon_client
 from . import launcher_ops
 
 BACKUP_PASSWORD_ENV = launcher_ops.BACKUP_PASSWORD_ENV
@@ -693,6 +696,93 @@ def update_outcome(returncode: int, stdout: str, stderr: str) -> UpdateOutcome:
     return UpdateOutcome("current", "Up to date",
                          f"You're on the current version ({data.get('current')}).",
                          urgency="low", **common)
+
+
+# ─── The view of the daemon's state ──────────────────────────────────────
+
+# Every action a status view may enable. "open_onion": the site's .onion
+# in a Tor-capable browser; "open_local": the local site.
+VIEW_ACTIONS = ("start", "stop", "restart", "backup", "restore", "open_onion", "open_local")
+
+# Containers up, the site not reachable (yet, or any more): Stop, Restart
+# and a backup work, a restore waits for a reachable site, the local site
+# is the one to open.
+_COMING_UP_ACTIONS = frozenset({"stop", "restart", "backup", "open_local"})
+
+
+class StatusView(NamedTuple):
+    """What both UIs show of the daemon's state. category: one of
+    daemon_client.display_state_of's ("available", "starting", "offline",
+    "stalled", "stuck", "stopped") or "reconnecting" (no fresh state: the
+    daemon is starting, restarting or gone; never "stopped", the site is
+    most likely still up). icon: "running" | "starting" | "stopped".
+    actions: the VIEW_ACTIONS the menu enables."""
+    category: str
+    title: str
+    icon: str
+    actions: frozenset
+
+
+def status_view(state: Optional[dict], now: float, *, daemon_seen: bool = True,
+                start_failed: bool = False, onionname: Optional[str] = None) -> StatusView:
+    """The view of *state*, daemon-state.json's document
+    (daemon_client.read_state), at *now*. A state older than
+    daemon_client.STALE_AFTER_SECONDS or from a dead pid is
+    "reconnecting", whatever it says. daemon_seen: a fresh state was
+    seen since the UI started (else a missing one is the first start).
+    start_failed: the UI's own last Start failed. onionname: the UI's
+    reading of ONIONNAME (default: the status document's)."""
+    if not daemon_client.state_is_fresh(state, now):
+        title = ("Status: Reconnecting to the OnionPress service..." if daemon_seen
+                 else "Status: Starting up, please wait...")
+        return StatusView("reconnecting", title, "starting", _COMING_UP_ACTIONS | {"start"})
+    category = daemon_client.display_state_of(state, now)
+    status = state.get("status") if isinstance(state.get("status"), dict) else {}
+    address = state.get("onion_address") or state.get("address_placeholder") or ""
+    if onionname is None:
+        onionname = status.get("onionname") or ""
+    onionname = str(onionname).strip()
+    short = short_onion(address)
+    if category == "available":
+        title = f"{onionname}@{short}" if onionname else f"Address: {short}"
+        return StatusView(category, title, "running",
+                          frozenset({"stop", "restart", "backup", "restore",
+                                     "open_onion", "open_local"}))
+    if category == "stopped":
+        if start_failed:
+            title = "Status: Start failed — see View Logs"
+        elif status.get("serving_from_wayback"):
+            title = "Status: Site offline — visitors see Wayback"
+        elif address.endswith(".onion"):
+            title = f"Stopped — {short}"
+        else:
+            title = "Status: Stopped"
+        return StatusView(category, title, "stopped", frozenset({"start"}))
+    if category == "offline":
+        return StatusView(category, "Status: Offline — no internet connection", "stopped",
+                          _COMING_UP_ACTIONS)
+    if category == "stalled":
+        title = "Status: Health check stalled (system busy)"
+    elif category == "stuck":
+        # Not "try Restart": the daemon is already retrying (tor restart
+        # on a stalled bootstrap, descriptor republish on a wedge), and a
+        # restart throws that away (#321).
+        title = "Status: Slow to connect — still trying..."
+    else:
+        try:
+            pct = int(state.get("bootstrap_pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0
+        if 0 < pct < 100:
+            title = f"Status: Connecting to Tor ({pct}%)..."
+        elif state.get("wp_installed") is False:
+            # Linux's Tor runs before setup: the setup window is the cue.
+            title = "Status: Setup required — finish setting up OnionPress"
+        elif pct >= 100:
+            title = "Status: Waiting for the onion service to become reachable..."
+        else:
+            title = "Status: Starting up, please wait..."
+    return StatusView(category, title, "starting", _COMING_UP_ACTIONS)
 
 
 # ─── The copy both UIs show ──────────────────────────────────────────────

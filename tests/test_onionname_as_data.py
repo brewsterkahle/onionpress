@@ -7,8 +7,8 @@ string, and setup_logic.validate_onionname accepted any non-empty name when
 onionnames_client was missing or raised. Now:
 
   - the PHP is a constant and the name arrives on stdin (docker exec -i);
-  - validate_onionname applies the charset/length rule itself, so it fails
-    closed whatever onionnames_client does, and validates the whole string
+  - validate_onionname is onionnames_client's rule, imported hard (no
+    fallback that let names through), and validates the whole string
     (a trailing newline is not "end of string");
   - install_fresh_wordpress and provision_existing_wordpress refuse an
     invalid name before touching WordPress or ~/.onionpress/config;
@@ -56,15 +56,9 @@ def _ok(stdout=""):
                                        stdout=stdout, stderr="")
 
 
-class _BrokenClient:
-    @staticmethod
-    def validate_name(name):
-        raise RuntimeError("wordlists unreadable")
+class TestValidateIsTheOneRule(unittest.TestCase):
 
-
-class TestValidateFailsClosed(unittest.TestCase):
-
-    def _check_all(self):
+    def test_hostile_and_malformed_names_are_refused(self):
         for name in HOSTILE_NAMES + ["abcd", "", "12345", "a" * 41]:
             ok, reason = setup_logic.validate_onionname(name)
             self.assertFalse(ok, f"{name!r} must be rejected")
@@ -72,28 +66,19 @@ class TestValidateFailsClosed(unittest.TestCase):
         for name in ("alice", "brewster-kahle", "a1.b2_c3"):
             self.assertEqual(setup_logic.validate_onionname(name), (True, ""))
 
-    def test_with_client(self):
-        self._check_all()
-
-    def test_without_client(self):
-        with mock.patch.object(setup_logic, "_onc", None):
-            self._check_all()
-
-    def test_when_client_raises(self):
-        with mock.patch.object(setup_logic, "_onc", _BrokenClient):
-            self._check_all()
-
-    def test_reasons_match_the_client(self):
+    def test_it_is_the_clients_rule(self):
         for name in HOSTILE_NAMES + ["abcd", "12345", "a" * 41, "alice"]:
-            with mock.patch.object(setup_logic, "_onc", None):
-                local = setup_logic.validate_onionname(name)
             ok, reason = onionnames_client.validate_name(name)
-            self.assertEqual(local, (ok, reason or ""), name)
+            self.assertEqual(setup_logic.validate_onionname(name), (ok, reason or ""), name)
+
+    def test_no_second_copy_of_the_rule(self):
+        """Issue: setup_logic held a byte-identical copy of the rule."""
+        src = open(os.path.join(PROJECT_ROOT, "src", "onionpress", "setup_logic.py")).read()
+        for gone in ("_local_onionname_rule", "_ONIONNAME_RE", "except ImportError"):
+            self.assertNotIn(gone, src)
 
     def test_non_string_is_empty(self):
-        with mock.patch.object(setup_logic, "_onc", None):
-            self.assertEqual(setup_logic.validate_onionname(None),
-                             (False, "empty"))
+        self.assertEqual(setup_logic.validate_onionname(None), (False, "empty"))
 
 
 class TestBlogIdLookupIsConstantPhp(unittest.TestCase):
@@ -153,8 +138,7 @@ class TestInstallersRefuseInvalidNames(unittest.TestCase):
         for name in HOSTILE_NAMES:
             logs = []
             with mock.patch("onionpress.setup_logic.subprocess.run",
-                            return_value=_ok()) as mrun, \
-                    mock.patch.object(setup_logic, "_onc", None):
+                            return_value=_ok()) as mrun:
                 ok = fn(site_title="T", onionname=name, password="hunter22",
                         docker=FakeDocker(mrun), data_dir=self.tmpdir,
                         log_func=logs.append, **extra)
