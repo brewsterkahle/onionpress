@@ -51,7 +51,7 @@ class TestOrder(unittest.TestCase):
                                or (fail != "core", installed)), \
              mock.patch.object(start, "post_up",
                                side_effect=lambda *a, **k: order.append("post-up")):
-            rc = start.start_containers(manager, mac=True, wp_port=8080, errors=None,
+            rc = start.start_containers(manager, os_name="macos", wp_port=8080, errors=None,
                                         until_core=until_core, log=lines.append)
         return rc, order, lines
 

@@ -275,7 +275,7 @@ class TestFirstRunUsesTheValidator(unittest.TestCase):
              mock.patch.object(start, "vanity_key_dir", return_value=None), \
              mock.patch.object(start, "generate_vanity_on_host",
                                side_effect=lambda p, *a, **k: used.append(p)):
-            start.KeySeed(manager, mac=True, log=lines.append).run()
+            start.KeySeed(manager, os_name="macos", log=lines.append).run()
         return lines, used[0]
 
     def test_no_launcher_keeps_a_copy(self):

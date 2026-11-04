@@ -370,7 +370,8 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
     or a downgrade) and its package matches the release's SHA256SUMS
     (updater.check_release, fetch_deb / download_and_install).
 
-    The install step is the platform's. A Mac's bundle is replaced by the
+    The install step is the platform's (_update_mac, _update_linux): the
+    checks and the question before it are shared. A Mac's bundle is replaced by the
     staged bundle swap (updater.download_and_install: the new bundle is
     copied beside the old one and renamed into place last, since this
     very process runs out of the bundle being replaced; the menubar
@@ -461,10 +462,20 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
             print("Aborted.")
             return 0
 
-    if not mac:
-        return _update_linux(paths, log, release, current, launcher, force=force,
-                             json_output=json_output)
+    if mac:
+        return _update_mac(paths, log, release, current, app_path,
+                           json_output=json_output)
+    return _update_linux(paths, log, release, current, launcher, force=force,
+                         json_output=json_output)
 
+
+def _update_mac(paths, log, release, current, app_path, *, json_output):
+    """A Mac's install: the staged bundle swap (updater.download_and_install:
+    the new bundle is copied beside the old one and renamed into place
+    last), the daemon stopped around the swap. {"error",
+    "permission_denied"} when another account owns the bundle."""
+    from . import confirm as _confirm, updater
+    latest = release.version
     log(f"Update: downloading and installing v{latest}...")
     if not json_output:
         print(f"Downloading and installing v{latest}...")
@@ -2107,7 +2118,7 @@ def _run_import_key(run):
 
     return key_import.run(args, paths=paths, docker=docker, containers=manager,
                           log=log, release=release,
-                          linux=detect_os() == OS.LINUX)
+                          os_name=detect_os().value)
 
 
 # ---- OnionHeaven ----
@@ -2537,7 +2548,7 @@ def _run_start_containers(run):
         wp_port = int(port) if port.isdigit() else 8080
     manager = _start_step_manager(paths)
     return start.start_containers(
-        manager, mac=detect_os() == OS.MACOS, wp_port=wp_port,
+        manager, os_name=detect_os().value, wp_port=wp_port,
         errors=StartErrors(args.errors_file) if args.errors_file else None,
         bin_dir=args.bin_dir or paths.bin_dir, scripts_dir=args.scripts_dir or "",
         themes_dir=args.themes_dir, plugins_dir=args.plugins_dir,
@@ -2604,7 +2615,7 @@ def _run_setup(run):
     from .handle_action import default_launcher
     args = run.args
     paths = resolve_paths(data_dir=args.data_dir)
-    mac = detect_os() == OS.MACOS
+    os_name = detect_os().value
     log = _make_log_func(paths.log_file)
     if args.email:
         # The old bash setup made it the admin's email; install_fresh_wordpress
@@ -2623,8 +2634,8 @@ def _run_setup(run):
     report = {}
     try:
         rc = setup_logic.setup_from_terminal(
-            data_dir=paths.data_dir, mac=mac,
-            launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
+            data_dir=paths.data_dir, os_name=os_name,
+            launcher_bin=args.launcher or default_launcher(paths, os_name),
             docker=Docker(paths), manager=_start_step_manager(paths), user=args.user,
             title=args.title, from_backup=args.from_backup, ia_account=args.ia_account,
             log=log, restore=restore, language=args.language, paths=paths,
@@ -2712,7 +2723,7 @@ def _run_start_post_up(run):
     manager = _start_step_manager(paths)
     errors = StartErrors(args.errors_file) if args.errors_file else None
     try:
-        start.post_up(manager, mac=detect_os() == OS.MACOS,
+        start.post_up(manager, os_name=detect_os().value,
                       installed=args.wordpress_installed == "yes", errors=errors,
                       themes_dir=args.themes_dir, plugins_dir=args.plugins_dir,
                       scripts_dir=args.scripts_dir or "", log=manager.log_func)

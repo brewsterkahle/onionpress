@@ -24,6 +24,10 @@
 - Launcher `app/MacOS/onionpress` (Mac) and `linux/onionpress` (Linux);
   Docker containers (tor, wordpress, mariadb, onionheaven…) run inside a
   Colima VM on macOS.
+- **A function that differs by platform takes `os_name`** (`"macos"` /
+  `"linux"`, `detect_os().value`; read as `OS(os_name)`, so any other name
+  raises), never a `mac=` or `linux=` flag. `TestPlatformName` in
+  `tests/test_first_run_key_seed.py` (a census).
 - Logs in `~/.onionpress/` (`logs/`, `onionpress.log`, `launcher.log`);
   user-visible content in `~/OnionPress/` (backups, Creations).
 

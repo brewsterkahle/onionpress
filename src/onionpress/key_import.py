@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from . import config, confirm as _confirm, key_manager, onion_hostname
 from .containers import IMPORT_KEY_PENDING, forget_key_volume_migration
 from .onionheaven import _RETRYABLE
+from .platform import OS
 
 STAGING_PREFIX = ".key-import-"
 # Every place a key lives: the volume, and the two it replaced.
@@ -146,11 +147,12 @@ def _error_line(text):
 
 
 def replace_key(key_b32, *, data_dir, docker, containers, log, release,
-                hub_held_ok, linux, stdout=None):
+                hub_held_ok, os_name: str, stdout=None):
     """Replace this site's key (steps 3-5 above, with the check and
     staging first). *release*(reason) asks the hubs and returns what may
     remain on one; *hub_held_ok*(remaining) says whether to go on with a
     hub still holding a key (the user's answer). Returns a Replacement."""
+    linux = OS(os_name) is OS.LINUX
     shared = os.path.join(data_dir, "shared")
     os.makedirs(shared, exist_ok=True)
     try:
@@ -268,13 +270,14 @@ def _log_file(data_dir):
     return os.path.join(data_dir, "onionpress.log")
 
 
-def run(args, *, paths, docker, containers, log, release, linux,
+def run(args, *, paths, docker, containers, log, release, os_name: str,
         interactive=None, environ=None, out=None, err=None, stdin=None):
     """The subcommand. *args* has key (base32, "-" for stdin, or None), file,
     check, json and confirmed (onionpress.confirm.add_arguments).
 
     Exit 0 done / nothing to do, 1 failed or cancelled, 3 refused for want
     of a confirmation, 4 --check found a question (confirm protocol)."""
+    linux = OS(os_name) is OS.LINUX
     out = out or sys.stdout
     err = err or sys.stderr
     environ = os.environ if environ is None else environ
@@ -361,7 +364,7 @@ def run(args, *, paths, docker, containers, log, release, linux,
 
     result = replace_key(key_b32, data_dir=data_dir, docker=docker,
                          containers=containers, log=log, release=release,
-                         hub_held_ok=hub_held_ok, linux=linux)
+                         hub_held_ok=hub_held_ok, os_name=os_name)
     if result.status == "unchanged":
         print(f"Key already installed for: {address}", file=out)
         print("Nothing to do.", file=out)

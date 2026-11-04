@@ -140,7 +140,8 @@ class TestStartCoreStep(Base):
         with mock.patch.object(start, "wordpress_answers", return_value=answers) as wait, \
              mock.patch.object(start, "egress_step",
                                side_effect=lambda *a, **k: docker.order.append("egress")):
-            got = start.start_core(m, mac=mac, wp_port=18080, errors=errors)
+            got = start.start_core(m, os_name="macos" if mac else "linux", wp_port=18080,
+                                   errors=errors)
         return got, wait, errors
 
     def pulls(self, docker):

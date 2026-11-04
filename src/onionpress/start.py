@@ -27,6 +27,7 @@ import shutil
 import subprocess
 
 from .docker import DockerError
+from .platform import OS
 
 ERROR_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
@@ -267,10 +268,11 @@ def _onion_address_line(key_dir: str) -> str:
 
 
 class KeySeed:
-    """The first run's key, as each launcher's start did it. *mac* picks
-    the platform's flow; *bin_dir* is where the Mac's mkp224o is."""
+    """The first run's key, as each launcher's start did it. *os_name*
+    ("macos" or "linux") picks the platform's flow; *bin_dir* is where the Mac's mkp224o is."""
 
-    def __init__(self, manager, *, mac: bool, bin_dir: str = "", log=None):
+    def __init__(self, manager, *, os_name: str, bin_dir: str = "", log=None):
+        mac = OS(os_name) is OS.MACOS
         self.manager = manager
         self.paths = manager.paths
         self.docker = manager.docker
@@ -473,7 +475,7 @@ def wordpress_answers(port: int) -> bool:
         return False
 
 
-def start_core(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
+def start_core(manager, *, os_name: str, wp_port: int, errors: StartErrors | None,
                log=None) -> tuple[bool, bool]:
     """The middle of the launchers' start: the images compose is about to
     start, pulled when missing only (never for a locally built stack),
@@ -482,6 +484,7 @@ def start_core(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
     port for up to 60 s and `wp core is-installed` 15 times 2 s apart (a
     cold MariaDB reads as "not installed" until it answers).
     (started, WordPress installed); not started stops the start."""
+    mac = OS(os_name) is OS.MACOS
     import time
     from .config import read_value
     from .containers import using_local_images
@@ -688,7 +691,7 @@ def warn_if_socks_port_exposed(manager, log) -> None:
             "OnionPress .deb to replace it.")
 
 
-def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
+def post_up(manager, *, os_name: str, installed: bool, errors: StartErrors | None,
             themes_dir: str, plugins_dir: str, scripts_dir: str, log=None) -> None:
     """Everything after the core services are up, in the launchers' order:
     the Mac's .htaccess repair, Tor (`tor` in the START SUMMARY when it
@@ -704,6 +707,7 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     tunnel (start_cloudflare_tunnel, one bash function held identical in
     the two launchers, last in a start) stay in the launcher, around this
     step."""
+    mac = OS(os_name) is OS.MACOS
     from . import bundled_plugins, derivatives, multisite
     from .wp_files import put_file_args
     log = log or manager._log
@@ -837,7 +841,7 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
 STOP, INSTALLED, NOT_INSTALLED = 1, 0, 3
 
 
-def start_containers(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
+def start_containers(manager, *, os_name: str, wp_port: int, errors: StartErrors | None,
                      bin_dir: str = "", scripts_dir: str = "", themes_dir: str = "",
                      plugins_dir: str = "", until_core: bool = False, log=None) -> int:
     """Both launchers' start once Docker answers, in their order: a key
@@ -849,6 +853,7 @@ def start_containers(manager, *, mac: bool, wp_port: int, errors: StartErrors | 
     after the core services: Linux runs its install-state steps (which
     name WordPress's published address, issue #464) in the launcher and
     then `start-post-up`."""
+    mac = OS(os_name) is OS.MACOS
     log = log or manager._log
     if not manager.apply_pending_key_import():
         return STOP
@@ -857,14 +862,15 @@ def start_containers(manager, *, mac: bool, wp_port: int, errors: StartErrors | 
     if not manager.migrate_key_volume():
         log("ERROR: cannot start without the onion service key volume")
         return STOP
-    if not KeySeed(manager, mac=mac, bin_dir=bin_dir, log=log).run():
+    if not KeySeed(manager, os_name=os_name, bin_dir=bin_dir, log=log).run():
         return STOP
-    ok, installed = start_core(manager, mac=mac, wp_port=wp_port, errors=errors, log=log)
+    ok, installed = start_core(manager, os_name=os_name, wp_port=wp_port, errors=errors, log=log)
     if not ok:
         return STOP
     if not until_core:
-        post_up(manager, mac=mac, installed=installed, errors=errors, themes_dir=themes_dir,
-                plugins_dir=plugins_dir, scripts_dir=scripts_dir, log=log)
+        post_up(manager, os_name=os_name, installed=installed, errors=errors,
+                themes_dir=themes_dir, plugins_dir=plugins_dir, scripts_dir=scripts_dir,
+                log=log)
     return INSTALLED if installed else NOT_INSTALLED
 
 

@@ -280,7 +280,7 @@ class ReplaceKeyBase(unittest.TestCase):
                 key, data_dir=inst.data, docker=_FakeDocker(inst),
                 containers=_FakeContainers(inst), log=logged.append,
                 release=release, hub_held_ok=kw.pop("hub_held_ok", lambda remaining: not remaining),
-                linux=False, **kw)
+                os_name="macos", **kw)
         return result
 
     def assert_untouched(self, inst, vanity_before):
@@ -451,7 +451,7 @@ class TestReplaceKey(ReplaceKeyBase):
                         b32(NEW), data_dir=inst.data, docker=_FakeDocker(inst),
                         containers=_FakeContainers(inst), log=lambda m: None,
                         release=lambda reason: events.append("release") or answer,
-                        hub_held_ok=lambda remaining: not remaining, linux=True)
+                        hub_held_ok=lambda remaining: not remaining, os_name="linux")
                 self.assertEqual(events, ["release"])
         self.assertNotIn("heartbeat_unit", open(os.path.join(
             PROJECT_DIR, "src", "onionpress", "key_import.py"), encoding="utf-8").read())
@@ -495,7 +495,7 @@ class TestRun(ReplaceKeyBase):
     on stdin ("-"), so a question cannot be asked of a terminal there."""
 
     def _run(self, inst, args, *, interactive=False, answers="", environ=None,
-             release_why=None, linux=False):
+             release_why=None, os_name="macos"):
         out, err = io.StringIO(), io.StringIO()
 
         def release(reason):
@@ -509,7 +509,7 @@ class TestRun(ReplaceKeyBase):
             rc = key_import.run(
                 args, paths=paths, docker=_FakeDocker(inst),
                 containers=_FakeContainers(inst), log=lambda m: None,
-                release=release, linux=linux, interactive=interactive,
+                release=release, os_name=os_name, interactive=interactive,
                 environ=env, out=out, err=err, stdin=io.StringIO(answers))
         return rc, out.getvalue(), err.getvalue()
 
@@ -560,7 +560,7 @@ class TestRun(ReplaceKeyBase):
             with self.subTest(answer=answer):
                 inst = _Install(self, vanity=OLD)
                 rc, out, err = self._run(inst, _Args(b32(NEW)), interactive=True,
-                                         answers=answer, linux=True)
+                                         answers=answer, os_name="linux")
                 self.assertIn("Continue? [y/N] ", out)
                 self.assertEqual(rc, 0 if replaced else 1, out + err)
                 self.assertEqual(inst.pending(), replaced)
@@ -662,7 +662,8 @@ class TestRun(ReplaceKeyBase):
 
     def test_linux_words_its_ending(self):
         inst = _Install(self, vanity=OLD)
-        rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]), linux=True)
+        rc, out, err = self._run(inst, _Args(b32(NEW), confirmed=["address-change"]),
+                                 os_name="linux")
         self.assertEqual(rc, 0)
         self.assertIn("Run 'onionpress restart'", out)
 
