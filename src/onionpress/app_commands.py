@@ -36,6 +36,11 @@ ADDRESS_CACHE = "onion_address"
 # daemon.ONIONNAME_RETRY_MARKER (a test keeps them equal): what the Mac
 # daemon takes on its next tick.
 ONIONNAME_RETRY_MARKER = ".onionname-retry"
+# Said when an onionname is recorded but not registered because
+# OnionHeaven (or OnionHome) is off on this install.
+ONIONNAME_OFF_NOTE = ("Not registered with OnionHome: onionnames are registered only while "
+                      "OnionHeaven is on (REGISTER_WITH_ONIONHEAVEN), and it is off on "
+                      "this install.")
 
 # The daemon's web log capture skips the app's own probes the same way.
 HEALTHCHECK_LOG_MARK = "OnionPress-HealthCheck"
@@ -413,12 +418,14 @@ def register_onionname(name, paths, docker, os_name, log, *, registrar=None,
         return OnionnameOutcome("invalid", name, [], "",
                                 setup_logic.onionname_error_message(reason))
 
-    address = served_address(docker, paths.data_dir) if register else ""
+    from .onionnames_registrar import configured_onionhome
+    onionhome = configured_onionhome(paths.config_file, log) if register else ""
+    address = served_address(docker, paths.data_dir) if onionhome else ""
     result = None
     if address:
         if registrar is None:
             from .onionnames_registrar import Registrar
-            registrar = Registrar(docker, log=log)
+            registrar = Registrar(docker, log=log, onionhome_address=onionhome)
         try:
             result = registrar.register(name, address)
         except Exception as e:  # the registrar reports, never raises; belt and braces
@@ -437,6 +444,11 @@ def register_onionname(name, paths, docker, os_name, log, *, registrar=None,
     if registered:
         log(f"onionname: {name!r} registered for {address}")
         return OnionnameOutcome("registered", name, [], "", "")
+    if register and not onionhome:
+        # OnionHeaven off, or ONIONHOME_ADDRESS empty: no OnionHome, so no
+        # retry either (onionnames_registrar.configured_onionhome).
+        log(f"onionname: {name!r} recorded; not registered: OnionHeaven or OnionHome is off")
+        return OnionnameOutcome("recorded", name, [], ONIONNAME_OFF_NOTE, "")
     if os_name == "macos":
         try:
             with open(os.path.join(paths.data_dir, ONIONNAME_RETRY_MARKER), "w") as f:

@@ -25,6 +25,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 if ( ! defined( 'ONIONPRESS_NAMESYNC_ENDPOINT' ) ) {
     define( 'ONIONPRESS_NAMESYNC_ENDPOINT', 'http://onionpress-tor:8083' );
 }
+// The host's allowlisted config (status_writer), read for the gate below.
+if ( ! defined( 'ONIONPRESS_NAMESYNC_CONFIG' ) ) {
+    define( 'ONIONPRESS_NAMESYNC_CONFIG', '/var/lib/onionpress/config-current.json' );
+}
 
 /**
  * Log through WP's error_log so the entry lands in docker logs alongside
@@ -32,6 +36,30 @@ if ( ! defined( 'ONIONPRESS_NAMESYNC_ENDPOINT' ) ) {
  */
 function onionpress_namesync_log( $message ) {
     error_log( '[onionpress-name-sync] ' . $message );
+}
+
+/**
+ * Whether onionnames may be registered: only while OnionHeaven is on
+ * (REGISTER_WITH_ONIONHEAVEN as onionheaven.registration_choice reads it:
+ * unset or empty is on, a typo is off) and ONIONHOME_ADDRESS is not set
+ * empty, the rule the host's onionnames_registrar.configured_onionhome
+ * applies to setup and the daemon. Read from the host's
+ * config-current.json; unreadable is no (the daily reconcile catches up
+ * once the host has written it).
+ */
+function onionpress_namesync_allowed() {
+    $raw    = @file_get_contents( ONIONPRESS_NAMESYNC_CONFIG );
+    $config = ( false !== $raw ) ? json_decode( $raw, true ) : null;
+    if ( ! is_array( $config ) ) {
+        return false;
+    }
+    if ( array_key_exists( 'ONIONHOME_ADDRESS', $config )
+            && '' === trim( (string) $config['ONIONHOME_ADDRESS'] ) ) {
+        return false;
+    }
+    $choice = isset( $config['REGISTER_WITH_ONIONHEAVEN'] )
+        ? strtolower( trim( (string) $config['REGISTER_WITH_ONIONHEAVEN'] ) ) : '';
+    return in_array( $choice, array( '', 'yes', 'true', '1', 'on' ), true );
 }
 
 /**
@@ -45,6 +73,9 @@ function onionpress_namesync_log( $message ) {
  * SOCKS proxy doesn't know how to reach docker-internal hostnames.
  */
 function onionpress_namesync_call( $action, $onionname, $attempts = 3 ) {
+    if ( 'register' === $action && ! onionpress_namesync_allowed() ) {
+        return false;
+    }
     $url  = ONIONPRESS_NAMESYNC_ENDPOINT . '/api/name/' . $action . '-local';
     $body = wp_json_encode( array( 'onionname' => $onionname ) );
 
@@ -155,6 +186,9 @@ function onionpress_namesync_reconcile_all() {
     // OnionHome registry maps any number of names to one address. Only
     // user logins are registered — subsites without a user (test sites,
     // admin experiments) deliberately stay out of the directory.
+    if ( ! onionpress_namesync_allowed() ) {
+        return;
+    }
     $users = get_users( array( 'blog_id' => 0, 'fields' => array( 'user_login' ) ) );
     $ok    = 0;
     $total = 0;

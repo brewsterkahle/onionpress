@@ -4,10 +4,8 @@ Extracted from menubar.py — builds and runs the native macOS settings form,
 validates input, confirms changes, and writes back to config.
 """
 
-import json
 import os
 import re
-import subprocess
 
 import AppKit
 import rumps
@@ -221,13 +219,14 @@ def _normalize_sleep(val):
     return val
 
 
-def show_settings_dialog(config_path, icon_path, launcher_script, log_func, callbacks):
+def show_settings_dialog(config_path, icon_path, launcher, log_func, callbacks):
     """Show the OnionPress settings dialog.
 
     Args:
         config_path: Path to the config file (~/.onionpress/config).
         icon_path: Path to app-icon.png for dialogs.
-        launcher_script: Path to the onionpress launcher script (for OH validation).
+        launcher: The UI's ui_client.Launcher (kept for the dialogs' shared
+            signature; the hub check is the OnionHeaven screen's).
         log_func: Callable for logging messages.
         callbacks: Dict with keys:
             'write_config': func(key, value) -> bool. The menubar's
@@ -416,28 +415,20 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
                 prefix_suggestion or old_values["ADDRESS_PREFIX"])
             continue
 
-        # -- Validate VM memory --
-        try:
-            mem = int(new_values["VM_MEMORY"])
-            if mem < 1:
-                raise ValueError
-        except ValueError:
-            _icon_alert("Invalid VM Memory",
-                   "VM memory must be a whole number of at least 1 GB.", icon_path)
+        # -- Validate VM memory and CPUs: config's own checks (the ones
+        # `config set` applies), so the dialog takes what the CLI takes --
+        vm_problem = None
+        for key, title in (("VM_MEMORY", "Invalid VM Memory"), ("VM_CPU", "Invalid VM CPUs")):
+            new_values[key] = new_values[key].strip()
+            reason = op_config.check_config_value(key, new_values[key])
+            if reason:
+                vm_problem = (key, title, reason)
+                break
+        if vm_problem:
+            key, title, reason = vm_problem
+            _icon_alert(title, reason, icon_path)
             form_values = new_values
-            form_values["VM_MEMORY"] = old_values["VM_MEMORY"]
-            continue
-
-        # -- Validate VM CPUs --
-        try:
-            cpus = int(new_values["VM_CPU"])
-            if cpus < 1:
-                raise ValueError
-        except ValueError:
-            _icon_alert("Invalid VM CPUs",
-                   "VM CPUs must be a whole number of at least 1.", icon_path)
-            form_values = new_values
-            form_values["VM_CPU"] = old_values["VM_CPU"]
+            form_values[key] = old_values[key]
             continue
 
         # Validation passed
@@ -447,25 +438,22 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
                               callbacks, log_func, icon_path)
 
 
-def probe_hub_address(oh_addr, launcher_script, log_func):
+def probe_hub_address(oh_addr, launcher, log_func):
     """Ask the launcher's validate-oh-address whether *oh_addr* answers as
     an OnionHeaven hub: (status, message), status one of "hub",
     "invalid_format", "self", "site", "unreachable", or "error" when the
-    launcher could not be run."""
+    launcher could not be run. *launcher* is the UI's ui_client.Launcher
+    (#557: the menubar runs the launcher through it alone)."""
     try:
-        result = subprocess.run(
-            [launcher_script, "validate-oh-address", oh_addr],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=90
-        )
-        vr = json.loads(result.stdout.strip()) if result.stdout.strip() else {}
+        _, vr, _, _ = launcher.run_json("validate-oh-address", oh_addr, timeout=90)
+        vr = vr or {}
         return vr.get("status", "") or "hub", vr.get("message", "")
     except Exception as e:
         log_func(f"OnionHeaven address validation error: {e}")
         return "error", str(e)
 
 
-def validate_hub_address(oh_addr, launcher_script, log_func, icon_path):
+def validate_hub_address(oh_addr, launcher, log_func, icon_path):
     """The dialogs' check of a new ONIONHEAVEN_ADDRESS: the format here,
     then the launcher's validate-oh-address (does it answer as a hub?).
     True when the value may be saved (validated, the check could not run,
@@ -479,7 +467,7 @@ def validate_hub_address(oh_addr, launcher_script, log_func, icon_path):
                     icon_path)
         return False
     log_func(f"Validating OnionHeaven address: {oh_addr}")
-    status, message = probe_hub_address(oh_addr, launcher_script, log_func)
+    status, message = probe_hub_address(oh_addr, launcher, log_func)
     if status in ("invalid_format", "self"):
         _icon_alert("Invalid OnionHeaven Address", message, icon_path)
         return False

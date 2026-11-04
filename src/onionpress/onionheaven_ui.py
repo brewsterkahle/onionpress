@@ -194,7 +194,7 @@ def _ensure_overview(app, state, log_func):
                 "known_hosts": [dict(h) for h in onionheaven.KNOWN_HOSTS]}, False
 
 
-def show_onionheaven_dialog(app, state, icon_path, launcher_script, log_func, callbacks):
+def show_onionheaven_dialog(app, state, icon_path, launcher, log_func, callbacks):
     """Show the OnionHeaven screen.
 
     Args:
@@ -202,7 +202,7 @@ def show_onionheaven_dialog(app, state, icon_path, launcher_script, log_func, ca
             healthcheck_address): the context for the in-process fallback.
         state: the daemon's state document while fresh, else None.
         icon_path: app-icon.png for dialogs.
-        launcher_script: the onionpress launcher (validate-oh-address).
+        launcher: the UI's ui_client.Launcher (validate-oh-address).
         log_func: logging callable.
         callbacks: {'write_config': func(key, value) -> bool}.
     """
@@ -373,7 +373,7 @@ def show_onionheaven_dialog(app, state, icon_path, launcher_script, log_func, ca
             if not key_manager.is_valid_onion_address(addr):
                 _icon_alert("Check Hub", "Address must be a valid 56-character .onion address.", icon_path)
                 return
-            status, message = probe_hub_address(addr, launcher_script, log_func)
+            status, message = probe_hub_address(addr, launcher, log_func)
             verdict = {"hub": "Answers as an OnionHeaven hub.",
                        "site": "Answers, but not as an OnionHeaven hub.",
                        "unreachable": "Did not answer over Tor.",
@@ -506,7 +506,7 @@ def show_onionheaven_dialog(app, state, icon_path, launcher_script, log_func, ca
             continue
         if (new_values["ONIONHEAVEN_ADDRESS"] != old_values["ONIONHEAVEN_ADDRESS"]
                 and not validate_hub_address(new_values["ONIONHEAVEN_ADDRESS"],
-                                             launcher_script, log_func, icon_path)):
+                                             launcher, log_func, icon_path)):
             form_values = dict(new_values)
             form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
             continue

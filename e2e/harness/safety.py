@@ -37,6 +37,11 @@ BASELINE_CONFIG = {
     # canonical hub. A tier that tests OnionHeaven points it at its own hub.
     "REGISTER_WITH_ONIONHEAVEN": "no",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
+    # Empty: no OnionHome, so analytics sharing uploads nowhere. (With
+    # REGISTER_WITH_ONIONHEAVEN=no above, setup records the onionname
+    # unregistered and nothing registers it: onionnames_registrar.
+    # configured_onionhome, the name-sync plugin's gate.)
+    "ONIONHOME_ADDRESS": "",
     # The Link Fixer submits links in posts to the public Wayback Machine.
     "INSTALL_IA_PLUGIN": "no",
     # A Mac node must not install a login item.

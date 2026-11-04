@@ -284,13 +284,12 @@ class TestOnionnameErrorMessages(unittest.TestCase):
         with open(os.path.join(self.REPO, rel), encoding="utf-8") as f:
             return f.read()
 
-    def test_local_rule_matches_onionnames_client(self):
+    def test_the_rule_is_onionnames_clients(self):
         from onionpress import onionnames_client
-        self.assertEqual(setup_logic._ONIONNAME_MIN_LEN, onionnames_client.MIN_NAME_LEN)
-        self.assertEqual(setup_logic._ONIONNAME_MAX_LEN, onionnames_client.MAX_NAME_LEN)
+        self.assertIs(setup_logic._onc, onionnames_client)
 
     def test_messages_name_the_enforced_limits(self):
-        lo, hi = setup_logic._ONIONNAME_MIN_LEN, setup_logic._ONIONNAME_MAX_LEN
+        lo, hi = setup_logic._onc.MIN_NAME_LEN, setup_logic._onc.MAX_NAME_LEN
         short = "a" * (lo - 1)
         long_ = "a" * (hi + 1)
         self.assertEqual(setup_logic.validate_onionname(short)[1], "too_short")
@@ -316,8 +315,8 @@ class TestOnionnameErrorMessages(unittest.TestCase):
 
     def test_mac_setup_window_names_the_enforced_limits(self):
         src = self._read("src/onionpress/setup_window.py")
-        self.assertIn(f"at least {setup_logic._ONIONNAME_MIN_LEN} characters", src)
-        self.assertIn(f"{setup_logic._ONIONNAME_MAX_LEN} characters or fewer", src)
+        self.assertIn(f"at least {setup_logic._onc.MIN_NAME_LEN} characters", src)
+        self.assertIn(f"{setup_logic._onc.MAX_NAME_LEN} characters or fewer", src)
 
 
 if __name__ == "__main__":

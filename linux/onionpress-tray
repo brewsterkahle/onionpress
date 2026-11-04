@@ -67,6 +67,7 @@ from gi.repository import Gtk, GLib, AyatanaAppIndicator3 as AppIndicator, Notif
 # a tray without it is a broken install, not a degraded mode.
 from onionpress import config as _op_config  # noqa: E402
 from onionpress import daemon_client  # noqa: E402
+from onionpress import redact  # noqa: E402
 from onionpress import setup_logic as _setup_logic  # noqa: E402  (names and titles only)
 from onionpress import ui_client  # noqa: E402
 
@@ -110,25 +111,59 @@ APP_ICON_PATH = os.path.join(INSTALL_DIR, "app-icon.png")
 
 POLL_INTERVAL_SEC = 2
 NOTIFY_DEBOUNCE_SEC = 60
-# status.json's `state` is the daemon's display state (daemon_client):
-# "running", "stopped", or one of these, the containers up but the site
-# not reachable yet (or no longer).
-STARTING_STATES = ("starting", "stuck", "offline")
+# The view's categories (ui_client.status_view) with the containers up but
+# the site not reachable yet (or no longer). "reconnecting" (no fresh
+# state from the daemon) is none of them: nothing is known.
+STARTING_STATES = ("starting", "stuck", "stalled", "offline")
+ICONS = {"running": ICON_RUNNING, "starting": ICON_STARTING, "stopped": ICON_STOPPED}
 
 
 
 # ─── Logging ────────────────────────────────────────────────────────────
 
-os.makedirs(DATA_DIR, exist_ok=True)
+# The menubar's RotatingLog redaction (log_rotation, redact): the home
+# folder is "~" in every line as it is written, and a rolled file is
+# scrubbed (redact.make_scrub_fn: tokens, credentials) before it is kept.
+_HOME = os.path.expanduser("~")
+_scrub_rolled = redact.make_scrub_fn(DATA_DIR, scrub_ips=False)
+
+
+class _HomeAsTilde(logging.Filter):
+    def filter(self, record):
+        if _HOME and _HOME != os.sep:
+            record.msg = record.getMessage().replace(_HOME, "~")
+            record.args = None
+        return True
+
+
+def _rotate_scrubbed(source: str, dest: str) -> None:
+    """RotatingFileHandler's rotator: *source* scrubbed into *dest*
+    (0600). Fail-open as RotatingLog is: a scrubbing bug never costs the
+    log history."""
+    with open(source, "rb") as f:
+        raw = f.read()
+    try:
+        raw = _scrub_rolled(raw)
+    except Exception:
+        pass
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+    os.remove(source)
+
+
+os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
 _log_handler = logging.handlers.RotatingFileHandler(
     TRAY_LOG, maxBytes=5 * 1024 * 1024, backupCount=3
 )
+_log_handler.rotator = _rotate_scrubbed
 _log_handler.setFormatter(logging.Formatter(
     "%(asctime)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 ))
 logger = logging.getLogger("onionpress-tray")
 logger.setLevel(logging.INFO)
+logger.addFilter(_HomeAsTilde())
 logger.addHandler(_log_handler)
 logger.addHandler(logging.StreamHandler())
 
@@ -164,13 +199,16 @@ def _read_status() -> Optional[dict]:
 
 
 class Status:
-    """Owns the latest status snapshot (the daemon's state file's
-    "status"). Polls every POLL_INTERVAL_SEC seconds via GLib so
-    callbacks fire on the GTK main thread.
+    """Owns the latest view of the daemon's state file
+    (ui_client.status_view, as the menubar's: a state older than 90 s or
+    from a dead pid is "reconnecting", never the last thing it said).
+    Polls every POLL_INTERVAL_SEC seconds via GLib so callbacks fire on
+    the GTK main thread.
     """
 
     def __init__(self, on_change):
-        self.state = "unknown"
+        self.view = ui_client.status_view(None, time.time(), daemon_seen=False)
+        self.state = self.view.category
         self.onion_address = ""
         self.wp_installed = False
         self.onboarded = False
@@ -181,28 +219,46 @@ class Status:
         self.containers = {}
         self.wp_port = 8080
         self.raw = {}
+        self._doc = None
+        self._daemon_seen = False
         self._mtime = 0.0
         self._on_change = on_change
         GLib.timeout_add_seconds(POLL_INTERVAL_SEC, self._poll)
 
     def _poll(self) -> bool:
+        # The file is read again only when it changed; the view is
+        # recomputed every tick, so a daemon that stopped writing turns
+        # into "reconnecting".
         try:
             mtime = os.path.getmtime(STATE_FILE)
         except OSError:
-            return True
-        if mtime == self._mtime:
-            return True
-        self._mtime = mtime
+            mtime = 0.0
+        if mtime != self._mtime:
+            self._mtime = mtime
+            self._doc = daemon_client.read_state(DATA_DIR) if mtime else None
 
-        data = _read_status()
-        if data is None:
-            log("the daemon's state file holds no status")
-            return True
-
-        old = (self.state, self.wp_installed, self.onboarded,
+        old = (self.view, self.wp_installed, self.onboarded,
                self.onion_address, self.serving_from_wayback)
+        now = time.time()
+        self.view = ui_client.status_view(self._doc, now, daemon_seen=self._daemon_seen)
+        self.state = self.view.category
+        if daemon_client.state_is_fresh(self._doc, now):
+            self._daemon_seen = True
+            data = self._doc.get("status")
+            if isinstance(data, dict):
+                self._take(data)
+        new = (self.view, self.wp_installed, self.onboarded,
+               self.onion_address, self.serving_from_wayback)
+
+        if old != new:
+            try:
+                self._on_change(old[0].category, new[0].category)
+            except Exception as e:
+                log(f"on_change handler raised: {e}")
+        return True
+
+    def _take(self, data: dict) -> None:
         self.raw = data
-        self.state = data.get("state", "unknown")
         self.onion_address = data.get("onion_address", "") or ""
         self.wp_installed = bool(data.get("wp_installed"))
         self.onboarded = bool(data.get("onboarded"))
@@ -218,15 +274,6 @@ class Status:
             self.wp_port = int(data.get("wp_port", 8080))
         except (TypeError, ValueError):
             self.wp_port = 8080
-        new = (self.state, self.wp_installed, self.onboarded,
-               self.onion_address, self.serving_from_wayback)
-
-        if old != new:
-            try:
-                self._on_change(old, new)
-            except Exception as e:
-                log(f"on_change handler raised: {e}")
-        return True
 
 
 # ─── 3. The launcher client ─────────────────────────────────────────────
@@ -1300,6 +1347,8 @@ class OnionPressTray:
         self.indicator.set_menu(self.menu)
 
         self.status = Status(on_change=self._on_status_change)
+        self._update_icon()
+        self._update_status_line()
 
         self._announced_starting = False
         self._announced_online = False
@@ -1319,22 +1368,22 @@ class OnionPressTray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        self._item("Copy Onion Address", self._on_copy_address)
+        self.menu_copy_address = self._item("Copy Onion Address", self._on_copy_address)
         self.menu_open_local = self._item("Open Local Site", self._on_open_local)
-        self._item("Open in Tor Browser", self._on_open_onion)
+        self.menu_open_onion = self._item("Open in Tor Browser", self._on_open_onion)
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        self._item("Start", lambda *_: Launcher.run_async("start"))
-        self._item("Stop", lambda *_: Launcher.run_async("stop"))
-        self._item("Restart", lambda *_: Launcher.run_async("restart"))
+        self.menu_start = self._item("Start", lambda *_: Launcher.run_async("start"))
+        self.menu_stop = self._item("Stop", lambda *_: Launcher.run_async("stop"))
+        self.menu_restart = self._item("Restart", lambda *_: Launcher.run_async("restart"))
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("View Logs", lambda *_: show_log_viewer())
         self._item("Settings…", self._on_open_settings)
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        self._item("Backup…", lambda *_: show_backup_dialog())
-        self._item("Restore…", lambda *_: show_restore_dialog())
+        self.menu_backup = self._item("Backup…", lambda *_: show_backup_dialog())
+        self.menu_restore = self._item("Restore…", lambda *_: show_restore_dialog())
         self.menu.append(Gtk.SeparatorMenuItem())
 
         self._item("Check for Updates…", self._on_check_updates)
@@ -1360,45 +1409,27 @@ class OnionPressTray:
         self._maybe_show_setup()
 
     def _update_icon(self):
-        state = self.status.state
-        if state == "running" and not self.status.serving_from_wayback:
-            self.indicator.set_icon_full(ICON_RUNNING, "OnionPress running")
-        elif state in STARTING_STATES:
-            self.indicator.set_icon_full(ICON_STARTING, "OnionPress starting")
-        else:
-            self.indicator.set_icon_full(ICON_STOPPED, "OnionPress stopped")
+        view = self.status.view
+        self.indicator.set_icon_full(ICONS.get(view.icon, ICON_STOPPED), view.title)
         # Trigger a redraw — some shells (Ubuntu Wayland) cache the previous
         # IconName and only refresh when properties change. Calling
         # set_status() with the same value forces a NewIcon signal.
         self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
 
     def _update_status_line(self):
-        if self.status.serving_from_wayback:
-            label = "Site offline — visitors see Wayback"
-        elif self.status.state == "running":
-            if self.status.onion_address:
-                # Truncate the 56-char .onion so it doesn't stretch the
-                # menu. Full address is available via "Copy Onion Address".
-                label = f"● {ui_client.short_onion(self.status.onion_address)}"
-            else:
-                label = "● OnionPress is running"
-        elif self.status.state in STARTING_STATES:
-            if self.status.bootstrap_pct and self.status.bootstrap_pct < 100:
-                label = f"Starting… (Tor {self.status.bootstrap_pct}%)"
-            elif not self.status.wp_installed:
-                # Containers are up but WP hasn't been configured yet —
-                # the new architecture defers wp core install to the
-                # SetupDialog, so this state is the "click Setup" cue.
-                label = "Setup required — click Setup to finish installing"
-            else:
-                label = "Starting…"
-        else:
-            label = "OnionPress stopped"
-        self.menu_status.set_label(label)
+        """The view's title and the actions it enables (the menubar's)."""
+        view = self.status.view
+        self.menu_status.set_label(view.title)
+        for item, action in ((self.menu_start, "start"), (self.menu_stop, "stop"),
+                             (self.menu_restart, "restart"), (self.menu_backup, "backup"),
+                             (self.menu_restore, "restore"), (self.menu_open_onion, "open_onion"),
+                             (self.menu_open_local, "open_local")):
+            item.set_sensitive(action in view.actions)
+        self.menu_copy_address.set_sensitive(bool(self.status.onion_address))
 
     def _maybe_announce(self):
         if not self._announced_starting and (
-                self.status.state == "running" or self.status.state in STARTING_STATES):
+                self.status.state == "available" or self.status.state in STARTING_STATES):
             if not self.status.wp_installed:
                 self._announced_starting = True
                 if is_raspberry_pi():
@@ -1411,7 +1442,7 @@ class OnionPressTray:
 
         marker = os.path.join(DATA_DIR, ".first-online-notified")
         if (not self._announced_online
-                and self.status.state == "running"
+                and self.status.state == "available"
                 and self.status.onion_address
                 and not os.path.exists(marker)):
             self._announced_online = True
@@ -1440,7 +1471,7 @@ class OnionPressTray:
         # installed. SetupDialog's _provision branches on wp_installed
         # to either `onionpress setup` (new path) or `onionpress
         # provision` (legacy auto-bootstrap path).
-        if self.status.state != "running" and self.status.state not in STARTING_STATES:
+        if self.status.state != "available" and self.status.state not in STARTING_STATES:
             return
         self._setup_shown = True
         self._show_setup_dialog()

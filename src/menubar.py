@@ -101,6 +101,8 @@ class _MacBackupUI(ui_client.BackupUI):
         user_field = AppKit.NSTextField.alloc().initWithFrame_(
             AppKit.NSMakeRect(85, 44, 210, 24))
         user_field.setStringValue_(default_user or "")
+        # Empty: the CLI finds the site's admin (backup.find_admin_username).
+        user_field.setPlaceholderString_("the site's administrator")
         container.addSubview_(user_field)
         pass_label = AppKit.NSTextField.labelWithString_("Password:")
         pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
@@ -118,9 +120,9 @@ class _MacBackupUI(ui_client.BackupUI):
             return None
         username = user_field.stringValue().strip()
         password = pass_field.stringValue()
-        if not username or not password:
+        if not password:
             rumps.alert(title="Missing Credentials",
-                        message="Both username and password are required.")
+                        message="The password is required.")
             return None
         return username, password
 
@@ -388,6 +390,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         # written one, the environment's offset or the last state's.
         self.state = {}
         self._state_fresh = False
+        self._state_doc = None             # the last read of the daemon's state, fresh or not
         self._daemon_seen = False
         self._daemon_missing_since = None
         self._daemon_start_attempted_at = 0.0
@@ -554,17 +557,23 @@ class OnionPressApp(PortAttributes, rumps.App):
         self.ports = pc
         os.environ.update(port_environ(pc))
 
+    def status_view(self):
+        """The menu's view of the daemon's last state
+        (ui_client.status_view: "reconnecting" when there is no fresh
+        state, the daemon starting, restarting under launchd's KeepAlive,
+        or gone)."""
+        return ui_client.status_view(
+            self._state_doc, time.time(), daemon_seen=self._daemon_seen,
+            start_failed=self._start_failed_rc is not None,
+            onionname=self.read_config_value("ONIONNAME", ""))
+
     @property
     def display_state(self):
         """'stopped', 'available', 'offline', 'stalled', 'stuck',
-        'starting' from the daemon's state, or 'reconnecting' when there
-        is no fresh state (the daemon is starting, restarting under
-        launchd's KeepAlive, or gone)."""
+        'starting' or 'reconnecting': the view's category."""
         if self._quitting:
             return "stopped"
-        if not self._state_fresh:
-            return "reconnecting"
-        return op_daemon.display_state_of(self.state, time.time())
+        return self.status_view().category
 
     def start_view_loop(self):
         """Background thread: the daemon's state file every
@@ -590,6 +599,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             self.handle_reopen()
 
         state = op_daemon.read_state(self.app_support)
+        self._state_doc = state
         fresh = op_daemon.state_is_fresh(state, now)
         was_fresh = self._state_fresh
         self._state_fresh = fresh
@@ -1555,6 +1565,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         """The backup dialog's default login: the onionname, else blank
         (`onionpress backup --check` finds the administrator itself)."""
         return self.read_config_value("ONIONNAME", "").strip()
+
     def _prompt_onionname_collision(self, current_name, suggestions):
         """Modal alert — returns chosen new name or None if canceled.
 
@@ -1936,7 +1947,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         show_settings_dialog(
             config_path=self.config_file,
             icon_path=icon_path,
-            launcher_script=self.launcher_script,
+            launcher=self.launcher,
             log_func=self.log,
             callbacks={'write_config': self.write_config_value},
         )
@@ -1965,7 +1976,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             app=self,
             state=self.state if self._state_fresh else None,
             icon_path=icon_path,
-            launcher_script=self.launcher_script,
+            launcher=self.launcher,
             log_func=self.log,
             callbacks={'write_config': self.write_config_value},
         )
@@ -2592,12 +2603,13 @@ class OnionPressApp(PortAttributes, rumps.App):
             self.start_service(None)
 
     def update_menu(self):
-        """Repaint the menu from the daemon's state (display_state)."""
+        """Repaint the menu from the daemon's state (ui_client.status_view)."""
         def do_update():
-            state = self.display_state
+            view = self.status_view()
 
             # Show/hide clearnet status based on tunnel config and state
-            show_clearnet = (state == "available" and self.cloudflare_tunnel_enabled)
+            show_clearnet = (not self._quitting and view.category == "available"
+                             and self.cloudflare_tunnel_enabled)
             if show_clearnet:
                 self.clearnet_status_item.title = "Clearnet: Active (via Cloudflare)"
                 self.clearnet_status_item.set_callback(None)
@@ -2610,78 +2622,28 @@ class OnionPressApp(PortAttributes, rumps.App):
             if self._quitting:
                 return  # Don't update icon/menu during shutdown
 
-            if state == "available":
-                self.icon = self.icon_running
-                onionname = self.read_config_value("ONIONNAME", "").strip()
-                short = ui_client.short_onion(self.onion_address)
-                if onionname:
-                    self.menu["Starting..."].title = f"{onionname}@{short}"
-                else:
-                    self.menu["Starting..."].title = f"Address: {short}"
-                self.menu["Start"].set_callback(None)
-                self.menu["Stop"].set_callback(self.stop_service)
-                self.menu["Restart"].set_callback(self.restart_service)
-                self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(self.restore)
-                self.update_browser_menu_title()
+            self.icon = {"running": self.icon_running,
+                         "starting": self.icon_starting}.get(view.icon, self.icon_stopped)
+            self.menu["Starting..."].title = view.title
+            for key, action, callback in (("Start", "start", self.start_service),
+                                          ("Stop", "stop", self.stop_service),
+                                          ("Restart", "restart", self.restart_service),
+                                          ("Backup...", "backup", self.backup),
+                                          ("Restore...", "restore", self.restore)):
+                self.menu[key].set_callback(callback if action in view.actions else None)
+            if "open_onion" in view.actions:
                 # Purple: browser opens .onion, local site available as secondary
+                self.update_browser_menu_title()
                 self.browser_menu_item.set_callback(self.open_tor_browser)
                 self.local_site_item.title = f"Open Local Site ({self.local_url})"
                 self.local_site_item.set_callback(self.open_local_site)
-            elif state in ("starting", "offline", "stuck", "stalled", "reconnecting"):
-                if state == "starting":
-                    self.icon = self.icon_starting
-                    pct = self._last_bootstrap_pct
-                    if pct > 0:
-                        self.menu["Starting..."].title = f"Status: Connecting to Tor ({pct}%)..."
-                    else:
-                        self.menu["Starting..."].title = "Status: Starting up, please wait..."
-                elif state == "reconnecting":
-                    # No fresh state from the daemon: it is starting, or
-                    # launchd is restarting it. Never "Stopped": the site
-                    # is most likely still up.
-                    self.icon = self.icon_starting
-                    if self._daemon_seen:
-                        self.menu["Starting..."].title = "Status: Reconnecting to the OnionPress service..."
-                    else:
-                        self.menu["Starting..."].title = "Status: Starting up, please wait..."
-                elif state == "offline":
-                    self.icon = self.icon_stopped
-                    self.menu["Starting..."].title = "Status: Offline — no internet connection"
-                elif state == "stalled":
-                    self.icon = self.icon_starting
-                    self.menu["Starting..."].title = "Status: Health check stalled (system busy)"
-                else:  # stuck
-                    self.icon = self.icon_starting
-                    # Not "try Restart": the app is already retrying (tor
-                    # restart on a stalled bootstrap, descriptor republish
-                    # on a wedge), and a restart throws that away (#321).
-                    self.menu["Starting..."].title = "Status: Slow to connect — still trying..."
-                self.menu["Start"].set_callback(self.start_service if state == "reconnecting" else None)
-                self.menu["Stop"].set_callback(self.stop_service)
-                self.menu["Restart"].set_callback(self.restart_service)
-                self.menu["Backup..."].set_callback(self.backup)
-                self.menu["Restore..."].set_callback(None)
+            elif "open_local" in view.actions:
                 # Gray/Yellow: browser opens local site since .onion isn't reachable
                 self.browser_menu_item.title = f"Open Local Site ({self.local_url})"
                 self.browser_menu_item.set_callback(self.open_local_site)
                 self.local_site_item.title = ""
                 self.local_site_item.set_callback(None)
             else:
-                # Stopped
-                self.icon = self.icon_stopped
-                if self._start_failed_rc is not None:
-                    self.menu["Starting..."].title = "Status: Start failed — see View Logs"
-                elif self.onion_address and self.onion_address.endswith('.onion'):
-                    self.menu["Starting..."].title = f"Stopped — {ui_client.short_onion(self.onion_address)}"
-                else:
-                    self.menu["Starting..."].title = "Status: Stopped"
-                self.menu["Start"].set_callback(self.start_service)
-                self.menu["Stop"].set_callback(None)
-                self.menu["Restart"].set_callback(None)
-                self.menu["Backup..."].set_callback(None)
-                self.menu["Restore..."].set_callback(None)
-                # Stopped: disable browser items
                 self.browser_menu_item.set_callback(None)
                 self.local_site_item.title = ""
                 self.local_site_item.set_callback(None)

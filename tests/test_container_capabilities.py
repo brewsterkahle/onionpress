@@ -136,9 +136,8 @@ WORKER_SITES = {
     ("src/onionpress/containers.py", "start_farm_worker"),
 }
 
-# The image each run names. The launchers' helpers run KEY_HELPER_IMAGE
-# (the stack's tor image: ONIONPRESS_TOR_IMAGE, else its pin), the macOS
-# takeover worker the compose file's onionheaven reference, and every Python
+# The image each run names. A shell helper runs KEY_HELPER_IMAGE (the
+# launchers had the last ones; TestKeyHelperImage), the macOS takeover worker the compose file's onionheaven reference, and every Python
 # site a variable named `image` (the pinned tor image: launcher_ops's
 # DEFAULT_TOR_IMAGE, ContainerManager.ensure_tor_image, onionheaven_image,
 # and the egress helper's caller; tests elsewhere hold each to that). Never
@@ -518,32 +517,31 @@ class TestDockerRunCensus(unittest.TestCase):
 
 
 class TestKeyHelperImage(unittest.TestCase):
-    """KEY_HELPER_IMAGE, the one image the launchers' helpers run."""
+    """The image the key helpers run: containers.tor_image (the stack's tor
+    image: ONIONPRESS_TOR_IMAGE, else its pin). The launchers' own copy,
+    KEY_HELPER_IMAGE, went with their last bash helper."""
 
     LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 
     def test_it_is_the_stack_tor_image(self):
-        """ONIONPRESS_TOR_IMAGE (a locally built stack), else exactly the
-        tor pin build/image-pins.env holds, in the `${...:-...}` form
-        build/refresh-image-digests.sh rewrites."""
+        """Exactly the tor pin build/image-pins.env holds, unless
+        ONIONPRESS_TOR_IMAGE names a locally built one."""
+        from onionpress import containers
         pins = dict(line.split("=", 1) for line in _read("build/image-pins.env").splitlines()
                     if line and not line.startswith("#") and "=" in line)
-        for rel in self.LAUNCHERS:
-            with self.subTest(launcher=rel):
-                lines = [l for l in _read(rel).splitlines()
-                         if l.startswith("KEY_HELPER_IMAGE=")]
-                self.assertEqual(lines, [
-                    'KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-'
-                    + pins["ONIONPRESS_TOR_IMAGE"].strip() + '}"'])
+        self.assertEqual(containers.ONIONHEAVEN_IMAGE_PIN, pins["ONIONPRESS_TOR_IMAGE"].strip())
+        with mock.patch.object(containers, "image_override", return_value=None):
+            self.assertEqual(containers.tor_image(), containers.ONIONHEAVEN_IMAGE_PIN)
 
-    def test_it_is_set_after_the_config_is_read(self):
-        """The launchers read ONIONPRESS_TOR_IMAGE from ~/.onionpress/config
-        into the environment; KEY_HELPER_IMAGE must come after that."""
+    def test_no_launcher_runs_a_helper(self):
+        """No `docker run` and no image of its own in either launcher: a
+        helper there would be a second place to pin and to check."""
         for rel in self.LAUNCHERS:
             text = _read(rel)
             with self.subTest(launcher=rel):
-                self.assertLess(text.index("for _img_var in ONIONPRESS_TOR_IMAGE"),
-                                text.index("\nKEY_HELPER_IMAGE="))
+                self.assertNotIn("KEY_HELPER_IMAGE", text)
+                code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+                self.assertFalse([l for l in code if re.search(r"\bdocker run\b", l)])
 
     def test_no_floating_helper_image_in_shipped_code(self):
         """`alpine` (or busybox) appears in no shipped code: comments aside,

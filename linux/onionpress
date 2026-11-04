@@ -265,14 +265,6 @@ using_local_images() {
     op_py --data-dir "$DATA_DIR" using-local-images
 }
 
-# The image every one-shot helper that handles the onion service key runs
-# from (the key volume migration, the key seeds, the backup's key reads):
-# the stack's own tor image, pinned by digest like the rest, or the locally
-# built one. Never a floating tag such as `alpine`, which a registry or a
-# mirror could swap for an image that reads the key. Each run overrides the
-# entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
-
 # Create default config if it doesn't exist (0600, issue #397: it may hold
 # CLOUDFLARE_TUNNEL_TOKEN).
 if [ ! -f "$DATA_DIR/config" ]; then
@@ -593,26 +585,8 @@ setup_bundled_plugins() {
 # ─── OnionHeaven farm (takeover containers) ─────────────────────────
 #
 # Takeover container lifecycle is now managed by the heartbeat monitor
-# inside the onionheaven container (via docker socket). The shell script
-# only needs to stop containers on shutdown.
-
-stop_onionheaven_farm() {
-    # Stop all takeover containers, all at once, with a second's grace each:
-    # their onion services are ephemeral (ADD_ONION), and one after another
-    # at Docker's default 10 s a farm of any size outlasted a stop.
-    local container pids=""
-    for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-(poll|takeover)-[0-9]+$'); do
-        {
-            docker stop -t 1 "$container" >> "$LOG_FILE" 2>&1 || true
-            docker rm "$container" >> "$LOG_FILE" 2>&1 || true
-            log "OnionHeaven farm: stopped $container"
-        } &
-        pids="$pids $!"
-    done
-    if [ -n "$pids" ]; then
-        wait $pids || true
-    fi
-}
+# inside the onionheaven container (via docker socket); the stop's
+# `stop-containers` stops them on shutdown.
 
 # Clean stress-test entries and refresh takeover workers with current code.
 # reset_onionheaven() drives Docker through the farm controller, which only
@@ -788,28 +762,15 @@ start_cloudflare_tunnel() {
     fi
 }
 
+# The stop is onionpress.cli's `stop-containers` (ContainerManager.stop,
+# both platforms): the OnionHeaven farm's takeover workers first, then
+# compose down, always with the Cloudflare override file, so a tunnel whose
+# token was just removed goes down with the rest. The status is the
+# stop's, not tee's: `stop` and `quit` report a failed stop
+# (tests/test_launcher_dispatch_linux.py).
 stop_containers() {
-    log "Stopping OnionPress containers..."
-    stop_onionheaven_farm
-    # Capture the offset BEFORE compose-down so the next start can wait
-    # for the TIME_WAIT sockets to clear and reuse the same offset.
-    # Without this the next start sees the post-down TIME_WAIT sockets
-    # as "taken" and bumps to a higher offset, leaving the user on a
-    # different port number across restarts. Best-effort.
-    echo "${ONIONPRESS_PORT_OFFSET:-0}" > "$DATA_DIR/.previous-port-offset" 2>/dev/null || true
-    cd "$DOCKER_DIR"
-    # The status is compose's, not tee's or log's: `stop` reports a failed
-    # stop (tests/test_launcher_dispatch_linux.py).
-    local down_out down_rc=0
-    down_out=$(docker compose "${COMPOSE_WITH_CF[@]}" down 2>&1) || down_rc=$?
-    [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
-    if [ "$down_rc" -ne 0 ]; then
-        log "ERROR: stopping the containers failed (compose down exited $down_rc)"
-        return "$down_rc"
-    fi
-    log "Containers stopped"
-    # The daemon's next pass (within 10 s) writes the stopped status the
-    # tray and the pages read.
+    op_py --data-dir "$DATA_DIR" stop-containers 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
 }
 
 # ─── Status queries ──────────────────────────────────────────────────

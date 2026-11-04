@@ -55,8 +55,6 @@ PINS_FILE = "build/image-pins.env"
 CONSUMERS = (
     "app/Resources/docker/docker-compose.yml",
     "app/Resources/docker/docker-compose.cloudflare.yml",
-    "app/MacOS/onionpress",
-    "linux/onionpress",
     "src/onionpress/containers.py",
     "src/onionpress/launcher_ops.py",
 )
@@ -231,19 +229,20 @@ class TestConsumersMatchPins(unittest.TestCase):
             + ". Fix with: build/refresh-image-digests.sh --propagate",
         )
 
-    def test_both_launchers_pin_the_same_images(self):
+    def test_the_launchers_name_no_image(self):
         """The macOS launcher pulled bare `:latest` while the Linux launcher
         pinned by digest, so the two platforms warmed different layers from
-        the same release. Both pin the one image they name themselves, the
-        key helpers' tor image (KEY_HELPER_IMAGE); keep it that way.
+        the same release. The one image they named themselves, the key
+        helpers' tor image (KEY_HELPER_IMAGE), went with the last helper
+        that ran in bash: every helper is Python's now
+        (containers.tor_image), so a launcher holds no pin to drift.
         """
-        for path in ("app/MacOS/onionpress", "linux/onionpress"):
+        for path in LAUNCHERS:
             text = _read(path)
             with self.subTest(path=path):
-                self.assertIn(
-                    f'KEY_HELPER_IMAGE="${{ONIONPRESS_TOR_IMAGE:-{self.tor}}}"', text,
-                    f"{path} must run the pinned tor image, not a bare tag.",
-                )
+                self.assertNotIn("KEY_HELPER_IMAGE", text)
+                self.assertNotRegex(text, r"@sha256:[a-f0-9]{64}")
+                self.assertNotIn(TOR_REPO, text)
 
     def test_third_party_images_are_pinned_everywhere_they_appear(self):
         """mariadb, autoheal, cloudflared and the socket proxy floated on
@@ -499,13 +498,6 @@ class TestLocalImageOverride(unittest.TestCase):
             "ONIONHEAVEN_IMAGE -> ONIONPRESS_TOR_IMAGE -> pin, so a local "
             "build replaces it too.",
         )
-
-    def test_launchers_honour_overrides(self):
-        for path in ("app/MacOS/onionpress", "linux/onionpress"):
-            text = _read(path)
-            with self.subTest(path=path):
-                # The key helpers' image; the WordPress image is compose's.
-                self.assertIn("${ONIONPRESS_TOR_IMAGE:-", text)
 
     def test_python_modules_honour_overrides(self):
         """Checked as source text rather than by importing and mutating
