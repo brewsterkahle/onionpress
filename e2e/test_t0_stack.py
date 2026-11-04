@@ -179,7 +179,7 @@ def test_no_public_service_contact(node):
     if record.strip():
         data = json.loads(record)
         assert not data.get("registered"), f"registration record says registered: {data}"
-    # OnionHome is off (ONIONHOME_ADDRESS empty): the setup's onionname is
+    # OnionHeaven is off, so onionnames are too: the setup's onionname is
     # recorded, never registered.
     config = node.config()
     assert config.get("ONIONHOME_ADDRESS") == ""

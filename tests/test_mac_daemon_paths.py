@@ -38,6 +38,7 @@ socket and threads).
 """
 
 import io
+import json
 import os
 import shutil
 import signal
@@ -636,51 +637,60 @@ class TestOnionnameRetry(_PathsCase):
 
     def setUp(self):
         super().setUp()
+        # Onionnames are registered only while OnionHeaven is on; the
+        # harness's config turns it off.
+        self.registering("yes")
         with open(os.path.join(self.dir, "config"), "a") as f:
             f.write("ONIONNAME=mysite\n")
+
+    def registering(self, choice):
+        path = os.path.join(self.dir, "config")
+        with open(path) as f:
+            lines = [ln for ln in f if not ln.startswith("REGISTER_WITH_ONIONHEAVEN=")]
+        with open(path, "w") as f:
+            f.writelines([f"REGISTER_WITH_ONIONHEAVEN={choice}\n"] + lines)
         self.d._read_served_address = lambda: ADDR
         self.d._onionname_retry_in_flight = True
 
-    def retry(self, result=None, raises=None):
-        from onionpress import onionnames_registrar
-        reg = mock.Mock()
-        reg.register.return_value = result
-        if raises:
-            reg.register.side_effect = raises
-        with mock.patch.object(onionnames_registrar, "Registrar", return_value=reg) as R:
-            self.d._retry_pending_onionname()
+    def retry(self, answer=None, rc=0, raises=None):
+        calls = []
+
+        def run_cli(args, timeout=60):
+            calls.append(args)
+            if raises:
+                raise raises
+            return rc, "log line\n" + json.dumps(answer) if answer is not None else ""
+        self.d.run_cli = run_cli
+        self.d._retry_pending_onionname()
         self.assertFalse(self.d._onionname_retry_in_flight)
-        return R, reg
+        return calls
 
-    def config_sets(self):
-        return [c[2:4] for c in self.launcher_calls if c[:2] == ["config", "set"]]
-
-    def test_success_is_saved_through_config_set(self):
-        from onionpress.onionnames_registrar import RegistrarResult
-        R, reg = self.retry(RegistrarResult(status="ok"))
-        from onionpress.onionnames_registrar import DEFAULT_ONIONHOME_ADDRESS
-        R.assert_called_once_with(self.docker, log=self.d.log,
-                                  onionhome_address=DEFAULT_ONIONHOME_ADDRESS)
-        reg.register.assert_called_once_with("mysite", ADDR)
-        self.assertEqual(self.config_sets(), [["ONIONNAME", "mysite"],
-                                              ["ONIONNAME_ADDRESS", ADDR],
-                                              ["ONIONNAME_REGISTERED", "yes"]])
+    def test_the_retry_is_onionname_set(self):
+        """One path (app_commands.onionname_set): the check, the
+        registration and the record are the CLI's."""
+        calls = self.retry({"ok": True, "name": "mysite", "registered": True})
+        self.assertEqual(calls, [["onionname", "set", "mysite", "--json"]])
         self.assertTrue(self.d._onionname_retry_giveup)
         self.assertIsNone(self.state()["onionname_collision"])
 
     def test_a_collision_goes_to_the_menubar(self):
-        from onionpress.onionnames_registrar import RegistrarResult
-        self.retry(RegistrarResult(status="collision", suggestions=["mysite2", "mysite-blog"]))
-        self.assertEqual(self.config_sets(), [])
+        self.retry({"error": "taken", "name": "mysite", "suggestions": ["mysite2", "mysite-blog"]},
+                   rc=2)
         self.assertTrue(self.d._onionname_retry_giveup)
         self.assertEqual(self.state()["onionname_collision"],
                          {"name": "mysite", "suggestions": ["mysite2", "mysite-blog"]})
 
     def test_an_unreachable_registrar_tries_again_later(self):
-        from onionpress.onionnames_registrar import RegistrarResult
-        self.retry(RegistrarResult(status="unreachable"))
+        self.retry({"ok": True, "name": "mysite", "registered": False, "note": "x"})
         self.assertFalse(self.d._onionname_retry_giveup)
-        self.assertTrue(self.saw("retry deferred (unreachable)"))
+        self.assertTrue(self.saw("retry deferred (rc 0)"))
+        self.retry(None, rc=None)
+        self.assertFalse(self.d._onionname_retry_giveup)
+
+    def test_a_refused_name_is_not_retried(self):
+        self.retry({"error": "Too short (min 5 characters)", "name": "abc"}, rc=2)
+        self.assertTrue(self.d._onionname_retry_giveup)
+        self.assertTrue(self.saw("retry refused"))
 
     def test_an_error_is_logged_and_clears_the_flag(self):
         self.retry(raises=RuntimeError("socat died"))
@@ -688,20 +698,24 @@ class TestOnionnameRetry(_PathsCase):
 
     def test_nothing_without_a_name_or_an_address(self):
         self.d._read_served_address = lambda: ""
-        R, _ = self.retry()
-        R.assert_not_called()
+        self.assertEqual(self.retry(), [])
         with open(os.path.join(self.dir, "config"), "w") as f:
             f.write("ONIONNAME=\n")
-        R, _ = self.retry()
-        R.assert_not_called()
+        self.d._read_served_address = lambda: ADDR
+        self.assertEqual(self.retry(), [])
+
+    def test_no_registration_of_its_own(self):
+        src = open(os.path.join(PROJECT_ROOT, "src", "onionpress", "daemon.py"),
+                   encoding="utf-8").read()
+        self.assertNotIn("def _save_onionname", src)
+        self.assertNotIn("Registrar(", src)
 
     def test_no_onionhome_registers_nothing(self):
         """ONIONHOME_ADDRESS empty (the e2e harness's baseline): the
         daemon never registers the name, nor starts the retry."""
         with open(os.path.join(self.dir, "config"), "a") as f:
             f.write("ONIONHOME_ADDRESS=\n")
-        R, _ = self.retry()
-        R.assert_not_called()
+        self.assertEqual(self.retry(), [])
         d = self.d
         d.is_ready = True
         d.onion_address = ADDR
@@ -714,13 +728,18 @@ class TestOnionnameRetry(_PathsCase):
         self.assertFalse(any(c.kwargs.get("target") == d._retry_pending_onionname
                              for c in T.call_args_list))
 
-    def test_a_configured_onionhome_is_the_one_asked(self):
-        from onionpress.onionnames_registrar import RegistrarResult
+    def test_onionheaven_off_registers_nothing(self):
+        self.registering("no")
+        self.assertEqual(self.retry(), [])
+
+    def test_a_configured_onionhome_is_retried_through_the_cli(self):
+        """The CLI's register_onionname asks the configured OnionHome
+        (tests/test_cli_app_commands.py); the daemon only runs it."""
         other = "b" * 52 + "qd2a.onion"
         with open(os.path.join(self.dir, "config"), "a") as f:
             f.write(f"ONIONHOME_ADDRESS={other}\n")
-        R, _ = self.retry(RegistrarResult(status="ok"))
-        self.assertEqual(R.call_args.kwargs["onionhome_address"], other)
+        calls = self.retry({"ok": True, "name": "mysite", "registered": True})
+        self.assertEqual(calls, [["onionname", "set", "mysite", "--json"]])
 
     def test_hub_loops_start_the_retry_once(self):
         d = self.d

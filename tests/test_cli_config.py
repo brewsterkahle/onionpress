@@ -246,6 +246,20 @@ class TestConfigSet(_CliCase):
         self.assertIn("{get,set,unset,list}", out + err)
 
 
+class TestOnionnameIsTheOneRule(unittest.TestCase):
+    """ONIONNAME takes what onionnames_client.validate_name takes (it once
+    took spaces and @, a WordPress login's characters, that no onionname
+    may hold), or empty."""
+
+    def test_the_rule(self):
+        from onionpress import onionnames_client
+        for value in ("brewster", "a1.b2_c3", "", "ali ce", "a@b.cd", "abcd", "12345",
+                      "-alice", "x" * 41, "alice\n"):
+            with self.subTest(value=value):
+                ok = value == "" or onionnames_client.validate_name(value)[0]
+                self.assertEqual(op_config.check_config_value("ONIONNAME", value) == "", ok)
+
+
 class TestConfigUnsetGetList(_CliCase):
 
     def test_unset_removes_the_line_and_keeps_the_rest(self):

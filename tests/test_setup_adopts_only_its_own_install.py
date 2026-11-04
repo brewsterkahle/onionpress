@@ -224,10 +224,9 @@ class TestPythonSide(unittest.TestCase):
 
     def test_an_invalid_onionname_is_refused_before_the_marker_is_looked_at(self):
         rec = _Recorder()
-        with mock.patch.object(setup_logic, "_onc", None):
-            self.assertFalse(setup_logic.provision_existing_wordpress(
-                site_title="t", onionname="not valid!", password="hunter22",
-                docker=FakeDocker(rec), data_dir=self.tmp, log_func=self.logs.append))
+        self.assertFalse(setup_logic.provision_existing_wordpress(
+            site_title="t", onionname="not valid!", password="hunter22",
+            docker=FakeDocker(rec), data_dir=self.tmp, log_func=self.logs.append))
         self.assertEqual(rec.calls, [])
 
     def test_provision_interactive_passes_the_choice_through(self):

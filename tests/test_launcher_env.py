@@ -316,7 +316,7 @@ class TestLauncherEnvironmentInBash(unittest.TestCase):
               ' ${DOCKER_SOCK:-unset}"; }')
 
     def launcher(self, platform):
-        launcher = Launcher(self, platform, stub=("setup_db_passwords", "stop_onionheaven_farm",
+        launcher = Launcher(self, platform, stub=("setup_db_passwords",
                                                    "daemon_offline"))
         launcher.add_stubs(self.RECORD)
         return launcher

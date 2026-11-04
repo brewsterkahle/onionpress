@@ -991,9 +991,13 @@ class TestStopContainersLeavesTheStatusToTheDaemon(unittest.TestCase):
         m = re.search(r'stop_containers\(\)\s*\{(.*?)^\}', script, re.DOTALL | re.MULTILINE)
         self.assertIsNotNone(m, "stop_containers() must exist")
         body = m.group(1)
-        self.assertIsNotNone(re.search(r'docker\s+compose\s+(?:"\$\{COMPOSE_WITH_CF\[@\]\}"\s+)?down', body))
+        # The stop is `onionpress stop-containers` (ContainerManager.stop).
+        self.assertIn('op_py --data-dir "$DATA_DIR" stop-containers', body)
         self.assertNotIn("write_status", body)
         self.assertNotIn("write-status", script)
+        from onionpress import cli
+        self.assertNotIn("status", inspect.getsource(cli._run_stop_containers)
+                         .replace("compose down failed", ""))
 
 
 class TestOnionpressOnboardedUsesSiteOption(unittest.TestCase):
@@ -1103,20 +1107,20 @@ class TestPortOffsetSticky(unittest.TestCase):
     the same — write sentinel on stop, read+wait on start.
     """
 
-    def test_linux_writes_previous_offset_on_stop(self):
-        src = _read("linux/onionpress")
-        # Carve out the stop_containers function body (anchor on the
-        # function definition, end at the next column-0 closing brace).
-        m = re.search(
-            r'^stop_containers\(\)\s*\{(.*?)^\}', src,
-            re.DOTALL | re.MULTILINE)
-        self.assertIsNotNone(m, "stop_containers() must exist")
-        self.assertRegex(
-            m.group(1), r'\.previous-port-offset',
-            "linux/onionpress stop_containers must write "
-            "$DATA_DIR/.previous-port-offset before docker compose down "
-            "so the next start can wait for the prior ports to free.",
-        )
+    def test_the_stop_writes_previous_offset_before_compose_down(self):
+        # Both launchers' stop_containers is `onionpress stop-containers`;
+        # it notes the offset before the stop so the next start can wait
+        # for the prior ports to free (run for real in
+        # tests/test_stop_containers.py).
+        from onionpress import cli
+        src = inspect.getsource(cli._run_stop_containers)
+        self.assertLess(src.index("ports.PREVIOUS_OFFSET_SENTINEL"),
+                        src.index("manager.stop(include_onionheaven=True)"))
+        for launcher in ("linux/onionpress", "app/MacOS/onionpress"):
+            body = TestKeyVolumeMigration._function_body(_read(launcher), "stop_containers")
+            with self.subTest(launcher=launcher):
+                self.assertIn("stop-containers", body)
+                self.assertNotIn("previous-port-offset", body)
 
     def test_the_start_waits_for_the_previous_offset_in_python(self):
         # Issue #405: the wait is ports.wait_for_previous_port, run by
@@ -1813,7 +1817,11 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
         self.assertIn('rc = self.launcher.wait("start")', text)
         self.assertIn("return self.run(*args, capture=False, timeout=timeout).returncode",
                       _read("src/onionpress/ui_client.py"))
-        self.assertIn('"Status: Start failed — see View Logs"', text)
+        # The title is the shared view's (ui_client.status_view), given
+        # the menubar's own last start result.
+        self.assertIn("start_failed=self._start_failed_rc is not None", text)
+        self.assertIn('"Status: Start failed — see View Logs"',
+                      _read("src/onionpress/ui_client.py"))
 
 
 if __name__ == "__main__":
@@ -1879,9 +1887,6 @@ exit 0
         functions = "".join(
             TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
             for name in names)
-        # The launcher's own KEY_HELPER_IMAGE line, evaluated in the run.
-        functions = "".join(l + "\n" for l in text.splitlines()
-                            if l.startswith("KEY_HELPER_IMAGE=")) + functions
         with tempfile.TemporaryDirectory() as tmp:
             if migration_pending:
                 open(os.path.join(tmp, ".key-volume-migration-pending"), "w").close()
@@ -2002,8 +2007,8 @@ class TestKeyVolumeMigrationInPython(unittest.TestCase):
     migrate_key_volume run it) against a fake docker: the cases the bash
     harness ran until the body moved, and what those could not reach."""
 
-    PIN = re.search(r'KEY_HELPER_IMAGE="\$\{ONIONPRESS_TOR_IMAGE:-([^}"]+)\}"',
-                    _read("linux/onionpress")).group(1)
+    PIN = re.search(r"(?m)^ONIONPRESS_TOR_IMAGE=(\S+)$",
+                    _read("build/image-pins.env")).group(1)
     LS = ["volume", "ls", "--format", "{{.Name}}"]
 
     def setUp(self):
@@ -2049,14 +2054,12 @@ class TestKeyVolumeMigrationInPython(unittest.TestCase):
     def _flat(self, calls):
         return [" ".join(c) for c in calls]
 
-    def test_the_pin_is_the_launchers(self):
-        """The helper runs containers.tor_image's pin, the one the launchers'
-        KEY_HELPER_IMAGE names (build/image-pins.env holds both)."""
+    def test_the_pin_is_the_tor_images(self):
+        """The helper runs containers.tor_image's pin, build/image-pins.env's
+        tor image (the launchers name none since their KEY_HELPER_IMAGE
+        went with its last bash helper)."""
         from onionpress.containers import ONIONHEAVEN_IMAGE_PIN
         self.assertEqual(ONIONHEAVEN_IMAGE_PIN, self.PIN)
-        self.assertEqual(self.PIN, re.search(
-            r'KEY_HELPER_IMAGE="\$\{ONIONPRESS_TOR_IMAGE:-([^}"]+)\}"',
-            _read("app/MacOS/onionpress")).group(1))
 
     def test_refuses_when_docker_does_not_answer(self):
         ok, calls, logs = self._migrate(down=True)
