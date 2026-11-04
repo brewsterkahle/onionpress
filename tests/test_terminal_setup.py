@@ -120,7 +120,7 @@ class TestFlow(Base):
              mock.patch("onionpress.onionheaven.release_onionheaven") as release:
             self.release = release
             rc = setup_logic.setup_from_terminal(
-                data_dir=self.data, mac=True, launcher_bin="/app/onionpress", docker=docker,
+                data_dir=self.data, os_name="macos", launcher_bin="/app/onionpress", docker=docker,
                 manager=manager, log=self.logs.append, say=self.said.append,
                 input_func=lambda p: (_ for _ in ()).throw(EOFError()),
                 getpass_func=lambda p: (_ for _ in ()).throw(EOFError()),

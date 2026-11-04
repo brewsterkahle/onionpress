@@ -479,7 +479,7 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
                 mock.patch.object(subprocess, "Popen", side_effect=lambda a, *k, **kw: argv.append(a)):
             rc = key_import.run(args, paths=types.SimpleNamespace(data_dir=data_dir),
                                 docker=mock.Mock(), containers=containers,
-                                log=lambda m: None, release=lambda r: [], linux=True,
+                                log=lambda m: None, release=lambda r: [], os_name="linux",
                                 interactive=False, environ={}, out=out, stdin=stdin)
         self.assertEqual(rc, 0, out.getvalue())
         self.assertEqual(json.loads(out.getvalue().splitlines()[-1]),

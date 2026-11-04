@@ -316,8 +316,8 @@ class TestPostUp(Base):
              mock.patch.object(bundled_plugins, "setup_bundled_plugins",
                                side_effect=lambda h: order.append("setup-plugins")), \
              mock.patch.object(derivatives, "regeneration_pending", return_value=True):
-            start.post_up(manager, mac=mac, installed=installed, errors=errors,
-                          themes_dir="/t", plugins_dir="/p", scripts_dir="/s",
+            start.post_up(manager, os_name="macos" if mac else "linux", installed=installed,
+                          errors=errors, themes_dir="/t", plugins_dir="/p", scripts_dir="/s",
                           log=self.lines.append)
         return manager, order, errors
 

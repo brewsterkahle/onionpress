@@ -85,8 +85,8 @@ class Base(unittest.TestCase):
         paths = resolve_paths(data_dir=self.data, app_bundle="")
         manager = containers.ContainerManager(docker, paths, PortConfig.from_offset(0),
                                               log_func=self.lines.append, egress=lambda: None)
-        return start.KeySeed(manager, mac=mac, bin_dir=kw.pop("bin_dir", "/nonexistent"),
-                             **kw).run()
+        return start.KeySeed(manager, os_name="macos" if mac else "linux",
+                             bin_dir=kw.pop("bin_dir", "/nonexistent"), **kw).run()
 
 
 class TestBothPlatforms(Base):
@@ -317,6 +317,48 @@ class TestGenerateOnHost(Base):
         with mock.patch.object(start, "ensure_key_formats", return_value=False):
             self.assertIsNone(self.generate())
         self.assertIn("ERROR: ensure_key_formats failed for", self.lines[-1])
+
+
+class TestPlatformName(unittest.TestCase):
+    """The start's steps, the setup and the key import take the platform
+    as os_name ("macos" or "linux", detect_os().value); any other name is
+    refused, never read as the other platform."""
+
+    def test_an_unknown_name_is_refused(self):
+        from onionpress import key_import, setup_logic
+        for call in (lambda: start.KeySeed(None, os_name="mac"),
+                     lambda: start.start_core(None, os_name="darwin", wp_port=8080, errors=None),
+                     lambda: start.post_up(None, os_name="", installed=True, errors=None,
+                                           themes_dir="", plugins_dir="", scripts_dir=""),
+                     lambda: start.start_containers(None, os_name="Linux", wp_port=8080,
+                                                    errors=None),
+                     lambda: setup_logic.setup_from_terminal(
+                         data_dir="", os_name="mac", launcher_bin="", docker=None,
+                         manager=None, log=print),
+                     lambda: key_import.run(None, paths=None, docker=None, containers=None,
+                                            log=print, release=None, os_name="mac"),
+                     lambda: key_import.replace_key(
+                         "", data_dir="", docker=None, containers=None, log=print,
+                         release=None, hub_held_ok=None, os_name="mac")):
+            with self.assertRaises(ValueError):
+                call()
+    def test_no_function_takes_a_platform_flag(self):
+        # Census (issue #549): the platform is one parameter, os_name,
+        # never a mac= or linux= flag beside it.
+        import ast
+        import glob
+        found = []
+        for path in sorted(glob.glob(os.path.join(ROOT, "src", "onionpress", "*.py"))
+                           + [os.path.join(ROOT, "src", "menubar.py")]):
+            with open(path) as fh:
+                tree = ast.parse(fh.read())
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    found += [f"{os.path.relpath(path, ROOT)}:{node.lineno} {node.name}({a.arg})"
+                              for a in args
+                              if a.arg in ("mac", "linux", "is_mac", "is_linux")]
+        self.assertEqual(found, [])
 
 
 if __name__ == "__main__":

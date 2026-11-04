@@ -205,7 +205,7 @@ class TestSetupFlow(Base):
              mock.patch.object(setup_logic.onion_hostname, "read_served_address",
                                return_value=ADDR):
             rc = setup_logic.setup_from_terminal(
-                data_dir=self.data, mac=False, launcher_bin="/l", docker=FlowDocker(),
+                data_dir=self.data, os_name="linux", launcher_bin="/l", docker=FlowDocker(),
                 manager=mock.Mock(), log=self.logs.append, say=self.said.append,
                 paths=self.paths, registrar=registrar, report=report, **kw)
         return rc, report

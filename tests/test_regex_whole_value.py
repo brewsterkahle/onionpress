@@ -190,7 +190,7 @@ class TestAddressPrefix(unittest.TestCase):
              mock.patch.object(start, "vanity_key_dir", return_value=None), \
              mock.patch.object(start, "generate_vanity_on_host",
                                side_effect=lambda p, *a, **k: used.append(p)):
-            self.assertTrue(start.KeySeed(manager, mac=True, log=lambda _m: None).run())
+            self.assertTrue(start.KeySeed(manager, os_name="macos", log=lambda _m: None).run())
         return used[0]
 
     def test_mac_first_run_tests_the_whole_value(self):

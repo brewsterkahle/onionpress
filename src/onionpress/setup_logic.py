@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from onionpress import key_manager, onion_hostname, wp_files
 from onionpress import onionnames_client as _onc
+from onionpress.platform import OS
 
 # ─── Branded installs ────────────────────────────────────────────────────────
 
@@ -1195,7 +1196,7 @@ def setup_onionname(user: str, *, paths, docker, os_name: str,
     return ""
 
 
-def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
+def setup_from_terminal(*, data_dir: str, os_name: str, launcher_bin: str, docker,
                         manager, user: str = "", title: str = "", from_backup: str = "",
                         ia_account: str = "", log: Callable[[str], None],
                         say: Callable[[str], None] = print, input_func=input,
@@ -1220,6 +1221,7 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
     (setup_onionname), *interactive* False to ask nothing (a missing or
     invalid answer, a taken name, is SETUP_FAILED with the reason in
     *report*, which also gets the name installed under)."""
+    mac = OS(os_name) is OS.MACOS
     report = report if report is not None else {}
     paths = paths or _setup_paths(data_dir)
     if not interactive:
@@ -1289,7 +1291,7 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
             report["error"] = why
             return SETUP_FAILED
         user = setup_onionname(user, paths=paths, docker=docker,
-                               os_name="macos" if mac else "linux", log=log, say=say,
+                               os_name=os_name, log=log, say=say,
                                input_func=input_func if interactive else None,
                                register_later=register_later, registrar=registrar,
                                report=report)
