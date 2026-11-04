@@ -74,7 +74,7 @@ class TestLauncherSourcesTheFile(unittest.TestCase):
               ' ${MYSQL_PASSWORD:-unset} ${MYSQL_ROOT_PASSWORD:-unset}"; }')
 
     def launcher(self, platform):
-        launcher = Launcher(self, platform, stub=("stop_onionheaven_farm", "daemon_offline"))
+        launcher = Launcher(self, platform, stub=("daemon_offline",))
         launcher.add_stubs(self.RECORD)
         return launcher
 

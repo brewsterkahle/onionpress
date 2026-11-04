@@ -157,16 +157,14 @@ CLOUDFLARED_IMAGE=ghcr.io/brewsterkahle/onionpress-cloudflared:2026.10.0@sha256:
 SOCKET_PROXY_IMAGE=ghcr.io/brewsterkahle/onionpress-socket-proxy:1.13.1@sha256:…
 ```
 
-Six files embed those literals, so a bare `docker compose up` with no
+Four files embed those literals, so a bare `docker compose up` with no
 environment set still works:
 
 | Consumer | What it pins |
 |---|---|
 | `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services, the `ONIONHEAVEN_IMAGE` the last one hands its takeover workers, and `db`, `autoheal`, `autoheal-proxy` |
 | `app/Resources/docker/docker-compose.cloudflare.yml` | `cloudflared` |
-| `app/MacOS/onionpress` | `KEY_HELPER_IMAGE`, the tor image its one-shot key helpers run |
-| `linux/onionpress` | `KEY_HELPER_IMAGE`, the tor image its one-shot key helpers run |
-| `src/onionpress/containers.py` | `ONIONHEAVEN_IMAGE` — farm workers |
+| `src/onionpress/containers.py` | `ONIONHEAVEN_IMAGE` — farm workers and the one-shot key helpers (`tor_image`) |
 | `src/onionpress/launcher_ops.py` | `DEFAULT_TOR_IMAGE` — vanity-key generation |
 
 `build/refresh-image-digests.sh` is the only thing that writes any of them.

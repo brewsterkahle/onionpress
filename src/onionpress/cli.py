@@ -2420,6 +2420,31 @@ def _run_migrate_key_volume(run):
     return 0 if _start_step_manager(paths).migrate_key_volume() else 1
 
 
+def _run_stop_containers(run):
+    # Both launchers' stop_containers() (`stop`, `quit`, `restart`, an
+    # update, a setup that restarts): ContainerManager.stop, the farm
+    # workers first, then compose down with the Cloudflare override always,
+    # so a tunnel whose token was just removed goes down too. Logged in the
+    # launcher's format; 1 when compose down failed (`stop` and `quit`
+    # report it). The offset is noted first, so the next start waits for
+    # this one's port to free instead of moving to the next offset
+    # (ports.wait_for_previous_port).
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    manager = _start_step_manager(paths)
+    log = _launcher_log_func()
+    log("Stopping OnionPress containers...")
+    try:
+        with open(os.path.join(paths.data_dir, ports.PREVIOUS_OFFSET_SENTINEL), "w") as f:
+            f.write(str(manager.port_config.offset))
+    except OSError:
+        pass
+    if not manager.stop(include_onionheaven=True):
+        log("ERROR: stopping the containers failed (compose down)")
+        return 1
+    log("Containers stopped")
+    return 0
+
+
 def _add_bundled_plugins(sub, name):
     what = ("Put the pinned Internet Archive Link Fixer and Cache Enabler "
             "releases in the WordPress container (downloaded over Tor, checked "
@@ -3468,6 +3493,11 @@ _COMMANDS = [
             "with no network; exit 1 (the start must stop) when Docker does "
             "not answer, the copy fails or the image is not here"),
      _run_migrate_key_volume),
+    ("stop-containers",
+     _plain("Stop the stack: the OnionHeaven farm workers, then compose down "
+            "with the Cloudflare override (token or not); both launchers' "
+            "stop; exit 1 when compose down failed"),
+     _run_stop_containers),
     ("install-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("setup-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),

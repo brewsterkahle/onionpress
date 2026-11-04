@@ -18,6 +18,7 @@ import stat
 import sys
 from dataclasses import dataclass, field
 
+from . import onionnames_client
 from .platform import OnionPressPaths
 from .ports import (  # noqa: F401  (re-exported, #482)
     PortConfig, detect_port_offset, get_running_wp_port, resolve_port_offset,
@@ -524,8 +525,10 @@ def _address_prefix():
 # address, whether it is registered): settable so the apps write them
 # through `config set` too, but not a setting a person normally changes.
 RECORDED_KEYS = {
-    "ONIONNAME": _Check(lambda v: v == "" or re.fullmatch(r"[A-Za-z0-9 _.@-]{1,60}", v) is not None,
-                        "a WordPress login (letters, digits, space, _ . @ -)"),
+    "ONIONNAME": _Check(lambda v: v == "" or onionnames_client.validate_name(v)[0],
+                        f"an onionname: {onionnames_client.MIN_NAME_LEN} to "
+                        f"{onionnames_client.MAX_NAME_LEN} letters, digits, . _ -, "
+                        f"starting and ending with a letter or digit, not all digits"),
     "ONIONNAME_ADDRESS": _onion_address_or_empty(),
     "ONIONNAME_REGISTERED": _one_of("yes", "no"),
 }
@@ -606,7 +609,7 @@ CONFIG_KEY_HELP = {
     "INSTALL_CACHE_ENABLER": "install the Cache Enabler plugin (restart)",
     "REPUBLISH_ON_UNREACHABLE": "ask Tor for fresh introduction points when the site is unreachable",
     "QUIT_KEEPS_SITE_RUNNING": "macOS: Quit closes only the menu bar app; the site keeps running (default no: Quit takes the site down)",
-    "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven)",
+    "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven); off also registers no onionname",
     "ONIONHEAVEN_ADDRESS": "the OnionHeaven hub's .onion address (restart)",
     "ONIONHEAVEN_MAX_SERVICES": "hub: addresses one takeover worker serves (restart)",
     "ONIONHEAVEN_PROPAGATION_DELAY": "hub: seconds after a site's last good healthcheck before its takeover (restart)",

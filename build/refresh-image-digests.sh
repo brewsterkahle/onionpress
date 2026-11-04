@@ -10,8 +10,6 @@
 #                                             (+ its ONIONHEAVEN_IMAGE env),
 #                                             db, autoheal, autoheal-proxy
 #   app/Resources/docker/docker-compose.cloudflare.yml   cloudflared
-#   app/MacOS/onionpress                      KEY_HELPER_IMAGE (one-shot key helpers)
-#   linux/onionpress                          KEY_HELPER_IMAGE (one-shot key helpers)
 #   src/onionpress/containers.py              ONIONHEAVEN_IMAGE
 #   src/onionpress/launcher_ops.py            DEFAULT_TOR_IMAGE
 #
@@ -381,8 +379,6 @@ REWRITES = [
 CONSUMERS = [
     "app/Resources/docker/docker-compose.yml",
     "app/Resources/docker/docker-compose.cloudflare.yml",
-    "app/MacOS/onionpress",
-    "linux/onionpress",
     "src/onionpress/containers.py",
     "src/onionpress/launcher_ops.py",
 ]

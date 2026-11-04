@@ -122,7 +122,19 @@ class TestSetupOnionname(Base):
         self.assertEqual(reg.calls, [])
         self.served.assert_not_called()
         self.assertEqual((self.config()["name"], self.config()["registered"]), ("alice", False))
-        self.assertTrue(any("OnionHome is off" in s for s in self.said))
+        self.assertTrue(any(app_commands.ONIONNAME_OFF_NOTE in s for s in self.said))
+        self.assertFalse(os.path.exists(os.path.join(self.data, app_commands.ONIONNAME_RETRY_MARKER)))
+
+    def test_onionheaven_off_asks_nobody_and_installs(self):
+        """REGISTER_WITH_ONIONHEAVEN=no: onionnames are off too."""
+        with open(self.config_file, "a") as f:
+            f.write("REGISTER_WITH_ONIONHEAVEN=no\n")
+        reg = Registrar("ok")
+        got, _ = self.name("alice", reg)
+        self.assertEqual(got, "alice")
+        self.assertEqual(reg.calls, [])
+        self.served.assert_not_called()
+        self.assertEqual((self.config()["name"], self.config()["registered"]), ("alice", False))
         self.assertFalse(os.path.exists(os.path.join(self.data, app_commands.ONIONNAME_RETRY_MARKER)))
 
     def test_the_configured_onionhome_is_the_registrars(self):
@@ -422,6 +434,17 @@ class TestConfiguredOnionHome(unittest.TestCase):
     def test_absent_is_the_default(self):
         from onionpress import onionnames_registrar as onr
         self.assertEqual(self.answer("ONIONNAME=alice\n"), (onr.DEFAULT_ONIONHOME_ADDRESS, []))
+
+    def test_onionheaven_off_or_unrecognized_is_none(self):
+        for value in ("no", "off", "0", "maybe"):
+            with self.subTest(value=value):
+                self.assertEqual(self.answer(f"REGISTER_WITH_ONIONHEAVEN={value}\n")[0], "")
+
+    def test_onionheaven_on_or_unset_keeps_onionhome(self):
+        from onionpress import onionnames_registrar as onr
+        for text in ("", "REGISTER_WITH_ONIONHEAVEN=\n", "REGISTER_WITH_ONIONHEAVEN=yes\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.answer(text)[0], onr.DEFAULT_ONIONHOME_ADDRESS)
 
     def test_empty_is_none(self):
         self.assertEqual(self.answer("ONIONHOME_ADDRESS=\n"), ("", []))

@@ -1176,11 +1176,17 @@ class TestMenubarIsAView(unittest.TestCase):
         self.assertIn("VIEW_TICK_SECONDS", loop)
 
     def test_stale_state_is_reconnecting_never_stopped(self):
-        prop = self.methods["display_state"]
-        self.assertIn('return "reconnecting"', prop)
+        """The view is ui_client.status_view's (its tests hold the stale
+        case: tests/test_ui_client.py), given the last read whatever its
+        age."""
+        self.assertIn("self._state_doc = state", self.methods["_view_tick"])
+        view = self.methods["status_view"]
+        self.assertIn("ui_client.status_view(", view)
+        self.assertIn("self._state_doc, time.time(), daemon_seen=self._daemon_seen", view)
+        self.assertIn("return self.status_view().category", self.methods["display_state"])
         menu = self.methods["update_menu"]
-        self.assertIn('elif state == "reconnecting":', menu)
-        self.assertIn("Reconnecting to the OnionPress service", menu)
+        self.assertIn("view = self.status_view()", menu)
+        self.assertIn('self.menu["Starting..."].title = view.title', menu)
         self.assertNotIn('"reconnecting"', self.methods["ensure_daemon_running"])
 
     def test_the_menubar_starts_the_daemon_when_there_is_none(self):

@@ -906,16 +906,35 @@ class TestLaunchers(unittest.TestCase):
                 self.assertNotIn("up -d wordpress db", body)
 
     def test_the_farm_stops_all_at_once(self):
-        workers = {f"onionheaven-takeover-{i}": NEW_MOUNTS for i in range(4)}
-        workers["onionheaven-poll-0"] = NEW_MOUNTS
-        for launcher in LAUNCHERS:
-            with self.subTest(launcher=launcher):
-                calls, took = self._run(launcher, "stop_onionheaven_farm", workers,
-                                        stop_seconds=1)
-                self.assertEqual(sorted(c for c in calls if c.startswith("stop ")),
-                                 sorted(f"stop -t 1 {name}" for name in workers))
-                self.assertEqual(len([c for c in calls if c.startswith("rm ")]), 5)
-                self.assertLess(took, 3.5, "one second's grace, all at once")
+        """ContainerManager.stop_farm, both launchers' stop
+        (`onionpress stop-containers`): a second's grace each, all at once."""
+        import time
+        from onionpress.config import PortConfig
+        from onionpress.containers import ContainerManager
+        from onionpress.docker import DockerResult
+        from fake_docker import FakeDocker
+        from test_onionpress_containers import _make_paths
+
+        tmp = tempfile.mkdtemp(prefix="op-farm-stop-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        workers = [f"onionheaven-takeover-{i}" for i in range(4)] + ["onionheaven-poll-0"]
+
+        def answer(argv, **kw):
+            if argv[1:3] == ["ps", "-a"]:
+                return DockerResult(0, "\n".join(workers + ["onionheaven"]) + "\n", "")
+            if argv[1] == "stop":
+                time.sleep(1)
+            return None
+
+        docker = FakeDocker(answer)
+        cm = ContainerManager(docker, _make_paths(tmp), PortConfig.from_offset(0))
+        started = time.monotonic()
+        cm.stop_farm()
+        took = time.monotonic() - started
+        self.assertEqual(sorted(" ".join(a) for a in docker.argvs("stop")),
+                         sorted(f"stop -t 1 {name}" for name in workers))
+        self.assertEqual(len(docker.argvs("rm")), 5)
+        self.assertLess(took, 3.5, "one second's grace, all at once")
 
     def test_the_python_start_retires_them_before_compose_up(self):
         from onionpress.config import PortConfig

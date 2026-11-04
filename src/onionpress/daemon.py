@@ -1191,8 +1191,8 @@ class Daemon(PortAttributes):
                 and not self._onionname_retry_in_flight and not self._onionname_retry_giveup):
             pending = self.read_config_value("ONIONNAME", "")
             registered = self.read_config_value("ONIONNAME_REGISTERED", "no") == "yes"
-            # Not with no OnionHome (ONIONHOME_ADDRESS empty, as the e2e
-            # harness sets it): onionnames_registrar.configured_onionhome.
+            # Not while OnionHeaven is off, nor with ONIONHOME_ADDRESS
+            # empty: onionnames_registrar.configured_onionhome.
             if pending and not registered and self._onionhome_address():
                 self._onionname_retry_in_flight = True
                 threading.Thread(target=self._retry_pending_onionname, daemon=True,
@@ -1610,50 +1610,39 @@ class Daemon(PortAttributes):
 
     # -- onionname retry (the menubar's _retry_pending_onionname) --------
 
-    def _save_onionname(self, name, onionaddress, registered):
-        self.write_config_value("ONIONNAME", name)
-        self.write_config_value("ONIONNAME_ADDRESS", onionaddress or "")
-        self.write_config_value("ONIONNAME_REGISTERED", "yes" if registered else "no")
-
     def _onionhome_address(self):
         """The OnionHome onionnames are registered with, "" for none."""
         from .onionnames_registrar import configured_onionhome
         return configured_onionhome(self.config_file)
 
     def _retry_pending_onionname(self):
-        """An onionname that did not register during setup: register it
-        now that Tor is up. A collision is reported in the state
-        (onionname_collision); the menubar asks for a new name, saves it
-        with `config set ONIONNAME` and writes .onionname-retry."""
+        """An onionname that did not register during setup: registered now
+        that Tor is up, by `onionpress onionname set` (app_commands.
+        onionname_set, the one path). A collision is reported in the state
+        (onionname_collision); the menubar asks for a new name and sets it
+        the same way."""
         try:
             name = self.read_config_value("ONIONNAME", "")
-            if not name:
+            if not name or not self._read_served_address():
                 return
-            onionaddress = self._read_served_address()
-            if not onionaddress:
-                return
-            try:
-                from .onionnames_registrar import Registrar
-            except Exception as e:
-                self.log(f"onionname: retry cannot import registrar: {e}")
-                return
-            onionhome = self._onionhome_address()
-            if not onionhome:
-                return
-            reg = Registrar(self._docker, log=self.log, onionhome_address=onionhome)
-            result = reg.register(name, onionaddress)
-            if result.ok:
-                self._save_onionname(name, onionaddress, registered=True)
+            if not self._onionhome_address():
+                return      # no OnionHome configured: nothing to retry
+            rc, out = self.run_cli(["onionname", "set", name, "--json"], timeout=120)
+            answer = op_confirm.last_json_line(out or "")
+            if answer and answer.get("ok") and answer.get("registered"):
                 self.log(f"onionname: retry succeeded for '{name}'")
                 self._onionname_retry_giveup = True
                 self._onionname_collision = None
-            elif result.status == "collision":
+            elif answer and answer.get("error") == "taken":
                 self.log(f"onionname: retry collision for '{name}' — asking for another name")
                 self._onionname_collision = {"name": name,
-                                             "suggestions": list(result.suggestions or [])}
+                                             "suggestions": list(answer.get("suggestions") or [])}
+                self._onionname_retry_giveup = True
+            elif answer and answer.get("error"):
+                self.log(f"onionname: retry refused: {answer['error']}")
                 self._onionname_retry_giveup = True
             else:
-                self.log(f"onionname: retry deferred ({result.status})")
+                self.log(f"onionname: retry deferred (rc {rc})")
         except Exception as e:
             self.log(f"onionname: retry thread error: {e}")
         finally:

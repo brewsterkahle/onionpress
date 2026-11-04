@@ -88,18 +88,6 @@ _BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
 # ignore PYTHONHOME too.
 bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" PYTHONSAFEPATH=1 "$_BUNDLED_PYTHON_BIN" "$@"; }
 
-# Hand a file to the WordPress container, written as www-data: stdin goes to
-# $1, mode ${2:-600} once in place (a temporary file beside it, renamed
-# over it). Never as root: www-data owns /var/lib/onionpress and the web
-# root, and root's `cat >` or docker cp followed a link planted at the name
-# to any file in the container. The script is
-# onionpress.wp_files.PUT_FILE_SCRIPT; a test keeps the copies equal.
-wp_put() {
-    docker exec -i -u www-data onionpress-wordpress \
-        sh -c 't=$(mktemp "$1.XXXXXX") || exit 1; if cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"; then exit 0; fi; rm -f "$t"; exit 1' \
-        sh "$1" "${2:-600}"
-}
-
 # Run wp-cli in the WordPress container as www-data: wp_cli <args...>, and
 # wp_cli_in for what wp-cli reads from stdin (docker exec -i). wp-cli loads
 # WordPress (wp-config.php, mu-plugins, plugins, themes), every file of it
@@ -348,14 +336,6 @@ using_local_images() {
     bundled_python -m onionpress.cli --data-dir "$DATA_DIR" using-local-images
 }
 
-# The image every one-shot helper that handles the onion service key runs
-# from (the key volume migration, the key seeds, the backup's key reads):
-# the stack's own tor image, pinned by digest like the rest, or the locally
-# built one. Never a floating tag such as `alpine`, which a registry or a
-# mirror could swap for an image that reads the key. Each run overrides the
-# entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
-
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
@@ -397,29 +377,6 @@ start_cloudflare_tunnel() {
     if docker container inspect onionpress-cloudflared >/dev/null 2>&1; then
         log "Cloudflare Tunnel off (no token, or WordPress not set up): removing cloudflared"
         docker rm -f onionpress-cloudflared >> "$LOG_FILE" 2>&1 || true
-    fi
-}
-
-# OnionHeaven farm — takeover worker containers. The onionheaven container
-# spawns and scales them itself (onionheaven_common._spawn_worker, from the
-# registry's farm_scale_requests); the launcher only stops them on the way out.
-stop_onionheaven_farm() {
-    # Stop all farm containers (catches any scaled-up containers too), all at
-    # once, with a second's grace each: their onion services are ephemeral
-    # (ADD_ONION), and one after another at Docker's default 10 s a farm of
-    # any size outlasted a quit, leaving workers to run on into the next
-    # start.
-    local container pids=""
-    for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-(poll|takeover)-[0-9]+$'); do
-        {
-            docker stop -t 1 "$container" >> "$LOG_FILE" 2>&1 || true
-            docker rm "$container" >> "$LOG_FILE" 2>&1 || true
-            log "OnionHeaven farm: stopped $container"
-        } &
-        pids="$pids $!"
-    done
-    if [ -n "$pids" ]; then
-        wait $pids || true
     fi
 }
 
@@ -1119,25 +1076,15 @@ start_containers() {
     start_cloudflare_tunnel "$wp_installed"
 }
 
-# Function to stop containers
+# The stop is onionpress.cli's `stop-containers` (ContainerManager.stop,
+# both platforms): the OnionHeaven farm's takeover workers first, then
+# compose down, always with the Cloudflare override file, so a tunnel whose
+# token was just removed goes down with the rest. The status is the
+# stop's, not tee's: `stop` and `quit` report a failed stop
+# (tests/test_launcher_dispatch_mac.py).
 stop_containers() {
-    log "Stopping OnionPress containers..."
-    # Stop farm containers first (they depend on the onionheaven container's DB)
-    stop_onionheaven_farm
-    cd "$DOCKER_DIR"
-    # Stop all containers (including onionheaven), cloudflared too: always
-    # with the override file, so a tunnel whose token was just removed still
-    # goes down with the rest.
-    # The status is compose's, not tee's or log's: `stop` and `quit` report
-    # a failed stop (tests/test_launcher_dispatch_mac.py).
-    local down_out down_rc=0
-    down_out=$(docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml down 2>&1) || down_rc=$?
-    [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
-    if [ "$down_rc" -ne 0 ]; then
-        log "ERROR: stopping the containers failed (compose down exited $down_rc)"
-        return "$down_rc"
-    fi
-    log "Containers stopped"
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" stop-containers 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
 }
 
 # Reap lima's shared usernet daemon. It survives `colima stop` and leaks
@@ -1698,7 +1645,8 @@ main() {
             # exec, not a child: launchd's pid is then the daemon itself, so
             # its TERM (bootout, `daemon stop`) reaches the Python process
             # (AbandonProcessGroup leaves children alone on purpose).
-            PYTHONHOME="$_BUNDLED_PYTHONHOME" exec "$_BUNDLED_PYTHON_BIN" -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
+            # bundled_python's environment, PYTHONSAFEPATH too (#470).
+            PYTHONHOME="$_BUNDLED_PYTHONHOME" PYTHONSAFEPATH=1 exec "$_BUNDLED_PYTHON_BIN" -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
             ;;
 
         apply-config)

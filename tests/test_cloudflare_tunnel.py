@@ -91,9 +91,16 @@ class TestLauncherWiring(unittest.TestCase):
     def test_stop_and_uninstall_take_cloudflared_down(self):
         """Always with the override file: a token removed since the last
         start still leaves a running cloudflared on both networks."""
+        # The stop is `onionpress stop-containers`: ContainerManager.stop,
+        # which names the override file token or not
+        # (tests/test_stop_containers.py runs it).
         body = _function(self.text, "stop_containers")
-        self.assertIn('docker compose "${COMPOSE_WITH_CF[@]}" down', body)
+        self.assertIn('op_py --data-dir "$DATA_DIR" stop-containers', body)
         self.assertNotRegex(self.text, r"docker compose down\b")
+        cm = _read("src/onionpress/containers.py")
+        stop = cm[cm.index("    def stop(self"):cm.index("    # -- Readiness checks --")]
+        self.assertIn("self._compose_files(include_cloudflare=True)", stop)
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", stop)
         # The uninstall's `down -v` is uninstall._remove_linux's (#529),
         # with both compose files.
         src = _read("src/onionpress/uninstall.py")
@@ -176,9 +183,10 @@ class TestOneTimingOnBothPlatforms(unittest.TestCase):
         self.assertTrue(body.rstrip().endswith('exit "$ppi_rc"'))
 
     def test_mac_stop_takes_cloudflared_down(self):
+        # Linux's stop, the one ContainerManager.stop (above).
         body = _function(self.texts["mac"], "stop_containers")
-        self.assertIn("docker compose -f docker-compose.yml "
-                      "-f docker-compose.cloudflare.yml down", body)
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" '
+                      'stop-containers', body)
         self.assertNotIn("CF_COMPOSE", self.texts["mac"])
 
 

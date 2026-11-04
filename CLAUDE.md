@@ -466,6 +466,18 @@
   `RestoreUI`) and `update_outcome`; no `subprocess` argv in either names
   the launcher. The tray imports the package hard (the .deb installs it
   beside the tray): no degraded fallbacks. `tests/test_ui_client.py`.
+- **Both UIs paint `ui_client.status_view(state, now)`**: category,
+  title, icon and the actions it enables from daemon-state.json; a state
+  older than 90 s or from a dead pid is "reconnecting", never its last
+  word (the tray recomputes it every tick). The tray's log gets the
+  menubar's redaction (home as `~`, `redact.make_scrub_fn` on rolled
+  files). `TestStatusView` in `tests/test_ui_client.py`,
+  `tests/test_linux_tray_protocol.py`.
+- **The daemon's onionname retry is `onionpress onionname set`** (run
+  through `run_cli`, no registration of its own), and there is one name
+  rule, `onionnames_client.validate_name` (`setup_logic.validate_onionname`
+  and config's ONIONNAME check are it). `TestOnionnameRetry` in
+  `tests/test_mac_daemon_paths.py`, `tests/test_onionname_as_data.py`.
 - launchd agent `org.onionpress.daemon` (`KeepAlive` on failure only,
   `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
   The launcher's `stop` runs `daemon offline` before stopping containers;
@@ -632,8 +644,10 @@
   refusals), `scrub` is `scrub.run_scrub`'s platform cycle (the Mac's
   reset in place: `tests/test_scrub_mac.py`), `validate-oh-address` is
   `onionheaven.validate_hub_address` (`tests/test_validate_oh_address.py`),
-  `help` is `cli.launcher_help` (`tests/test_launcher_help.py`). What
-  stays bash: the Colima bootstrap, the Linux systemd/rootless and
+  `help` is `cli.launcher_help` (`tests/test_launcher_help.py`),
+  `stop_containers` is `onionpress stop-containers`
+  (`ContainerManager.stop`, the farm with it;
+  `tests/test_stop_containers.py`). What stays bash: the Colima bootstrap, the Linux systemd/rootless and
   install-state functions (`ONIONPRESS_BIND_HOST`), `config_value`,
   `start_cloudflare_tunnel`, `read_backup_password`, the daemon's and
   `start`'s pid lock and wait.
@@ -771,8 +785,8 @@
   exception: the Linux system-Docker egress helper, held to its shape).
   Write compose lists block style. Change a set only after a live test.
 - One-shot helpers: `--network none`, entrypoint overridden, sources
-  mounted read-only, the **pinned** tor image (`KEY_HELPER_IMAGE`,
-  `ensure_tor_image`), never a floating tag. Never `docker run -v` a volume
+  mounted read-only, the **pinned** tor image (`containers.tor_image`,
+  `ensure_tor_image`; the launchers run no helper), never a floating tag. Never `docker run -v` a volume
   that may not exist (it creates an empty one that passes for a key).
 - Never make a non-root process call su or sudo in the images; nothing uses
   raw sockets.
@@ -1069,15 +1083,20 @@
   against heartbeats. `tests/test_onionheaven_lifecycle.py`.
 - Hub mode is decided by address (`is_onionheaven_instance`), never by a
   running container. `tests/test_linux_hub_mode.py`.
-- **An onionname is registered only with the config's OnionHome**:
-  `onionnames_registrar.configured_onionhome` (`ONIONHOME_ADDRESS`, the
-  key analytics sharing reads; absent is the default, empty or not one v3
-  address is none) for setup's `register_onionname` and the daemon's
-  retry. With none the name is recorded unregistered and never retried.
-  The e2e baseline config sets it empty, so no test node registers.
+- **Onionnames go with OnionHeaven** (#554): nothing registers an
+  onionname with OnionHome unless `REGISTER_WITH_ONIONHEAVEN` is on (the
+  `registration_choice` rule) and `ONIONHOME_ADDRESS` (the key analytics
+  sharing reads; absent is the default) is not empty or invalid:
+  `onionnames_registrar.configured_onionhome` for setup's
+  `register_onionname` and the daemon's retry, and
+  `onionpress_namesync_allowed` (from `config-current.json`, unreadable is
+  no) before the name-sync plugin's per-user and daily registrations. Off,
+  the name is recorded unregistered and never retried; names already
+  registered stay. The e2e baseline config turns both off.
   `TestConfiguredOnionHome` / `TestSetupOnionname` in
   `tests/test_setup_through_the_cli.py`, `TestOnionnameRetry` in
-  `tests/test_mac_daemon_paths.py`, `tests/test_e2e_harness.py`.
+  `tests/test_mac_daemon_paths.py`, `tests/test_name_sync_gate.py`,
+  `tests/test_e2e_harness.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - Backups prune WordPress derivatives by `src/onionpress/derivatives.py`'s
@@ -1301,8 +1320,9 @@
   launchers): with a token and an installed WordPress, last in a start
   (after provisioning and the bundled plugins) and at the end of every
   setup path (no restart needed); otherwise the container is removed.
-  Stops always name the override file. Ingress must be
-  `http://wordpress:80`. `tests/test_cloudflare_tunnel.py`.
+  Stops always name the override file, token or not
+  (`ContainerManager.stop`, `tests/test_stop_containers.py`). Ingress must
+  be `http://wordpress:80`. `tests/test_cloudflare_tunnel.py`.
 
 ## Colima Networking Gotcha
 - **SOCKS (9050) does not work through Colima port forwarding.** For any Tor
