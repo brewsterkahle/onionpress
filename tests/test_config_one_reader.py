@@ -32,7 +32,10 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import config  # noqa: E402
 
-SCRIPTS = ("linux/onionpress", "app/MacOS/onionpress", "app/MacOS/launcher.sh")
+SCRIPTS = ("linux/onionpress", "app/MacOS/onionpress")
+# The app bundle's entry script reads no config: it starts the MenubarApp
+# and the launcher's `start-vm` (issue #545).
+ENTRY_SCRIPT = "app/MacOS/launcher.sh"
 
 CASES = {
     "plain": "VM_CPU=2\n",
@@ -70,6 +73,11 @@ class TestOneReader(unittest.TestCase):
     def test_the_function_is_the_same_in_every_script(self):
         bodies = {rel: _function(_read(rel), "config_value") for rel in SCRIPTS}
         self.assertEqual(len(set(bodies.values())), 1, "config_value drifted between launchers")
+
+    def test_the_app_entry_script_reads_no_config(self):
+        text = _read(ENTRY_SCRIPT)
+        self.assertNotIn("config_value", text)
+        self.assertNotIn('$DATA_DIR/config"', text)
 
     def test_no_launcher_reads_the_config_with_grep_and_cut(self):
         for rel in SCRIPTS:

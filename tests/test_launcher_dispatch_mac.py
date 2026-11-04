@@ -130,6 +130,31 @@ class TestStart(_Case):
         self.assertNotIn("start_containers", self.l.fn_calls())
 
 
+class TestStartVm(_Case):
+    """`start-vm`: the VM alone, for the app bundle's launcher.sh (issue
+    #545): no daemon, no lock, no containers."""
+    STUBS = START_STUBS
+
+    def test_start_vm_brings_up_the_vm_and_nothing_else(self):
+        r = self.l.run("start-vm")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.l.fn_calls(), ["detect_container_runtime", "ensure_docker_socket"])
+        self.assertNotIn("daemon start", "\n".join(self.l.py_calls()))
+        self.assertFalse(os.path.exists(self.l.pidfile), "start-vm takes no start lock")
+
+    def test_a_first_run_creates_the_vm(self):
+        r = self.l.run("start-vm", env={"STUB_RC_DETECT_CONTAINER_RUNTIME": "1"})
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.l.fn_calls(), [
+            "detect_container_runtime", "install_docker", "detect_container_runtime"])
+
+    def test_a_failed_vm_creation_is_the_exit_status(self):
+        r = self.l.run("start-vm", env={"STUB_RC_DETECT_CONTAINER_RUNTIME": "1",
+                                        "STUB_RC_INSTALL_DOCKER": "7"})
+        self.assertEqual(r.returncode, 7)
+        self.assertEqual(self.l.fn_calls(), ["detect_container_runtime", "install_docker"])
+
+
 class TestStop(_Case):
     STUBS = ("setup_db_passwords",)
 

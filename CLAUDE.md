@@ -374,8 +374,8 @@
   `config set KEY -`. `tests/test_cli_config.py`.
 - **One rule reads the config** (#404): the first `KEY=` line wins, the
   value is all after its first `=`, trimmed: `config.read_value` /
-  `read_config` and the launchers' `config_value` (identical in all three
-  scripts; never `grep | cut`). Writes are a temp file + rename under
+  `read_config` and the launchers' `config_value` (identical in both;
+  never `grep | cut`). Writes are a temp file + rename under
   `.config.lock`, one line per key. `tests/test_config_one_reader.py`.
 - The page's backup leaves out host secrets (`include_host_secrets=False`,
   config cut to `SAFE_CONFIG_KEYS`); no restore takes the token from a
@@ -921,6 +921,11 @@
 - **App state stays in `~/.onionpress/`**, never `~/Library/Application
   Support/` (spaces and the 104-char socket limit break Colima/Docker).
 - New VMs get a 20 GiB disk (`VM_DISK`, 100 for a hub; fixed at creation).
+- **One VM start: the launcher's `start_vm`** (its `start`, and `start-vm`
+  for the app bundle's `launcher.sh`, which starts the MenubarApp, runs
+  `start-vm` while the icon is gray, and runs no Colima of its own, #545).
+  `tests/test_app_entry_script.py`, `TestStartVm` in
+  `tests/test_launcher_dispatch_mac.py`.
 - **`$COLIMA_HOME` must exist before anything runs Colima** (else Colima
   silently uses `~/.colima`). `tests/test_colima_home_before_first_start.py`.
 

@@ -67,8 +67,23 @@ def _def_body(text, name):
 class TestDirectoriesExistBeforeColimaRuns(unittest.TestCase):
     """Static: every place that sets COLIMA_HOME for Colima creates it."""
 
-    def test_both_launchers_create_the_directories_where_they_export_them(self):
-        for launcher in (LAUNCHER, LAUNCHER_SH):
+    def test_the_app_entry_script_runs_no_colima_of_its_own(self):
+        # Issue #545: launcher.sh's own VM start had drifted from the
+        # launcher's (no VM recovery, no fsck drop-in, other sizes). It
+        # runs the launcher's start-vm instead and calls nothing of
+        # Colima's or Lima's itself.
+        text = _read(LAUNCHER_SH)
+        code = "\n".join(line for line in text.splitlines()
+                         if not line.lstrip().startswith("#"))
+        for word in (r'colima" ', r"/colima ", r"\blimactl\b", r"\bLIMA_HOME\b",
+                     r"\bDOCKER_HOST\b", r"\binitialize_colima\b", r"\bensure_docker_socket\b"):
+            self.assertNotRegex(code, word)
+        self.assertIn('"$SCRIPT_DIR/onionpress" start-vm', code)
+        self.assertIn("\n        start-vm)\n            # The app bundle's launcher.sh",
+                      _read(LAUNCHER))
+
+    def test_the_launcher_creates_the_directories_where_it_exports_them(self):
+        for launcher in (LAUNCHER,):
             text = _read(launcher)
             with self.subTest(launcher=launcher):
                 export = re.search(r'^export LIMA_HOME="\$COLIMA_HOME/_lima"$', text, re.M)
@@ -268,6 +283,49 @@ portForwards:
         start = next(c for c in calls if c.startswith("colima start"))
         self.assertIn("--cpu 4 --memory 6 --disk 50", start)
 
+    HUB_KEY = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+    # The launcher's `config set` (onionpress.cli), recorded.
+    RECORD_CLI = ('bundled_python() { printf \'py %s\\n\' "$*" >> "$STUB_CALLS"; }\n'
+                  'sw_vers() { echo 15.4; }\n')
+
+    def test_a_hub_gets_5gb_and_a_100gb_disk_kept_in_the_config(self):
+        # launcher.sh's sizing until issue #545, now the launcher's one
+        # VM creation: a hub key imported before the first launch.
+        snippet = (f'mkdir -p "$DATA_DIR/shared/vanity-keys/{self.HUB_KEY}"\n'
+                   + self.RECORD_CLI + self.INSTALL)
+        rc, calls, logged, _, tmp = self._run(snippet, prologue=True)
+        self.assertEqual(rc, "0", logged)
+        start = next(c for c in calls if c.startswith("colima start"))
+        self.assertIn("--cpu 2 --memory 5 --disk 100", start)
+        data_dir = os.path.join(tmp, "home", ".onionpress")
+        self.assertIn(f"py -m onionpress.cli --data-dir {data_dir} config set VM_MEMORY 5", calls)
+
+    def test_a_hubs_larger_config_is_kept_and_not_rewritten(self):
+        snippet = (f'mkdir -p "$DATA_DIR/shared/vanity-keys/{self.HUB_KEY}"\n'
+                   + self.RECORD_CLI + self.INSTALL)
+        rc, calls, logged, _, _ = self._run(snippet, prologue=True,
+                                            config="VM_MEMORY=8\nVM_DISK=200\n")
+        self.assertEqual(rc, "0", logged)
+        start = next(c for c in calls if c.startswith("colima start"))
+        self.assertIn("--memory 8 --disk 200", start)
+        self.assertFalse([c for c in calls if c.startswith("py ")], calls)
+
+    def test_a_plain_node_writes_no_config(self):
+        rc, calls, logged, _, _ = self._run(self.RECORD_CLI + self.INSTALL, prologue=True)
+        self.assertEqual(rc, "0", logged)
+        self.assertIn("--memory 2 --disk 20",
+                      next(c for c in calls if c.startswith("colima start")))
+        self.assertFalse([c for c in calls if c.startswith("py ")], calls)
+
+    def test_macos_before_13_creates_no_vm(self):
+        # Colima's VZ backend needs Apple's Virtualization framework.
+        snippet = ('sw_vers() { echo 12.7.4; }\n'
+                   'rc=0; (install_docker) || rc=$?; echo $rc')
+        rc, calls, logged, _, _ = self._run(snippet, prologue=True)
+        self.assertEqual(rc, "1")
+        self.assertIn("ERROR: macOS 13+ required (this is 12.7.4)", logged)
+        self.assertFalse(self._colima_calls(calls), calls)
+
     # --- the forward check -------------------------------------------------
 
     CHECK = ("rc=0; docker_socket_forward_is_foreign || rc=$?; echo $rc; "
@@ -385,7 +443,7 @@ portForwards:
         self.assertIn("forward for the VM's /var/run/docker.sock is down", logged)
 
     def test_recovery_hint_never_recommends_a_bare_colima_start(self):
-        for launcher in (LAUNCHER, LAUNCHER_SH):
+        for launcher in (LAUNCHER,):
             body = _function_body(_read(launcher), "ensure_docker_socket")
             with self.subTest(launcher=launcher):
                 self.assertNotIn('stop && \\"$BIN_DIR/colima\\" start', body)

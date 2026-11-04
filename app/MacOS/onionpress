@@ -51,7 +51,7 @@ DATA_DIR="$HOME/.onionpress"
 # it starts with `KEY=`; the first such line wins; the value is everything
 # after its first `=`, blanks around it trimmed. $2 (default empty) when
 # no line names KEY. Always succeeds, so `x=$(config_value K)` is safe
-# under `set -e`. Identical in the three launcher scripts
+# under `set -e`. Identical in both launchers
 # (tests/test_config_one_reader.py).
 config_value() {
     local line value
@@ -229,8 +229,11 @@ export LIMA_HOME="$COLIMA_HOME/_lima"
 mkdir -p "$LIMA_HOME"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
-# Also where Colima's own `docker context` create/use/rm calls land: never
-# the user's ~/.docker (see launcher.sh).
+# Also where Colima's own `docker context` create/use/rm calls land: every
+# start creates a "colima" context (made current unless --activate=false)
+# and every stop removes it, in whichever DOCKER_CONFIG Colima inherits.
+# Ours, so the user's ~/.docker (and a "colima" context of their own) is
+# never touched.
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
 export TZ="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo UTC)"
 
@@ -751,6 +754,16 @@ colima_start_with_vm_settings() {
 install_docker() {
     log "Container runtime initialization required"
 
+    # Colima's VZ backend is Apple's Virtualization framework: macOS 13+.
+    local macos_major
+    macos_major=$(sw_vers -productVersion 2>/dev/null | cut -d '.' -f 1)
+    if [ -n "$macos_major" ] && [ "$macos_major" -lt 13 ] 2>/dev/null; then
+        log "ERROR: macOS 13+ required (this is $(sw_vers -productVersion))"
+        echo "ERROR: OnionPress requires macOS 13 (Ventura) or later." >&2
+        echo "Your macOS version: $(sw_vers -productVersion)" >&2
+        exit 1
+    fi
+
     # Read VM memory from config (default: 2 GB — the stack idles at ~840 MB)
     VM_MEMORY=2
     VM_CPU=2
@@ -765,18 +778,34 @@ install_docker() {
         fi
     fi
 
-    # Diffdisk cap (issue #230), same rule as launcher.sh: 20 GiB unless
-    # VM_DISK is set in ~/.onionpress/config before first launch. The cap is
-    # baked in at VM creation, so this fallback path has to pass it too or
-    # a VM created here gets Lima's 100 GiB default.
+    # Diffdisk cap (issue #230): 20 GiB unless VM_DISK is set in
+    # ~/.onionpress/config before first launch. The cap is baked in at VM
+    # creation; without it Lima gives the VM 100 GiB.
     local VM_DISK=20 _cfg_disk
     if [ -f "$DATA_DIR/config" ]; then
         _cfg_disk=$(config_value VM_DISK)
         [ -n "$_cfg_disk" ] && VM_DISK="$_cfg_disk"
     fi
+
+    # A hub (its key imported before the first launch): 5 GB of memory,
+    # kept in the config so the next start's VM size check keeps it, and a
+    # 100 GiB diffdisk, since takeover containers (~50 MB each) pile up on
+    # a busy hub. Admins of large hubs set VM_DISK before the first launch.
+    local hub_key="$DATA_DIR/shared/vanity-keys/oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+    if [ -d "$hub_key" ]; then
+        if [ "$VM_MEMORY" -lt 5 ] 2>/dev/null; then
+            log "OnionHeaven key found: creating the VM with 5GB of memory"
+            VM_MEMORY=5
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" config set VM_MEMORY 5 \
+                >> "$LOG_FILE" 2>&1 || log "WARNING: could not keep VM_MEMORY=5 in the config"
+        fi
+        if [ "$VM_DISK" -lt 100 ] 2>/dev/null; then
+            log "OnionHeaven key found: a 100GB diffdisk for takeover containers (VM_DISK in the config overrides it before the first launch)"
+            VM_DISK=100
+        fi
+    fi
     log "Creating the Colima VM with a ${VM_DISK}GB diffdisk cap"
 
-    # Should not happen if launcher worked, but handle it
     if colima_start_with_vm_settings "$VM_CPU" "$VM_MEMORY" "$VM_DISK"; then
         touch "$COLIMA_HOME/.initialized"
         log "Container runtime initialized successfully"
@@ -1135,6 +1164,27 @@ onion_address_line() {
 # CLI subcommands: setup, backup, restore, reset
 # ===========================================================================
 
+# The VM, up and answering on our own socket: the one place OnionPress
+# starts Colima (issue #545). `start` runs it before the containers; the
+# app bundle's launcher.sh runs it as `start-vm` while the MenubarApp
+# shows its gray icon, because the menubar waits for the daemon's
+# runtime_ready (Colima's .initialized, then `docker info`) before it
+# runs `start`, or shows a first run's welcome screen. Creates the VM on
+# a first run (install_docker), starts a stopped one with the config's
+# size, restarts a running one whose size the config changed.
+start_vm() {
+    if ! RUNTIME=$(detect_container_runtime); then
+        install_docker || exit $?
+        # Re-detect after install
+        RUNTIME=$(detect_container_runtime) || { log "ERROR: Container runtime still not available after install"; exit 1; }
+    fi
+
+    log "Detected container runtime: $RUNTIME"
+
+    # Point DOCKER_HOST at our own VM's socket (never a foreign Colima)
+    ensure_docker_socket || true
+}
+
 main() {
     launcher_environment
     case "${1:-start}" in
@@ -1186,17 +1236,8 @@ main() {
                 --launcher "$SCRIPT_DIR/onionpress" >> "$LOG_FILE" 2>&1 \
                 || log "WARNING: the OnionPress daemon could not be started (see $LOG_FILE)"
 
-            # Detect container runtime (install if needed on first run)
-            if ! RUNTIME=$(detect_container_runtime); then
-                install_docker || exit $?
-                # Re-detect after install
-                RUNTIME=$(detect_container_runtime) || { log "ERROR: Container runtime still not available after install"; exit 1; }
-            fi
-
-            log "Detected container runtime: $RUNTIME"
-
-            # Point DOCKER_HOST at our own VM's socket (never a foreign Colima)
-            ensure_docker_socket || true
+            # The VM (created on a first run)
+            start_vm
 
             # Setup database passwords (generates random passwords on first run)
             setup_db_passwords
@@ -1397,6 +1438,12 @@ main() {
             # Tor Browser / Settings (logged in), and the onionname (show
             # | set NAME).
             bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$1" "${@:2}"
+            ;;
+
+        start-vm)
+            # The app bundle's launcher.sh, while the MenubarApp boots:
+            # the VM alone, no daemon and no containers (start_vm).
+            start_vm
             ;;
 
         start-tor)

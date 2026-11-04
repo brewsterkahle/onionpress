@@ -42,7 +42,7 @@ DATA_DIR="$HOME/.onionpress"
 # it starts with `KEY=`; the first such line wins; the value is everything
 # after its first `=`, blanks around it trimmed. $2 (default empty) when
 # no line names KEY. Always succeeds, so `x=$(config_value K)` is safe
-# under `set -e`. Identical in the three launcher scripts
+# under `set -e`. Identical in both launchers
 # (tests/test_config_one_reader.py).
 config_value() {
     local line value

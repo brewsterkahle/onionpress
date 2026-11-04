@@ -16,7 +16,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# onionpress launcher - Initializes Colima and starts standalone menu bar app
+# The app bundle's entry point (launcher-wrapper.swift execs it): starts the
+# MenubarApp, then has the launcher bring the VM up (`onionpress start-vm`,
+# issue #545) while the menu bar icon shows gray. Everything else, the VM's
+# creation and recovery included, is app/MacOS/onionpress's and the
+# daemon's; this script starts no Colima of its own.
 
 set -e
 
@@ -34,113 +38,10 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
 DATA_DIR="$HOME/.onionpress"
-
-# The value of KEY in ~/.onionpress/config (config_value KEY [default]),
-# by config.read_value's rule (issue #404): a line is KEY's when, stripped,
-# it starts with `KEY=`; the first such line wins; the value is everything
-# after its first `=`, blanks around it trimmed. $2 (default empty) when
-# no line names KEY. Always succeeds, so `x=$(config_value K)` is safe
-# under `set -e`. Identical in the three launcher scripts
-# (tests/test_config_one_reader.py).
-config_value() {
-    local line value
-    line=$(grep -E "^[[:space:]]*$1=" "$DATA_DIR/config" 2>/dev/null | head -1)
-    if [ -z "$line" ]; then
-        printf '%s\n' "${2-}"
-        return 0
-    fi
-    value=${line#*=}
-    value=${value#"${value%%[![:space:]]*}"}
-    value=${value%"${value##*[![:space:]]}"}
-    printf '%s\n' "$value"
-}
-DOCUMENTS_DIR="$HOME/OnionPress"
-OLD_DOCUMENTS_DIR="$HOME/Documents/OnionPress"
-
-# DOCUMENTS_DIR lives at top-of-$HOME (not under ~/Documents/) so the VM
-# can mount it without triggering macOS TCC. See issue #239.
-BIN_DIR="$RESOURCES_DIR/bin"
+# Named here only for the notes below; this script runs no Colima.
 COLIMA_HOME="$DATA_DIR/colima"
 
-mkdir -p "$DATA_DIR"
-
-# One-time host-side migration from ~/Documents/OnionPress to
-# ~/OnionPress (#239). Walks source tree recursively so empty subdirs
-# pre-existing in destination don't block the mv. Marker is set only
-# when the old dir is actually gone; a TCC-denied attempt retries on
-# next launch.
-#
-# REMOVE-AFTER 2026-08-01: by then every active install will have
-# migrated. Delete this block, _op_migrate_tree, and OLD_DOCUMENTS_DIR.
-_op_migrate_tree() {
-    local src="$1" dst="$2"
-    [ -d "$src" ] || return 0
-    mkdir -p "$dst"
-    shopt -s dotglob nullglob 2>/dev/null || true
-    local entry base target
-    for entry in "$src"/*; do
-        [ -e "$entry" ] || continue
-        base=$(basename "$entry")
-        target="$dst/$base"
-        if [ -d "$entry" ] && [ -d "$target" ]; then
-            _op_migrate_tree "$entry" "$target"
-            rmdir "$entry" 2>/dev/null || true
-        else
-            mv -n "$entry" "$target" 2>/dev/null || true
-        fi
-    done
-}
-
-if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    if [ -d "$OLD_DOCUMENTS_DIR" ]; then
-        rm -f "$OLD_DOCUMENTS_DIR/MOVED.txt" 2>/dev/null || true
-        _op_migrate_tree "$OLD_DOCUMENTS_DIR" "$DOCUMENTS_DIR"
-        rmdir "$OLD_DOCUMENTS_DIR" 2>/dev/null || true
-        if [ -d "$OLD_DOCUMENTS_DIR" ]; then
-            echo "OnionPress content moved to $DOCUMENTS_DIR" \
-                > "$OLD_DOCUMENTS_DIR/MOVED.txt" 2>/dev/null || true
-        else
-            printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-        fi
-    else
-        mkdir -p "$DOCUMENTS_DIR"
-        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-    fi
-fi
-
-# Idempotent subtree setup (no TCC concerns now that DOCUMENTS_DIR is
-# top-of-home). Compose's bind-mount needs these subdirs present.
-mkdir -p "$DOCUMENTS_DIR/backups"
-mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
-mkdir -p "$DOCUMENTS_DIR/Social Archives"
-touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
-
-# Emit `--mount $DOCUMENTS_DIR:w`. Defensive existence check against
-# a hand-deleted directory mid-session.
-docs_mount_args() {
-    if [ -d "$DOCUMENTS_DIR" ]; then
-        printf -- '--mount %s:w' "$DOCUMENTS_DIR"
-    fi
-}
-
-# Set up bundled binaries in PATH
-export PATH="$BIN_DIR:$PATH"
-
-# Configure Colima environment
-export COLIMA_HOME="$COLIMA_HOME"
-export LIMA_HOME="$COLIMA_HOME/_lima"
-# Colima honours $COLIMA_HOME only when the directory exists, else it uses
-# ~/.colima, including for the Docker socket forward (see the same mkdir
-# in the onionpress script). Created before anything here runs Colima.
-mkdir -p "$LIMA_HOME"
-export LIMA_INSTANCE="onionpress"
-export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
-# Colima drives the host `docker` CLI: every start creates a "colima" context,
-# switches to it unless --activate=false, and every stop removes it again —
-# in whichever DOCKER_CONFIG it inherits. Hand it our own so the user's
-# ~/.docker (and any "colima" context of their own) is never touched.
-USER_DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
-export DOCKER_CONFIG="$DATA_DIR/docker-config"
+mkdir -p -m 700 "$DATA_DIR"
 
 # Log file — daily rotation matching RotatingLog format (launcher-YYYY-MM-DD-001.log)
 LOGS_DIR="$DATA_DIR/logs"
@@ -174,28 +75,27 @@ log "Starting onionpress launcher..."
 # Releases through 2.5.1 ran Colima from here without DOCKER_CONFIG, leaving a
 # context in the user's Docker config aimed at our VM, made current. That
 # config is theirs to change; only say so.
+USER_DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
 if grep -qsF "unix://$COLIMA_HOME/default/docker.sock" "$USER_DOCKER_CONFIG"/contexts/meta/*/meta.json; then
     log "NOTE: $USER_DOCKER_CONFIG has a Docker context pointing at OnionPress's VM, left by OnionPress <= 2.5.1 — OnionPress leaves it alone; see 'docker context ls'"
 fi
 
-# Colima's start also prepends "Include $COLIMA_HOME/ssh_config" to
-# ~/.ssh/config (creating it) unless passed --ssh-config=false, as every start
-# below is. Colima rewrites that file on each start and stop whatever the flag;
-# while our VM runs it holds a "Host colima" that collides with a Colima of
-# the user's own. Releases through 2.5.1 added the line; again, only say so.
+# Colima's start prepends "Include $COLIMA_HOME/ssh_config" to ~/.ssh/config
+# (creating it) unless passed --ssh-config=false, as the launcher's every
+# start is. While our VM runs that file holds a "Host colima" that collides
+# with a Colima of the user's own. Releases through 2.5.1 added the line;
+# again, only say so.
 if grep -qsxF "Include $COLIMA_HOME/ssh_config" "$HOME/.ssh/config"; then
     log "NOTE: ~/.ssh/config has 'Include $COLIMA_HOME/ssh_config' (a 'Host colima' for OnionPress's VM), left by OnionPress <= 2.5.1 — OnionPress leaves it alone; delete that line to drop it"
 fi
 
-# Detect architecture (use sysctl to get actual hardware, not process architecture)
-# This is important because shell scripts may run under Rosetta on Apple Silicon
+# The MenubarApp runs as the hardware's architecture (sysctl, not the
+# process's: a shell script may still be under Rosetta here).
 if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
     HOST_ARCH="arm64"
-    VM_ARCH="aarch64"
     log "Detected Apple Silicon (ARM64)"
 elif [ "$(uname -m)" = "x86_64" ]; then
     HOST_ARCH="x86_64"
-    VM_ARCH="x86_64"
     log "Detected Intel (x86_64)"
 else
     HOST_ARCH=$(uname -m)
@@ -210,193 +110,6 @@ if [ ! -f "$MENUBAR_APP/Contents/MacOS/OnionPress" ]; then
     echo "ERROR: Application bundle is corrupted. Please reinstall OnionPress." >&2
     exit 1
 fi
-
-# Check if this is first-time initialization
-FIRST_RUN=false
-if [ ! -f "$COLIMA_HOME/.initialized" ]; then
-    FIRST_RUN=true
-    log "First-time initialization detected"
-fi
-
-# Initialize Colima on first run
-# Make sure DOCKER_HOST resolves to *our own* VM's socket — never another Colima.
-#
-# Colima honours COLIMA_HOME, so Lima forwards the guest's /var/run/docker.sock
-# to $COLIMA_HOME/default/docker.sock (the `hostSocket:` entry in the instance's
-# lima.yaml). Launchers up to v2.4.110 assumed the socket always landed in
-# ~/.colima/ and symlinked that path into COLIMA_HOME to "bridge the gap". The
-# bridge could only ever fire when our own forward was missing — so in practice
-# it pointed DOCKER_HOST at whatever *other* Colima the user happened to be
-# running, and OnionPress then deployed wordpress/db/tor into that VM. Repair
-# any link left over from those versions, then wait for our own forward.
-ensure_docker_socket() {
-    local socket_path="$COLIMA_HOME/default/docker.sock"
-    local wait_secs="${1:-45}"
-    local waited=0
-    local target
-
-    if [ -L "$socket_path" ]; then
-        target=$(readlink "$socket_path")
-        case "$target" in
-            "$COLIMA_HOME"/*)
-                : ;;  # inside our own VM state — leave it alone
-            *)
-                log "WARNING: removing foreign Docker socket link ($socket_path -> $target)"
-                rm -f "$socket_path"
-                ;;
-        esac
-    fi
-
-    while [ "$waited" -lt "$wait_secs" ]; do
-        if [ -S "$socket_path" ]; then
-            [ "$waited" -gt 0 ] && log "Docker socket ready after ${waited}s"
-            return 0
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-
-    log "ERROR: Docker socket never appeared at $socket_path after ${wait_secs}s"
-    log "  Lima's forward for the VM's /var/run/docker.sock is down."
-    log "  Diagnose: $COLIMA_HOME/_lima/colima/ha.stderr.log"
-    log "  Recover:  quit OnionPress, \"$BIN_DIR/colima\" stop, start OnionPress again (never a bare colima \"start\": without OnionPress's flags it mounts the whole home folder into the VM)"
-    return 1
-}
-
-initialize_colima() {
-    if [ ! -f "$COLIMA_HOME/.initialized" ]; then
-        log "Initializing Colima container runtime..."
-
-        # Check macOS version >= 13
-        MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
-        if [ "$MACOS_VERSION" -lt 13 ]; then
-            log "ERROR: macOS 13+ required"
-            echo "ERROR: onionpress requires macOS 13 (Ventura) or later." >&2
-            echo "Your macOS version: $(sw_vers -productVersion)" >&2
-            echo "The bundled container runtime uses Apple's virtualization framework which requires macOS 13+." >&2
-            exit 1
-        fi
-
-        # Initialize Colima
-        # Read VM memory from config (default: 1 GB)
-        VM_MEMORY=1
-        if [ -f "$DATA_DIR/config" ]; then
-            config_mem=$(config_value VM_MEMORY)
-            if [ ! -z "$config_mem" ]; then
-                VM_MEMORY="$config_mem"
-            fi
-        fi
-        # Pre-check: if onionheaven key is imported, start with 5GB to avoid a restart
-        local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_MEMORY" -lt 5 ]; then
-            log "OnionHeaven key detected in launcher — starting VM with 5GB"
-            VM_MEMORY=5
-            # Persist to config so subsequent starts also use 5GB
-            if [ -f "$DATA_DIR/config" ] && grep -q "^VM_MEMORY=" "$DATA_DIR/config" 2>/dev/null; then
-                sed -i.bak "s/^VM_MEMORY=.*/VM_MEMORY=5/" "$DATA_DIR/config"
-            else
-                echo "VM_MEMORY=5" >> "$DATA_DIR/config"
-            fi
-        fi
-
-        # Read VM disk cap from config (default: 20 GiB for normal nodes,
-        # 100 GiB for the hub). Hub takeover containers are small per
-        # instance (~50 MB c-tor) but accumulate at scale — a hub serving
-        # thousands of users could see hundreds of simultaneous takeovers.
-        # Admins of large hubs should set VM_DISK in ~/.onionpress/config
-        # BEFORE first launch (cap is baked in at VM creation).
-        VM_DISK=20
-        if [ -f "$DATA_DIR/config" ]; then
-            config_disk=$(config_value VM_DISK)
-            if [ ! -z "$config_disk" ]; then
-                VM_DISK="$config_disk"
-            fi
-        fi
-        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$VM_DISK" -lt 100 ]; then
-            log "OnionHeaven key detected — sizing diffdisk at 100GB for takeover-container headroom"
-            log "  (set VM_DISK=N in ~/.onionpress/config before first launch to override)"
-            VM_DISK=100
-        fi
-        # Create minimal shared directory to avoid Downloads folder permission prompt
-        mkdir -p "$DATA_DIR/shared"
-        # Cap diffdisk at 20 GiB on first VM creation (#230). Lima's default
-        # is 100 GiB which alarms users seeing it in Finder; real usage stays
-        # well under 5 GiB with auto-prune in the image-update path. The
-        # value is baked in at VM creation; existing installs keep their
-        # original cap and are unaffected by changing this number.
-        # launcher.sh runs under set -e: a bare failing `colima start` would
-        # exit here, before the rc check below ever ran, with no ERROR line
-        # and the MenubarApp left orphaned. Capture the status instead.
-        colima_rc=0
-        if [ "$HOST_ARCH" = "arm64" ]; then
-            # Apple Silicon: use VZ backend (Virtualization.framework)
-            "$BIN_DIR/colima" start \
-                --activate=false \
-                --ssh-config=false \
-                --vm-type vz \
-                --mount-type virtiofs \
-                --mount "$DATA_DIR/shared:w" \
-                $(docs_mount_args) \
-                --cpu 2 \
-                --memory "$VM_MEMORY" \
-                --disk "$VM_DISK" \
-                --arch "$VM_ARCH" \
-                --vz-rosetta=false \
-                >> "$LOG_FILE" 2>&1 || colima_rc=$?
-        else
-            # Intel: use QEMU backend
-            "$BIN_DIR/colima" start \
-                --activate=false \
-                --ssh-config=false \
-                --vm-type qemu \
-                --mount-type sshfs \
-                --mount "$DATA_DIR/shared:w" \
-                $(docs_mount_args) \
-                --cpu 2 \
-                --memory "$VM_MEMORY" \
-                --disk "$VM_DISK" \
-                --arch "$VM_ARCH" \
-                >> "$LOG_FILE" 2>&1 || colima_rc=$?
-        fi
-
-        if [ "$colima_rc" -eq 0 ]; then
-            touch "$COLIMA_HOME/.initialized"
-            log "Colima initialized successfully"
-        else
-            log "ERROR: Colima init failed (rc=$colima_rc) — see $LOG_FILE"
-            echo "ERROR: Failed to initialize container runtime." >&2
-            echo "Check the logs for details: $LOG_FILE" >&2
-            exit 1
-        fi
-    fi
-
-    # Ensure Colima is running
-    if ! "$BIN_DIR/colima" status >/dev/null 2>&1; then
-        # Read VM memory from config (default: 1 GB)
-        local vm_mem=1
-        if [ -f "$DATA_DIR/config" ]; then
-            local cfg_mem=$(config_value VM_MEMORY)
-            if [ ! -z "$cfg_mem" ]; then
-                vm_mem="$cfg_mem"
-            fi
-        fi
-        # Pre-check: if onionheaven key exists, ensure 5GB
-        local onionheaven_address="oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-        if [ -d "$DATA_DIR/shared/vanity-keys/$onionheaven_address" ] && [ "$vm_mem" -lt 5 ]; then
-            log "OnionHeaven key detected in launcher — starting VM with 5GB"
-            vm_mem=5
-        fi
-        log "Starting Colima VM..."
-        "$BIN_DIR/colima" start \
-            --activate=false \
-            --ssh-config=false \
-            --mount "$DATA_DIR/shared:w" \
-            $(docs_mount_args) \
-            --memory "$vm_mem" \
-            >> "$LOG_FILE" 2>&1 \
-            || log "ERROR: colima start failed (rc=$?) — see $LOG_FILE; the MenubarApp will keep waiting for Docker"
-    fi
-}
 
 # Check if THIS bundle's menubar app is already running.
 # Anchored: the real process's command line is exactly the executable
@@ -428,13 +141,21 @@ arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/OnionPress" >> "$LOG_FILE" 2>&1 
 MENUBAR_PID=$!
 log "Menu bar app launched (PID: $MENUBAR_PID)"
 
-# Run initialization (menubar is now visible with gray icon during this)
-initialize_colima
-
-# Point DOCKER_HOST at our own VM's socket (never a foreign Colima)
-ensure_docker_socket || true
-
-log "Setup complete"
+# The VM, through the launcher's one VM start (issue #545): the MenubarApp
+# waits for the daemon's runtime_ready (Colima's .initialized, then
+# `docker info`) before it runs `onionpress start` or shows a first run's
+# welcome screen, so the VM is brought up here, while the icon is gray,
+# rather than left to that start. start-vm creates the VM on a first run
+# (refusing macOS < 13) and starts a stopped one; its own lines go to
+# ~/.onionpress/onionpress.log. Under set -e a failure is caught on the
+# same line: the MenubarApp keeps running and says what it is waiting for.
+vm_rc=0
+"$SCRIPT_DIR/onionpress" start-vm >> "$LOG_FILE" 2>&1 || vm_rc=$?
+if [ "$vm_rc" -eq 0 ]; then
+    log "Setup complete"
+else
+    log "ERROR: onionpress start-vm failed (rc=$vm_rc) — see $DATA_DIR/onionpress.log; the MenubarApp will keep waiting for Docker"
+fi
 
 # Stay alive so macOS can send us Apple Event quit (osascript -e 'quit app').
 # Forward SIGTERM to the MenubarApp so it runs its full cleanup.

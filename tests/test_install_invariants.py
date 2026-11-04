@@ -1438,7 +1438,9 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
     never touches a context.)
     """
 
-    SHELL_LAUNCHERS = ["app/MacOS/launcher.sh", "app/MacOS/onionpress"]
+    # The one shell script that runs Colima: the app bundle's launcher.sh
+    # only calls its `start-vm` (issue #545; tests/test_colima_home_before_first_start.py).
+    SHELL_LAUNCHERS = ["app/MacOS/onionpress"]
     SHELL_START = re.compile(r'(?i)colima(_bin)?"? start\b')
     SHELL_RUN = re.compile(
         r'(?i)colima(_bin)?"? (start|stop|restart|delete|status|list|version)\b')
@@ -1592,7 +1594,7 @@ class TestColimaStaysOutOfUserSSHConfig(unittest.TestCase):
                         self.assertEqual(f.read(), content, "~/.ssh/config is the user's")
 
         # ...and nothing else refers to ~/.ssh at all.
-        sources = list(self.COLIMA.SHELL_LAUNCHERS) + sorted(
+        sources = [self.LAUNCHER] + list(self.COLIMA.SHELL_LAUNCHERS) + sorted(
             os.path.relpath(os.path.join(dirpath, name), PROJECT_ROOT)
             for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src"))
             for name in names if name.endswith(".py"))
@@ -1722,7 +1724,7 @@ exit 0
         self.assertIn("start: limactl start failed", logged)
 
     def test_does_not_touch_a_vm_lima_reports_stopped(self):
-        # A stopped VM is not the wedge: `colima start` (launcher.sh or
+        # A stopped VM is not the wedge: `colima start` (the launcher's
         # detect_container_runtime) owns that case, and a stop -f here would
         # fight it.
         for status in ("Stopped", "Broken", ""):
@@ -1756,7 +1758,8 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
 
     launcher.sh and `onionpress start` run under set -e, so a bare failing
     command exits the script before any `$?` check or ERROR line after it
-    can run; every colima start is therefore guarded on the same line.
+    can run; launcher.sh's VM start (`onionpress start-vm`) is therefore
+    guarded on the same line.
     `onionpress start` names the components that failed in one START
     SUMMARY line before "OnionPress is running!", and the MenubarApp reads
     the launcher's exit status instead of inferring "Stopped" from an
@@ -1767,18 +1770,10 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
     ONIONPRESS = "app/MacOS/onionpress"
     MENUBAR = "src/menubar.py"
 
-    def test_every_colima_start_in_launcher_sh_is_rc_guarded(self):
+    def test_launcher_sh_vm_start_is_rc_guarded(self):
         text = _read(self.LAUNCHER)
-        body = TestKeyVolumeMigration._function_body(text, "initialize_colima")
-        starts = [m.start() for m in re.finditer(r'"\$BIN_DIR/colima" start \\', body)]
-        self.assertGreaterEqual(len(starts), 3, "expected first-run (x2) and restart colima starts")
-        for s in starts:
-            block = body[s:s + 700]
-            with self.subTest(start=block.splitlines()[0]):
-                self.assertRegex(
-                    block, r'2>&1( \\\n\s+| )\|\| (colima_rc=\$\?|log "ERROR)',
-                    "a colima start must capture or log its failure on the same "
-                    "command line; under set -e nothing after it runs otherwise")
+        self.assertIn('"$SCRIPT_DIR/onionpress" start-vm >> "$LOG_FILE" 2>&1 || vm_rc=$?\n', text)
+        self.assertIn('log "ERROR: onionpress start-vm failed (rc=$vm_rc)', text)
 
     def test_start_summary_precedes_every_running_line(self):
         text = _read(self.ONIONPRESS)

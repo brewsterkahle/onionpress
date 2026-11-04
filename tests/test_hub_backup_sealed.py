@@ -188,12 +188,12 @@ class TestRecoveryKey(unittest.TestCase):
         shared = os.path.join(self.data_dir, "shared")
         self.assertFalse(os.path.commonpath([path, shared]) == shared)
         # Every Colima mount is shared/ or the Documents folder.
-        for rel in ("app/MacOS/launcher.sh",):
+        for rel in ("app/MacOS/onionpress",):
             text = _read(rel)
             mounts = re.findall(r"--mount[\"'],?\s*f?[\"']?([^\s\"']+)", text)
             mounts += re.findall(r"--mount (\S+)", text)
             self.assertTrue(mounts, rel)
-            # launcher.sh's documents_mount_flag: printf '--mount %s:w' "$DOCUMENTS_DIR"
+            # the launcher's docs_mount_args: printf '--mount %s:w' "$DOCUMENTS_DIR"
             if "%s:w'" in mounts:
                 self.assertIn("printf -- '--mount %s:w' \"$DOCUMENTS_DIR\"", text)
                 mounts = [m for m in mounts if m != "%s:w'"]
