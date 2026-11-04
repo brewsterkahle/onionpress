@@ -179,6 +179,7 @@ class TestShareBundle(unittest.TestCase):
             with self.subTest(path=path, st=st):
                 self.assertEqual(self.share(path, st), (False, []))
 
+    @unittest.skipUnless(sys.platform == "darwin", "stages with a Mac's xattr")
     def test_staging_shares_the_copy_before_it_is_live(self):
         src = tempfile.mkdtemp(prefix="op-src-")
         parent = tempfile.mkdtemp(prefix="op-apps-")
