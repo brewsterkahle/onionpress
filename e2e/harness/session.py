@@ -82,8 +82,7 @@ class Session:
         """Probe, choose platforms, resolve builds, clean leftovers, make
         the node objects (nothing is installed yet)."""
         self._claim_root()
-        mac_app_hint = self.opts.mac_app or self._existing_app_hint()
-        facts = platforms.probe_host(mac_app=mac_app_hint)
+        facts = platforms.probe_host(mac_app=platforms.app_candidates(PROJECT_DIR, self.opts.mac_app))
         if self.opts.limactl:
             facts.tools["limactl"] = self.opts.limactl
         self.report.host = facts.label
@@ -182,12 +181,6 @@ class Session:
         shutil.rmtree(self.root, ignore_errors=True)
 
     # ── builds ──────────────────────────────────────────────────────────
-    def _existing_app_hint(self):
-        built = os.path.join(PROJECT_DIR, "OnionPress.app")
-        if os.path.isdir(built):
-            return built
-        return "/Applications/OnionPress.app" if os.path.isdir("/Applications/OnionPress.app") else None
-
     def _download_release_asset(self, name):
         dest = os.path.join(self.root + "-downloads", self.opts.release)
         os.makedirs(dest, exist_ok=True)

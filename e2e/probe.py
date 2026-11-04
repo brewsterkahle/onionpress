@@ -18,9 +18,7 @@ def main():
     ap.add_argument("--platforms", default="")
     args = ap.parse_args()
 
-    app_hint = args.mac_app or next((p for p in (os.path.join(PROJECT_DIR, "OnionPress.app"),
-                                                 "/Applications/OnionPress.app") if os.path.isdir(p)), None)
-    facts = platforms.probe_host(mac_app=app_hint)
+    facts = platforms.probe_host(mac_app=platforms.app_candidates(PROJECT_DIR, args.mac_app))
     offer_list = platforms.offers(facts)
     wanted = [platforms.canonical_platform(p) for p in args.platforms.split(",") if p] or None
     chosen, not_tested = platforms.choose(offer_list, wanted)

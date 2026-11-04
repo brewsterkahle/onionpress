@@ -9,19 +9,14 @@ reason).
 """
 
 import json
-import secrets
 
 import pytest
 
 from harness.nodes.base import CORE_CONTAINERS
 from harness.proc import wait_until
+from harness.scenario import ADMIN_PASSWORD, ADMIN_USER
 
 pytestmark = [pytest.mark.tier("t0"), pytest.mark.incremental, pytest.mark.platform("any")]
-
-ADMIN_USER = "op-e2e-admin"
-# One password per run, never written anywhere but the node; the harness
-# log replaces it with ***.
-ADMIN_PASSWORD = secrets.token_urlsafe(18)
 
 TOR_REACH_TIMEOUT = 1200      # a fresh descriptor can take several minutes
 

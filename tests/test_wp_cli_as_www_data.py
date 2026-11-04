@@ -67,7 +67,9 @@ def _shipped_files():
     out = []
     for top in ("app", "linux", "src", "build"):
         for root, dirs, files in os.walk(os.path.join(PROJECT_ROOT, top)):
-            dirs[:] = [d for d in dirs if d not in ("__pycache__", "node_modules")]
+            # coverage-html: `make coverage`'s report (gitignored), whose
+            # pages quote the sources' comments; a second run read them.
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", "node_modules", "coverage-html")]
             for name in files:
                 path = os.path.join(root, name)
                 try:

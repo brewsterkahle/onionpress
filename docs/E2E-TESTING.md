@@ -1,6 +1,6 @@
 # End-to-end tests (design)
 
-Status: design agreed in outline, 2026-10-24 (decisions in §9). Nothing here is built yet.
+Status: design agreed in outline, 2026-10-24 (decisions in §9). Built so far: the harness, T0 and T1 (a) (§8, §10).
 
 The unit suite (`make test-unit`, ~150 files) checks code and text: censuses,
 pins, fake iptables, PHP harnesses. What it cannot say is that a fresh
@@ -29,7 +29,8 @@ required, cited or awaited (§9). That is revisited once development slows.
    the real OnionHome. The harness writes every node's
    `~/.onionpress/config` *before* its first start:
    `REGISTER_WITH_ONIONHEAVEN=no`, or `ONIONHEAVEN_ADDRESS=<test hub>`;
-   `ONIONHOME_ADDRESS=<test home>`; `SHARE_ANALYTICS_WITH_ONIONHOME=no`
+   `ONIONHOME_ADDRESS=<test home>`, empty for none (#554: no onionname is
+   registered then, nor while OnionHeaven is off); `SHARE_ANALYTICS_WITH_ONIONHOME=no`
    unless under test. A **tripwire** greps every node's logs and the tor
    container's control-port events at teardown for the canonical hub and
    OnionHome addresses and fails the run if either appears.
@@ -117,26 +118,33 @@ A test whose roles cannot be filled is skipped with that reason.
 
 ## 3. Harness
 
+As built (planned parts marked):
+
 ```
 e2e/                       top-level, so `unittest discover tests` never finds it
-  conftest.py              topology fixtures, safety guard, evidence collection
-  platforms.py             probe the host: which node kinds it can provide
-  nodes/
-    base.py                Node: run(cmd), launcher(subcmd), docker(…), wp(…),
-                           http_local(path), http_onion(addr, path, via=),
-                           config_set(k, v), logs(), wait_until(pred, timeout),
-                           facts() (os, version, arch, docker flavour, install method)
-    mac.py                 MacNode: scratch HOME, Colima, app bundle / launcher
-    linux_vm.py            LinuxVMNode in a Lima VM (--guest debian-13 | ubuntu-24.04)
-    linux_user.py          LinuxNode as a throwaway user with rootless Docker
-    linux_host.py          LinuxNode on a disposable host (CI runner)
-  tor.py                   descriptor/HS_DESC helpers over the control port,
-                           reachability with retries and timing
-  browser.py               Playwright (WordPress admin pages, extension)
-  macui.py                 menubar + native dialogs via accessibility (thin)
-  fixtures/                legacy backups, WXR, social exports, malicious zips
-  test_t0_stack.py … test_t4_external.py
+  conftest.py              pytest wiring: the session, `node` / `ready_node`, report hooks
   run.sh                   entry point: tier/node selection, keep-on-failure
+  probe.py, merge-results.py
+  harness/                 plain Python, no pytest (tests/test_e2e_harness.py)
+    platforms.py           probe the host: which node kinds it can provide
+    safety.py              the guard, the baseline config, the tripwire
+    session.py             builds, nodes, prewarm, evidence, teardown
+    scenario.py            ensure_ready: the site T0 builds, for later tiers
+    hardening.py           T1 (a)'s readings of `docker inspect`
+    report.py, proc.py     the platform-aware report; commands, waits, the node log
+    nodes/
+      base.py              Node: exec, docker, launcher, http_local, tor_fetch,
+                           http_from_tor, wait_for_*, wp_login, evidence
+      mac.py               MacNode: scratch HOME, Colima, app bundle / launcher
+      linux_vm.py          LinuxVMNode in a Lima VM (--guest debian-13 | ubuntu-24.04)
+      linux_user.py        (planned) a throwaway user with rootless Docker
+      linux_host.py        (planned) a disposable host (CI runner)
+    tor.py                 (planned) descriptor/HS_DESC helpers over the control port
+    browser.py             (planned) Playwright (WordPress admin pages, extension)
+    macui.py               (planned) menubar + native dialogs via accessibility
+  fixtures/                (planned) legacy backups, WXR, social exports; malicious
+                           archives built at run time with the product's backup code
+  test_t0_*.py, test_t1_<letter>_*.py … test_t4_*.py
 ```
 
 - **pytest**, not unittest: session/module fixtures (install once, run many
@@ -218,7 +226,11 @@ Small, test-motivated, each with its own unit test:
 1. **OnionHome address from config in the tor image.** `web-server.py`
    hardcodes `_ONIONHOME_ADDRESS`; `config.py` already has
    `ONIONHOME_ADDRESS`. Pass it through compose/env so a test node forwards
-   name registrations to the test home on published images.
+   name registrations to the test home on published images. Since #554 the
+   host's own registrations read the config's address (empty is none), and
+   nothing registers while OnionHeaven is off, so this now matters only
+   for T2's `home` role: the name-sync plugin's relay through the tor
+   container still goes to the built-in address.
 2. **Update feed override.** `updater.py` hardcodes
    `brewsterkahle/onionpress`; Linux already has `RELEASE_REPO`. A
    `ONIONPRESS_RELEASE_REPO` (or a local URL) lets the updater tests install
@@ -227,19 +239,12 @@ Small, test-motivated, each with its own unit test:
 3. **Wayback endpoint override** (filter in the mu-plugin) pointing at a
    mock container, so the sweep can be run end to end without submitting
    to the public Wayback Machine.
-4. **The setup window's provisioning without the window.** Both launchers'
-   `onionpress setup --user … --pass …` install WordPress headlessly (T0
-   uses it), but the Mac setup window also creates the owner's subsite and
-   onion name (`setup_logic.install_fresh_wordpress`); a CLI path to that
-   would let T1 test the Mac first run as a user gets it.
-5. **A daemon launchd label per data directory.** The Mac daemon's agent is
-   `org.onionpress.daemon` in the user's gui domain, whatever `$HOME` says.
-   A test node in a scratch `HOME` and the live install of the same macOS
-   user would take over each other's agent (a test teardown's `bootout`
-   would stop the live heartbeat; the hub takes the address over ~10 min
-   later). Until the label carries the data directory, the harness refuses
-   to start a Mac node while that label is loaded for any program outside
-   its scratch root (`harness/safety.py`).
+4. ~~The setup window's provisioning without the window.~~ Done: both
+   UIs install through `onionpress setup --json` since #527, the path T0
+   uses.
+5. ~~A daemon launchd label per data directory.~~ Done (#505); the
+   harness still refuses a Mac node while the default label is loaded for
+   a program outside its scratch root (`harness/safety.py`), as a guard.
 6. Optional time knobs for slow paths (republish window, takeover delay),
    env-only, logged loudly when set. `ONIONHEAVEN_HEARTBEAT_INTERVAL`
    already exists.
@@ -457,7 +462,32 @@ what this host could test without starting anything.
 2. §5.1 (OnionHome override) and pre-written configs, so T2 needs no image
    patching.
 3. T1 backup/restore, keys, and security properties (highest bug yield in
-   past QA).
+   past QA). Started: `test_t1_a_hardening.py` (DNS, egress, capabilities,
+   the socket, the data dir). T1 modules are named `test_t1_<letter>_*.py`
+   (run.sh takes `test_<tier>_*.py`, in name order: read-only modules
+   first) and take `ready_node`, the node as T0 leaves it
+   (`harness/scenario.py`), so `--tier t1` runs on its own. The batch,
+   about 50 min per platform, needing only the `node` role:
+   - **a, hardening** (built): read-only, about 3 min.
+   - **b, the Settings page's requests** (#528): requests written as
+     www-data into the shared volume (`refresh-status`, `update` and its
+     throttle, `upload-analytics` refused while sharing is off, an unknown
+     verb dropped, a malformed `archive-login` removed unread, a config
+     write allowlisted), their results carrying the request id, and what
+     `status.json` and `config-current.json` show WordPress.
+   - **c, onionnames** (#527, #554): the setup's name recorded, never
+     registered; `onionname set --rename-admin` renames the login.
+   - **d, keys** (#311): damaged C Tor files re-derived with the same
+     address; garbage, small-order and bit-255 keys refused; a valid
+     import moving the address (last in the module).
+   - **e, backup and restore** (runs last): CLI backup, wrong password,
+     truncated, newer-format and malicious archives refused, reset →
+     restore with the same address and content, the pinned format-2
+     fixture.
+
+   Harness work it needs: `node.as_www_data` (b), `setup_wordpress`
+   through `setup --json` with the password in the environment, and
+   malicious archives built with `backup.pack_backup` at run time (e).
 4. T1 WordPress features with Playwright.
 5. T2 federation.
 6. §5.2 and T3 upgrade/updater.
@@ -531,7 +561,8 @@ and `docker inspect`). Nodes live under `/tmp/ope2e` (`--scratch-root`),
 which the harness claims with a marker file; the next run removes
 whatever a killed or `--keep` run left there (VMs included).
 
-Code: `e2e/harness/` (probe, safety, nodes, report, session; no pytest
+Code: `e2e/harness/` (probe, safety, nodes, report, session, scenario,
+hardening; no pytest
 in it, so `tests/test_e2e_harness.py` checks it in the unit suite),
 `e2e/conftest.py` (pytest wiring), `e2e/test_t<N>_*.py` (tiers).
 

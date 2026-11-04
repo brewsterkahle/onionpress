@@ -13,7 +13,7 @@ import unittest
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
 
-from harness import platforms, safety  # noqa: E402
+from harness import hardening, platforms, safety, scenario  # noqa: E402
 from harness.nodes.base import parse_curl_include, wp_port_from_status  # noqa: E402
 from harness.nodes.linux_vm import LinuxVMNode, guest_template  # noqa: E402
 from harness.nodes.mac import MacNode, pick_port_offset  # noqa: E402
@@ -41,6 +41,43 @@ class HostProbeTest(unittest.TestCase):
             facts = platforms.probe_host(sys_platform="darwin", mac_ver="15.1", machine="arm64",
                                          which=_which({}), mac_app=app)
         self.assertEqual(facts.tools["limactl"], bundled)
+
+    def test_a_bundle_without_limactl_is_passed_over(self):
+        """A build still being made (`make dmg` beside a run) has no
+        limactl yet: the next candidate's is used, so the run does not
+        report "no limactl" while the installed app has one."""
+        with tempfile.TemporaryDirectory() as root:
+            half_built = os.path.join(root, "build", "OnionPress.app")
+            installed = os.path.join(root, "installed", "OnionPress.app")
+            os.makedirs(os.path.join(half_built, "Contents", "Resources"))
+            bundled = os.path.join(installed, "Contents", "Resources", "bin", "limactl")
+            os.makedirs(os.path.dirname(bundled))
+            open(bundled, "w").close()
+            facts = platforms.probe_host(sys_platform="darwin", mac_ver="27.0", machine="arm64",
+                                         which=_which({}), mac_app=[half_built, installed])
+            self.assertEqual(facts.tools["limactl"], bundled)
+            # The first bundle that has one wins.
+            first = os.path.join(half_built, "Contents", "Resources", "bin", "limactl")
+            os.makedirs(os.path.dirname(first))
+            open(first, "w").close()
+            facts = platforms.probe_host(sys_platform="darwin", mac_ver="27.0", machine="arm64",
+                                         which=_which({}), mac_app=[half_built, installed])
+            self.assertEqual(facts.tools["limactl"], first)
+
+    def test_app_candidates_order(self):
+        self.assertEqual(platforms.app_candidates("/co"),
+                         ["/co/OnionPress.app", platforms.INSTALLED_APP])
+        self.assertEqual(platforms.app_candidates("/co", "/x/OnionPress.app"),
+                         ["/x/OnionPress.app", "/co/OnionPress.app", platforms.INSTALLED_APP])
+
+    def test_probe_and_session_ask_the_same_bundles(self):
+        """The probe and the run once chose their bundle differently, so a
+        probe said linux-vm while the run found no limactl."""
+        for rel in ("e2e/probe.py", "e2e/harness/session.py"):
+            with open(os.path.join(PROJECT_DIR, rel), encoding="utf-8") as f:
+                src = f.read()
+            self.assertIn("platforms.app_candidates(PROJECT_DIR", src, rel)
+            self.assertNotIn("/Applications/OnionPress.app", src, rel)
 
     def test_mac_without_any_limactl_tests_only_macos(self):
         facts = platforms.probe_host(sys_platform="darwin", mac_ver="27.0", machine="arm64",
@@ -379,6 +416,136 @@ class NodeHelpersTest(unittest.TestCase):
             self.assertEqual(node.wp_port, 8080, "no status yet: the default")
             node.read_file = lambda rel: '{"wp_port": 18080}' if rel == ".onionpress/status.json" else ""
             self.assertEqual(node.wp_port, 18080)
+
+
+
+def _container(name, service, *, cap_add=(), cap_drop=("ALL",),
+               security_opt=("no-new-privileges:true",), privileged=False, mounts=()):
+    return {"Name": "/" + name,
+            "Config": {"Labels": {hardening.COMPOSE_SERVICE_LABEL: service}},
+            "HostConfig": {"CapAdd": list(cap_add), "CapDrop": list(cap_drop),
+                           "SecurityOpt": list(security_opt), "Privileged": privileged},
+            "Mounts": list(mounts)}
+
+
+class HardeningTest(unittest.TestCase):
+    """T1 (a)'s readings of `docker inspect` (e2e/test_t1_a_hardening.py)."""
+
+    def setUp(self):
+        self.census, self.never = hardening.load_capability_census()
+
+    def test_the_census_is_the_unit_suites(self):
+        self.assertEqual(self.census["tor"], {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"})
+        self.assertEqual(self.census["autoheal-proxy"], set())
+        self.assertIn("cloudflared", self.census)
+        self.assertIn("NET_RAW", self.never)
+
+    def test_the_census_held(self):
+        docs = [_container("onionpress-tor", "tor",
+                           cap_add=["CAP_CHOWN", "CAP_DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                           cap_drop=["CAP_ALL"], security_opt=["no-new-privileges=true"]),
+                _container("onionpress-autoheal-proxy", "autoheal-proxy")]
+        self.assertEqual(hardening.capability_findings(docs, self.census, self.never), [])
+
+    def test_each_way_to_break_it_is_named(self):
+        cases = {
+            "not a compose service": _container("stray", "stray"),
+            "privileged": _container("onionpress-db", "db", privileged=True),
+            "not ALL": _container("onionpress-db", "db", cap_drop=["NET_RAW"]),
+            "which nothing may": _container("onionpress-db", "db", cap_add=["NET_RAW"]),
+            "beyond the census": _container("onionpress-db", "db", cap_add=["KILL"]),
+            "no no-new-privileges": _container("onionpress-db", "db", security_opt=[]),
+        }
+        for words, doc in cases.items():
+            with self.subTest(words):
+                found = hardening.capability_findings([doc], self.census, self.never)
+                self.assertTrue(any(words in f for f in found), found)
+
+    def test_only_the_two_mount_the_socket_and_read_only(self):
+        sock = {"Source": "/run/user/1000/docker.sock", "Destination": "/var/run/docker.sock",
+                "RW": False}
+        ok = [_container("onionpress-autoheal-proxy", "autoheal-proxy", mounts=[sock]),
+              _container("onionheaven-farm", "onionheaven-farm", mounts=[sock]),
+              _container("onionpress-autoheal", "autoheal",
+                         mounts=[{"Source": "autoheal-proxy", "Destination": "/run/autoheal-proxy"}])]
+        self.assertEqual(hardening.socket_findings(ok), [])
+        bad = [_container("onionpress-wordpress", "wordpress", mounts=[sock]),
+               _container("onionheaven-farm", "onionheaven-farm", mounts=[{**sock, "RW": True}])]
+        found = hardening.socket_findings(bad)
+        self.assertEqual(len(found), 2, found)
+
+    def test_default_gateway_from_proc_net_route(self):
+        route = ("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
+                 "eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\n"
+                 "eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\n")
+        self.assertEqual(hardening.default_gateway(route), "172.18.0.1")
+        self.assertEqual(hardening.default_gateway("Iface Destination Gateway\n"), "")
+        self.assertEqual(hardening.default_gateway("h\neth0 00000000 zz0012AC\n"), "")
+
+
+class _FakeNode:
+    def __init__(self, **done):
+        self.address = done.get("address", "")
+        self.first_key_digest = done.get("digest", "")
+        self.wp_admin_user = done.get("admin", "")
+        self.steps = []
+
+    def start(self):
+        self.steps.append("start")
+
+    def wait_for_address(self):
+        return "a" * 56 + ".onion"
+
+    def served_key_digest(self):
+        return "digest"
+
+    def wait_for_local_site(self):
+        self.steps.append("local site")
+
+    def setup_wordpress(self, user, password):
+        self.steps.append(("setup", user))
+        self.wp_admin_user = user
+
+
+class _FakeSession:
+    def __init__(self):
+        self.verified = []
+
+    def wait_installed(self, node):
+        node.steps.append("installed")
+
+    def verify_address(self, node, address):
+        self.verified.append(address)
+        return address
+
+
+class ScenarioTest(unittest.TestCase):
+    """ensure_ready: the site T0 builds, for a tier run without T0."""
+
+    def test_a_fresh_node_is_brought_up(self):
+        node, e2e = _FakeNode(), _FakeSession()
+        scenario.ensure_ready(e2e, node)
+        self.assertEqual(node.steps, ["installed", "start", "local site",
+                                      ("setup", scenario.ADMIN_USER)])
+        self.assertEqual(e2e.verified, [node.address])
+        self.assertEqual(node.first_key_digest, "digest")
+
+    def test_what_t0_did_is_not_done_again(self):
+        node = _FakeNode(address="b" * 56 + ".onion", digest="t0", admin="op-e2e-admin")
+        scenario.ensure_ready(_FakeSession(), node)
+        self.assertEqual(node.steps, ["installed", "local site"])
+        self.assertEqual(node.first_key_digest, "t0")
+
+    def test_t0_uses_the_same_admin(self):
+        with open(os.path.join(PROJECT_DIR, "e2e", "test_t0_stack.py"), encoding="utf-8") as f:
+            self.assertIn("from harness.scenario import ADMIN_PASSWORD, ADMIN_USER", f.read())
+
+    def test_every_tier_file_is_found_by_run_sh(self):
+        """run.sh takes e2e/test_<tier>_*.py."""
+        for name in os.listdir(os.path.join(PROJECT_DIR, "e2e")):
+            if name.startswith("test_") and name.endswith(".py"):
+                with self.subTest(name):
+                    self.assertRegex(name, r"^test_t\d_[a-z0-9_]+\.py$")
 
 
 if __name__ == "__main__":
