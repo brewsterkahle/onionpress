@@ -606,7 +606,7 @@ CONFIG_KEY_HELP = {
     "INSTALL_CACHE_ENABLER": "install the Cache Enabler plugin (restart)",
     "REPUBLISH_ON_UNREACHABLE": "ask Tor for fresh introduction points when the site is unreachable",
     "QUIT_KEEPS_SITE_RUNNING": "macOS: Quit closes only the menu bar app; the site keeps running (default no: Quit takes the site down)",
-    "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven)",
+    "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven); off also registers no onionname",
     "ONIONHEAVEN_ADDRESS": "the OnionHeaven hub's .onion address (restart)",
     "ONIONHEAVEN_MAX_SERVICES": "hub: addresses one takeover worker serves (restart)",
     "ONIONHEAVEN_PROPAGATION_DELAY": "hub: seconds after a site's last good healthcheck before its takeover (restart)",

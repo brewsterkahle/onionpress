@@ -636,8 +636,18 @@ class TestOnionnameRetry(_PathsCase):
 
     def setUp(self):
         super().setUp()
+        # Onionnames are registered only while OnionHeaven is on; the
+        # harness's config turns it off.
+        self.registering("yes")
         with open(os.path.join(self.dir, "config"), "a") as f:
             f.write("ONIONNAME=mysite\n")
+
+    def registering(self, choice):
+        path = os.path.join(self.dir, "config")
+        with open(path) as f:
+            lines = [ln for ln in f if not ln.startswith("REGISTER_WITH_ONIONHEAVEN=")]
+        with open(path, "w") as f:
+            f.writelines([f"REGISTER_WITH_ONIONHEAVEN={choice}\n"] + lines)
         self.d._read_served_address = lambda: ADDR
         self.d._onionname_retry_in_flight = True
 
@@ -713,6 +723,11 @@ class TestOnionnameRetry(_PathsCase):
             Daemon._hub_loops(d)
         self.assertFalse(any(c.kwargs.get("target") == d._retry_pending_onionname
                              for c in T.call_args_list))
+
+    def test_onionheaven_off_registers_nothing(self):
+        self.registering("no")
+        R, _ = self.retry()
+        R.assert_not_called()
 
     def test_a_configured_onionhome_is_the_one_asked(self):
         from onionpress.onionnames_registrar import RegistrarResult

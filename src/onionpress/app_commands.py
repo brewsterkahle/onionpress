@@ -36,6 +36,11 @@ ADDRESS_CACHE = "onion_address"
 # daemon.ONIONNAME_RETRY_MARKER (a test keeps them equal): what the Mac
 # daemon takes on its next tick.
 ONIONNAME_RETRY_MARKER = ".onionname-retry"
+# Said when an onionname is recorded but not registered because
+# OnionHeaven (or OnionHome) is off on this install.
+ONIONNAME_OFF_NOTE = ("Not registered with OnionHome: onionnames are registered only while "
+                      "OnionHeaven is on (REGISTER_WITH_ONIONHEAVEN), and it is off on "
+                      "this install.")
 
 # The daemon's web log capture skips the app's own probes the same way.
 HEALTHCHECK_LOG_MARK = "OnionPress-HealthCheck"
@@ -440,11 +445,10 @@ def register_onionname(name, paths, docker, os_name, log, *, registrar=None,
         log(f"onionname: {name!r} registered for {address}")
         return OnionnameOutcome("registered", name, [], "", "")
     if register and not onionhome:
-        # ONIONHOME_ADDRESS empty: no OnionHome, so no retry either.
-        log(f"onionname: {name!r} recorded; not registered: ONIONHOME_ADDRESS is empty")
-        return OnionnameOutcome("recorded", name, [],
-                                "Not registered: OnionHome is off on this install "
-                                "(ONIONHOME_ADDRESS is empty in the config).", "")
+        # OnionHeaven off, or ONIONHOME_ADDRESS empty: no OnionHome, so no
+        # retry either (onionnames_registrar.configured_onionhome).
+        log(f"onionname: {name!r} recorded; not registered: OnionHeaven or OnionHome is off")
+        return OnionnameOutcome("recorded", name, [], ONIONNAME_OFF_NOTE, "")
     if os_name == "macos":
         try:
             with open(os.path.join(paths.data_dir, ONIONNAME_RETRY_MARKER), "w") as f:

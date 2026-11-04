@@ -40,13 +40,21 @@ DEFAULT_TIMEOUT = 30
 
 
 def configured_onionhome(config_file, log=None):
-    """The OnionHome an onionname is registered with: the config's
-    ONIONHOME_ADDRESS (the key analytics sharing reads), the default when
-    the key is absent. Empty means no OnionHome, and so does a value that
-    is not one v3 address (logged): "" then, and nothing is registered
-    (setup records the name unregistered, the daemon does not retry it).
-    The e2e harness sets it empty so no test node registers its name."""
+    """The OnionHome an onionname is registered with, or "" for none, in
+    which case nothing is registered (setup records the name unregistered,
+    the daemon does not retry it).
+
+    None while OnionHeaven is off: an onionname is registered only while
+    REGISTER_WITH_ONIONHEAVEN is "yes" (onionheaven.registration_choice:
+    unset is yes, a typo is neither). Then the config's ONIONHOME_ADDRESS
+    (the key analytics sharing reads): the default when the key is absent,
+    none when it is empty or not one v3 address (logged). The e2e harness
+    turns both off, so no test node registers its name."""
     from . import config as op_config
+    from .onionheaven import registration_choice
+    choice = registration_choice(op_config.read_value(config_file, "REGISTER_WITH_ONIONHEAVEN", ""))
+    if choice != "yes":
+        return ""
     addr = op_config.read_value(config_file, ONIONHOME_ADDRESS_KEY,
                                 DEFAULT_ONIONHOME_ADDRESS).strip()
     if addr and not key_manager.is_valid_onion_address(addr):
