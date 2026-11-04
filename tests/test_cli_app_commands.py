@@ -323,7 +323,8 @@ class TestOpen(Sandbox):
             rc = app_commands.open_command("onion", self.paths, with_address(), out=self.out)
         self.assertEqual(rc, 0)
         oo.assert_called_once_with(f"http://{ADDR}/", docker=mock.ANY,
-                                   data_dir=self.paths.data_dir, say=mock.ANY)
+                                   data_dir=self.paths.data_dir, say=mock.ANY,
+                                   extension_wait=0)
         self.assertEqual(self.out.getvalue(), f"Opening http://{ADDR}/\n")
 
     def test_open_json_answers(self):
@@ -331,7 +332,8 @@ class TestOpen(Sandbox):
                 ({"ok": True, "browser": "Tor Browser"}, 0, None),
                 ({"paste_url": f"http://{ADDR}/?op_login=T"}, 0, "paste this"),
                 ({"ok": True, "launching": True}, 0, "starting already"),
-                ({"error": "No Tor-capable browser found", "no_browser": True}, 1, None)):
+                ({"error": "No Tor-capable browser found", "needs": "tor-browser",
+                  "download_url": "https://www.torproject.org/download/"}, 1, None)):
             with self.subTest(answer=answer):
                 with mock.patch.object(app_commands.launcher_ops, "open_onion",
                                        return_value=answer):
@@ -345,6 +347,28 @@ class TestOpen(Sandbox):
                         "onion", self.paths, with_address(), out=out), rc)
                     if text:
                         self.assertIn(text, out.getvalue())
+
+    def test_the_extension_wait_reaches_open_onion(self):
+        with mock.patch.object(app_commands.launcher_ops, "open_onion",
+                               return_value={"ok": True, "browser": "Firefox"}) as oo:
+            app_commands.open_command("onion", self.paths, with_address(), out=self.out,
+                                      extension_wait=5)
+        self.assertEqual(oo.call_args.kwargs["extension_wait"], 5)
+
+    def test_get_tor_browser_opens_the_download_page_with_no_token(self):
+        with mock.patch.object(app_commands.launcher_ops, "login_target") as lt, \
+                mock.patch.object(app_commands.launcher_ops, "open_onion") as oo, \
+                mock.patch.object(app_commands.launcher_ops, "open_in_browser") as ob:
+            out = io.StringIO()
+            rc = app_commands.open_command("get-tor-browser", self.paths, FakeDocker(),
+                                           json_output=True, out=out)
+        self.assertEqual(rc, 0)
+        ob.assert_called_once_with("https://www.torproject.org/download/")
+        lt.assert_not_called()
+        oo.assert_not_called()
+        self.assertEqual(json.loads(out.getvalue()),
+                         {"url": "https://www.torproject.org/download/", "ok": True,
+                          "browser": "default"})
 
     def test_onion_without_an_address_fails(self):
         with mock.patch.object(app_commands.launcher_ops, "open_onion") as oo:

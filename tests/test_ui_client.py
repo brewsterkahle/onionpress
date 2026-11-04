@@ -1092,5 +1092,60 @@ class TestModuleShape(unittest.TestCase):
         self.assertIn('addButtonWithTitle_("Cancel").setKeyEquivalent_("\\x1b")', restore_ui)
 
 
+class TestTheBrowserIsTheCLIs(unittest.TestCase):
+    """Issue #546: `onionpress open` makes every choice of browser (which
+    one, Tor Browser's cold start and stale locks, the login page, the
+    extension wait, the download page); each UI keeps its menu item, the
+    install dialog and the install monitor's notification."""
+
+    BROWSER_LAUNCHERS = {"open", "xdg-open", "osascript", "torbrowser-launcher",
+                         "start-tor-browser", "gio", "sensible-browser"}
+    # What a UI still hands xdg-open, and why: a folder (the file manager)
+    # and the update notification's GitHub release page (no site, no token).
+    REVIEWED = {(TRAY, "DATA_DIR"), (TRAY, "url")}
+
+    def _launches(self, rel):
+        found = []
+        for node in ast.walk(ast.parse(_read(rel))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in ("subprocess", "_sp")):
+                continue
+            if not node.args or not isinstance(node.args[0], ast.List):
+                continue
+            argv = node.args[0].elts
+            if (argv and isinstance(argv[0], ast.Constant)
+                    and argv[0].value in self.BROWSER_LAUNCHERS):
+                rest = ast.unparse(argv[1]) if len(argv) == 2 else ast.unparse(node.args[0])
+                found.append((rel, rest))
+        return found
+
+    def test_no_ui_launches_a_browser(self):
+        for rel in (MENUBAR, TRAY):
+            with self.subTest(rel=rel):
+                self.assertLessEqual(set(self._launches(rel)), self.REVIEWED,
+                                     self._launches(rel))
+
+    def test_no_ui_makes_a_browser_choice(self):
+        for rel in (MENUBAR, TRAY):
+            src = _read(rel)
+            for word in ("firefox.real", "torproject.org", '"--tor"', "-new-tab",
+                         "extension_connected_recently", "wait_for_extension_active",
+                         "is_tor_browser_installed", "is_brave_installed",
+                         "cleanup_stale_tor_browser_locks", "open_in_browser",
+                         "login_target", "login_url", "launcher_ops.open_onion", "op_browser.detect_best_browser"):
+                with self.subTest(rel=rel, word=word):
+                    self.assertNotIn(word, src)
+
+    def test_both_uis_open_through_the_cli(self):
+        menubar, tray = _read(MENUBAR), _read(TRAY)
+        self.assertIn('self.launcher.run_json("open", "onion", "--json"', menubar)
+        self.assertIn('answer.get("needs") == "tor-browser"', menubar)
+        self.assertIn('self.launcher.run_async("open", "get-tor-browser")', menubar)
+        self.assertIn('Launcher.run_json("open", "onion", "--json"', tray)
+        self.assertIn("ui_client.TOR_BROWSER_STARTING in line", tray)
+        self.assertEqual(ui_client.TOR_BROWSER_STARTING, launcher_ops.TOR_BROWSER_STARTING)
+
+
 if __name__ == "__main__":
     unittest.main()

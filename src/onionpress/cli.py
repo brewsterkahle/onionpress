@@ -1857,18 +1857,24 @@ def _add_open(sub, name):
         name,
         help="Open the site in a browser, logged in as the owner: site (local), "
              "admin (wp-admin), settings (the OnionPress Settings page) or onion "
-             "(the .onion address, in Tor Browser where it is installed)")
-    p.add_argument("what", choices=("site", "admin", "settings", "onion"))
+             "(the .onion address, in Tor Browser where it is installed); "
+             "get-tor-browser opens Tor Browser's download page")
+    p.add_argument("what", choices=("site", "admin", "settings", "onion", "get-tor-browser"))
     p.add_argument("--json", action="store_true",
                    help="The answer as one JSON object (ok and browser; paste_url when "
-                        "Tor Browser runs and takes no new tab; error and no_browser)")
+                        "Tor Browser runs and takes no new tab; error, and needs: "
+                        "tor-browser with download_url when there is no browser for it)")
+    p.add_argument("--extension-wait", type=int, default=0, metavar="SECONDS",
+                   help="Mac, onion: without Tor Browser, give a browser extension this "
+                        "long to check in before choosing Brave or none")
 
 
 def _run_open(run):
     from . import app_commands
     paths, _log, docker, _os_name = _app_setup(run)
     return app_commands.open_command(run.args.what, paths, docker,
-                                     json_output=run.args.json, out=sys.stdout)
+                                     json_output=run.args.json, out=sys.stdout,
+                                     extension_wait=max(0, min(run.args.extension_wait, 60)))
 
 
 def _add_onionname(sub, name):

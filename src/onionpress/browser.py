@@ -1,8 +1,9 @@
 """Browser detection for OnionPress on a Mac.
 
-What is installed and which extension last talked to the daemon: the
-menubar's menu title and first-run waits, and launcher_ops.open_onion
-(`onionpress open onion`, issue #527), which opens the site.
+What is installed and which extension last talked to the daemon: the one
+choice of a browser for the onion address (`detect_best_browser`), which
+launcher_ops.open_onion (`onionpress open onion`, issues #527, #546) opens
+the site in and the menubar only names in its menu title.
 """
 
 import json
@@ -12,13 +13,21 @@ import time
 
 TOR_BROWSER_PATH = "/Applications/Tor Browser.app"
 BRAVE_BROWSER_PATH = "/Applications/Brave Browser.app"
+# Where Tor Browser may be: /Applications, or the user's own Applications.
+TOR_BROWSER_APPS = (TOR_BROWSER_PATH,
+                    os.path.expanduser("~/Applications/Tor Browser.app"))
 
 # Browsers we trust for open -a / osascript activate
 ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
 
+def tor_browser_app():
+    """The Tor Browser bundle that is installed (TOR_BROWSER_APPS), or None."""
+    return next((app for app in TOR_BROWSER_APPS if os.path.isdir(app)), None)
+
+
 def is_tor_browser_installed():
-    """Check if Tor Browser is installed in /Applications."""
-    return os.path.isdir(TOR_BROWSER_PATH)
+    """Check if Tor Browser is installed (TOR_BROWSER_APPS)."""
+    return tor_browser_app() is not None
 
 
 def is_brave_installed():
@@ -93,16 +102,23 @@ def extension_connected_recently(app_support, allowed=ALLOWED_BROWSERS):
     return None
 
 
-def detect_best_browser(app_support):
+def detect_best_browser(app_support, *, extension_wait=0, sleep=time.sleep):
     """Detect the best available browser for .onion sites.
 
     Returns (browser_type, browser_name) where browser_type is one of:
-    'tor_browser', 'extension', 'brave', or None.
+    'tor_browser', 'extension', 'brave', or None. Without Tor Browser an
+    extension may be given *extension_wait* seconds to check in (a first
+    run: the browser starts with the app), before Brave or none.
     """
     if is_tor_browser_installed():
         return ('tor_browser', 'Tor Browser')
 
     ext = extension_connected_recently(app_support)
+    waited = 0
+    while not ext and waited < extension_wait:
+        sleep(1)
+        waited += 1
+        ext = extension_connected_recently(app_support)
     if ext:
         return ('extension', ext)
 
@@ -158,15 +174,3 @@ def wait_for_app_install(app_path, executable_subpath, timeout=600,
 
     return False
 
-
-def wait_for_extension_active(app_support, timeout=30):
-    """Wait for the browser extension to register as active.
-
-    Returns True if extension became active within timeout.
-    """
-    for _ in range(timeout):
-        entry = _read_extension_marker(app_support)
-        if entry and (time.time() - entry[0]) < 5:
-            return True
-        time.sleep(1)
-    return False

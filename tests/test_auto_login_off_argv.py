@@ -494,9 +494,46 @@ class TestOpenOnion(unittest.TestCase):
     def test_mac_without_a_tor_capable_browser(self):
         self.mac()
         answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
-        self.assertTrue(answer["no_browser"])
+        self.assertEqual(answer["needs"], "tor-browser")
+        self.assertEqual(answer["download_url"], launcher_ops.TOR_BROWSER_DOWNLOAD_URL)
         self.assertEqual(self.popen.calls, [])
         self.assertEqual(self.mint.calls, [])
+
+    def test_mac_tor_browser_in_the_users_applications(self):
+        own = browser.TOR_BROWSER_APPS[1]
+        self.mac(apps=(own,))
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp)
+        self.assertEqual(answer, {"ok": True, "browser": "Tor Browser"})
+        self.assertEqual(self.popen.calls[0][0][:3], ["open", "-a", own])
+
+    def test_mac_the_extension_wait_is_the_clis(self):
+        # Issue #546: the menubar's first run no longer waits for an
+        # extension and `open -a`s its browser; the CLI waits, before Brave.
+        self.mac(apps=(browser.BRAVE_BROWSER_PATH,))
+        browser.extension_connected_recently.side_effect = [None, None, "Firefox"]
+        slept = []
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp,
+                                         sleep=slept.append, extension_wait=5)
+        self.assertEqual(answer["browser"], "Firefox")
+        self.assertEqual(slept, [1, 1])
+        [(argv, _)] = self.popen.calls
+        self.assertEqual(argv[:3], ["open", "-a", "Firefox"])
+        self.popen.assert_not_in_argv(self, self.token())
+
+    def test_mac_an_extension_that_never_checks_in_leaves_brave(self):
+        self.mac(apps=(browser.BRAVE_BROWSER_PATH,))
+        slept = []
+        answer = launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp,
+                                         sleep=slept.append, extension_wait=3)
+        self.assertEqual(answer["browser"], "Brave Browser")
+        self.assertEqual(slept, [1, 1, 1])
+
+    def test_mac_no_wait_with_tor_browser(self):
+        self.mac(apps=(browser.TOR_BROWSER_PATH,))
+        slept = []
+        launcher_ops.open_onion(self.BASE, docker=self.docker, data_dir=self.tmp,
+                                sleep=slept.append, extension_wait=5)
+        self.assertEqual(slept, [])
 
 
 # ─── The mu-plugin ───────────────────────────────────────────────────────

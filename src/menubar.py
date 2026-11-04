@@ -69,6 +69,10 @@ from onionpress import ui_client
 from onionpress import splash_tips
 
 
+# A first run's browser may be one with the OnionPress extension, started
+# with the app: `open onion --extension-wait` gives it this long to check in.
+FIRST_RUN_EXTENSION_WAIT = 5
+
 
 class _MacBackupUI(ui_client.BackupUI):
     """plan_backup's dialogs: the credentials in an NSAlert, the file in
@@ -1269,13 +1273,17 @@ class OnionPressApp(PortAttributes, rumps.App):
         never a command line)."""
         self.launcher.run_async("open", "site")
 
-    def _open_onion(self):
-        """`onionpress open onion --json` (the CLI's open_onion, the one
-        implementation, issue #527): Tor Browser, a browser whose extension
-        is connected, Brave (not logged in), or the install dialog."""
-        rc, answer, out, err = self.launcher.run_json("open", "onion", "--json", timeout=60)
+    def _open_onion(self, extension_wait=0):
+        """`onionpress open onion --json` (the CLI's open_onion makes every
+        choice, issues #527, #546): Tor Browser, a browser whose extension
+        is connected, Brave (not logged in), or `needs: tor-browser`, which
+        is the install dialog. *extension_wait*: seconds the CLI gives an
+        extension to check in without Tor Browser (the first run)."""
+        wait = ["--extension-wait", str(extension_wait)] if extension_wait else []
+        rc, answer, out, err = self.launcher.run_json("open", "onion", "--json", *wait,
+                                                      timeout=60 + extension_wait)
         answer = answer or {}
-        if answer.get("no_browser"):
+        if answer.get("needs") == "tor-browser":
             self.dismiss_setup_dialog()
             self.dismiss_launch_splash()
             self.show_browser_install_dialog()
@@ -1331,15 +1339,9 @@ class OnionPressApp(PortAttributes, rumps.App):
 
         threading.Thread(target=_check, daemon=True).start()
 
-    # Browsers we trust for open -a / osascript activate
-    ALLOWED_BROWSERS = op_browser.ALLOWED_BROWSERS
-
-    def extension_connected_recently(self):
-        """Check if a browser extension is actively connected right now."""
-        return op_browser.extension_connected_recently(self.app_support)
-
     def update_browser_menu_title(self):
-        """Update the browser menu item title based on which browser is available."""
+        """Name the browser `open onion` would choose (browser.browser_menu_title
+        over detect_best_browser, the CLI's own choice)."""
         self.browser_menu_item.title = op_browser.browser_menu_title(self.app_support)
 
     def open_tor_browser(self, _):
@@ -1362,7 +1364,7 @@ class OnionPressApp(PortAttributes, rumps.App):
                 style="informational"
             )
             if button_index == 0:
-                subprocess.run(["open", "https://www.torproject.org/download/"])
+                self.launcher.run_async("open", "get-tor-browser")
                 self.monitor_tor_browser_install()
         except Exception as e:
             self.log(f"Browser dialog failed: {e}")
@@ -1394,23 +1396,11 @@ class OnionPressApp(PortAttributes, rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            if not op_browser.is_tor_browser_installed():
-                # An extension browser gets the address once its extension
-                # talks to the daemon's onion proxy: give it the chance.
-                self._wait_for_state(lambda s: s.get("proxy_running"), 15)
-                ext_browser = None
-                for i in range(5):
-                    ext_browser = self.extension_connected_recently()
-                    if ext_browser:
-                        break
-                    self.log(f"Waiting for extension registration... ({i+1}/5)")
-                    time.sleep(1)
-                if ext_browser:
-                    self.log(f"Starting {ext_browser} for its extension")
-                    subprocess.run(["open", "-a", ext_browser])
-                    if not op_browser.wait_for_extension_active(self.app_support):
-                        self.log("Extension did not poll within 30s, opening .onion URL anyway")
-            self._open_onion()
+            # An extension browser is chosen once its extension talks to the
+            # daemon's onion proxy: the proxy up, then the CLI waits for it
+            # (only when Tor Browser is not installed).
+            self._wait_for_state(lambda s: s.get("proxy_running"), 15)
+            self._open_onion(extension_wait=FIRST_RUN_EXTENSION_WAIT)
 
     def check_address_prefix_change(self):
         """No-op: the vanity prefix is chosen once at install (welcome

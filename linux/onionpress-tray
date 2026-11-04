@@ -1595,8 +1595,8 @@ class OnionPressTray:
         Launcher.run_async("open", "site")
 
     def _on_open_onion(self, *_):
-        """`onionpress open onion --json` (the one implementation, issue
-        #527): Tor Browser cold-launched with the
+        """`onionpress open onion --json` (it makes every choice, issues
+        #527, #546): Tor Browser cold-launched with the
         site as a tab once it is up; the token-bearing URL to paste when
         Tor Browser runs already (it takes no new tab); the default
         browser without torbrowser-launcher."""
@@ -1611,7 +1611,7 @@ class OnionPressTray:
         self._tor_launch_in_progress = True
 
         def on_line(line):
-            if "Tor Browser is starting" in line:
+            if ui_client.TOR_BROWSER_STARTING in line:
                 GLib.idle_add(lambda: self.notifier.notify(
                     "tor-launching", "Tor Browser is starting",
                     "Once it connects to Tor, your site will load automatically.") and False)

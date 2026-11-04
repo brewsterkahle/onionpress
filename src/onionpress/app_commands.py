@@ -46,7 +46,7 @@ ONIONNAME_OFF_NOTE = ("Not registered with OnionHome: onionnames are registered 
 HEALTHCHECK_LOG_MARK = "OnionPress-HealthCheck"
 
 LOG_KINDS = ("app", "launcher", "web")
-OPEN_TARGETS = ("site", "admin", "settings", "onion")
+OPEN_TARGETS = ("site", "admin", "settings", "onion", "get-tor-browser")
 
 NO_ADDRESS_MSG = "No onion address available (is OnionPress running?)"
 
@@ -283,7 +283,7 @@ def logs_command(paths, docker, os_name, kind, *, lines=200, follow=False, out=N
 
 
 # ---------------------------------------------------------------------------
-# open site | admin | settings | onion
+# open site | admin | settings | onion | get-tor-browser
 # ---------------------------------------------------------------------------
 
 def wordpress_port(docker):
@@ -315,13 +315,16 @@ def open_target(what, paths, docker):
     raise ValueError(f"open: what is {what!r}; one of {', '.join(OPEN_TARGETS)}")
 
 
-def open_command(what, paths, docker, *, json_output=False, out=None):
-    """`onionpress open site|admin|settings|onion [--json]`, logged in as
-    the owner: the browser gets launcher_ops.login_target's file:// page
-    (the token never on a command line); the onion address goes to a
-    Tor-capable browser through launcher_ops.open_onion, the one
-    implementation the menubar and the tray call (issue #527). With
-    --json the answer is one JSON object (open_onion's for `onion`)."""
+def open_command(what, paths, docker, *, json_output=False, out=None, extension_wait=0):
+    """`onionpress open site|admin|settings|onion|get-tor-browser [--json]`,
+    logged in as the owner: the browser gets launcher_ops.login_target's
+    file:// page (the token never on a command line); the onion address
+    goes to a Tor-capable browser through launcher_ops.open_onion, which
+    makes every choice of browser for the menubar and the tray (issues
+    #527, #546; *extension_wait* is its Mac extension wait);
+    `get-tor-browser` opens Tor Browser's download page, the answer to
+    `needs: tor-browser`. With --json the answer is one JSON object
+    (open_onion's for `onion`)."""
     out = out or sys.stdout
 
     def say(message):
@@ -329,10 +332,17 @@ def open_command(what, paths, docker, *, json_output=False, out=None):
 
     url = ""
     try:
-        url, prefer_tor = open_target(what, paths, docker)
-        if prefer_tor:
+        if what == "get-tor-browser":
+            url, prefer_tor = launcher_ops.TOR_BROWSER_DOWNLOAD_URL, None
+        else:
+            url, prefer_tor = open_target(what, paths, docker)
+        if prefer_tor is None:
+            # Nothing to log in to: the page itself, no token minted.
+            launcher_ops.open_in_browser(url)
+            answer = {"ok": True, "browser": "default"}
+        elif prefer_tor:
             answer = launcher_ops.open_onion(url, docker=docker, data_dir=paths.data_dir,
-                                             say=say)
+                                             say=say, extension_wait=extension_wait)
         else:
             launcher_ops.open_in_browser(launcher_ops.login_target(url, docker=docker))
             answer = {"ok": True, "browser": "default"}

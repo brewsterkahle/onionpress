@@ -60,6 +60,10 @@ ACTIONS = (
     'self.launcher.run_json(\n                "onionname", "set", new_name, "--rename-admin", "--json"',
     'self.launcher.run_json("open", "onion", "--json"',
     'self.launcher.run_async("open", "site")',
+    # Issue #546: the download page too; the first run's extension wait
+    # is the CLI's.
+    'self.launcher.run_async("open", "get-tor-browser")',
+    'self._open_onion(extension_wait=FIRST_RUN_EXTENSION_WAIT)',
 )
 
 
