@@ -232,7 +232,12 @@ srv.main()
                     return
             except (ConnectionRefusedError, OSError):
                 pass
-        raise RuntimeError("Server did not start within 30 seconds")
+        # Say why: the process is still up, so stop it and show what it
+        # wrote (a server stuck before its bind says nothing otherwise).
+        self.proc.kill()
+        _, err = self.proc.communicate(timeout=10)
+        err = err.decode("utf-8", "replace")[-2000:]
+        raise RuntimeError(f"Server did not start within 30 seconds; stderr: {err}")
 
     def stop(self):
         if self.proc:
