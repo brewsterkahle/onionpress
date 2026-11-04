@@ -27,10 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from launcher_harness import BASH, Launcher  # noqa: E402
 
-# Always with the Cloudflare override file, so a tunnel whose token was
-# just removed goes down too (tests/test_cloudflare_tunnel.py).
-MAC_COMPOSE_DOWN = ("bin docker compose -f docker-compose.yml"
-                    " -f docker-compose.cloudflare.yml down")
+# The stop is `onionpress stop-containers` (ContainerManager.stop, always
+# with the Cloudflare override file: tests/test_stop_containers.py).
+STOP = "stop-containers"
 
 START_STUBS = ("detect_container_runtime", "install_docker", "ensure_docker_socket",
                "setup_db_passwords", "start_containers", "wait_for_services",
@@ -132,31 +131,28 @@ class TestStart(_Case):
 
 
 class TestStop(_Case):
-    STUBS = ("setup_db_passwords", "stop_onionheaven_farm")
+    STUBS = ("setup_db_passwords",)
 
     def test_stop_asks_the_daemon_offline_then_stops_the_stack(self):
         r = self.l.run("stop")
         self.assertEqual(r.returncode, 0, r.stderr)
-        calls = self.l.calls()
-        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline"])
-        self.assertLess(calls.index(f"py {self.dd()} daemon offline"),
-                        calls.index(MAC_COMPOSE_DOWN))
-        self.assertIn("Containers stopped", r.stdout)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline",
+                                             f"{self.dd()} {STOP}"])
+        # No docker of its own: the farm and compose down are the CLI's.
+        self.assertFalse([c for c in self.l.calls() if c.startswith("bin docker")])
 
     def test_a_daemon_that_cannot_go_offline_does_not_stop_the_stop(self):
         r = self.l.run("stop", env={"STUB_RC_PY": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(MAC_COMPOSE_DOWN, self.l.calls())
+        self.assertIn(f"{self.dd()} {STOP}", self.l.py_calls())
 
-    def test_a_failed_compose_down_is_the_exit_status(self):
-        r = self.l.run("stop", env={"STUB_RC_DOCKER_DOWN": "3"})
+    def test_a_failed_stop_is_the_exit_status(self):
+        r = self.l.run("stop", env={"STUB_RC_STOP_CONTAINERS": "3"})
         self.assertEqual(r.returncode, 3)
-        self.assertIn("ERROR: stopping the containers failed", r.stdout)
-        self.assertNotIn("Containers stopped", r.stdout)
 
 
 class TestQuit(_Case):
-    STUBS = ("setup_db_passwords", "stop_onionheaven_farm", "reap_lima_usernet")
+    STUBS = ("setup_db_passwords", "reap_lima_usernet")
 
     def setUp(self):
         super().setUp()
@@ -171,10 +167,11 @@ class TestQuit(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.l.calls()
         self.assertEqual(calls[0], f"py {self.dd()} daemon stop")
-        self.assertIn(MAC_COMPOSE_DOWN, calls)
+        stop = f"py {self.dd()} {STOP}"
+        self.assertIn(stop, calls)
         self.assertIn("bin colima stop", calls)
         self.assertIn("fn reap_lima_usernet", calls)
-        self.assertLess(calls.index(MAC_COMPOSE_DOWN), calls.index("bin colima stop"))
+        self.assertLess(calls.index(stop), calls.index("bin colima stop"))
         self.assertIn("quit: run from the menubar", r.stdout)
 
     def test_the_flags_are_read_in_either_order(self):
@@ -192,7 +189,7 @@ class TestQuit(_Case):
         self.assertIn("bin colima stop", self.l.calls())
 
     def test_a_failed_container_stop_fails_the_quit(self):
-        r = self.l.run("quit", "--leave-menubar", env={"STUB_RC_DOCKER_DOWN": "1"})
+        r = self.l.run("quit", "--leave-menubar", env={"STUB_RC_STOP_CONTAINERS": "1"})
         self.assertEqual(r.returncode, 1)
         self.assertIn("some steps failed: containers", r.stderr)
         self.assertIn("bin colima stop", self.l.calls(), "the VM is stopped all the same")

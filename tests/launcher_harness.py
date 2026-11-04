@@ -20,7 +20,8 @@ environment variable a test sets; 0 by default). main()'s first CLI
 call, `launcher-env` (issue #405), is answered by the stub from
 $STUB_LAUNCHER_ENV (offset 0's ports by default; FAIL for no answer);
 setup_db_passwords' `ensure-secrets` (#529) by writing a stub secrets
-file (STUB_RC_ENSURE_SECRETS its exit).
+file (STUB_RC_ENSURE_SECRETS its exit); `stop-containers`' exit is
+STUB_RC_STOP_CONTAINERS.
 """
 
 import os
@@ -77,6 +78,11 @@ _op_py() {
     if [ "$3" = ensure-secrets ]; then
         [ -f "$DATA_DIR/secrets" ] || printf "WORDPRESS_DB_PASSWORD='stub-wp'\nMYSQL_PASSWORD='stub-wp'\nMYSQL_ROOT_PASSWORD='stub-root'\n" > "$DATA_DIR/secrets"
         return "${STUB_RC_ENSURE_SECRETS:-0}"
+    fi
+    # stop_containers' `stop-containers`: its own knob too, so a verb
+    # that also asks the daemon (`stop`: `daemon offline`) can fail one.
+    if [ "$3" = stop-containers ]; then
+        return "${STUB_RC_STOP_CONTAINERS:-0}"
     fi
     return "${STUB_RC_PY:-0}"
 }

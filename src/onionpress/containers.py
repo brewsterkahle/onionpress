@@ -56,8 +56,8 @@ def onionheaven_image(config_file: str | None = None) -> str:
 def tor_image(config_file: str | None = None) -> str:
     """The stack's tor image: ONIONPRESS_TOR_IMAGE, else the pin.
 
-    The one-shot helpers that handle the onion service key (the restore's key
-    seed here; the launchers' KEY_HELPER_IMAGE) run from it, never from a
+    The one-shot helpers that handle the onion service key (the key volume
+    migration, the key seeds, the backup's key reads) run from it, never from a
     floating tag: the pin is one set of bytes, and the image is the one that
     will run Tor with that key anyway.
     """
@@ -216,6 +216,10 @@ HUB_DATA_VOLUME = "onionpress-onionheaven-data"
 HUB_DATA_DIR = "/var/lib/onionheaven"
 _HUB_CONTAINER_RE = re.compile(
     r"onionpress-tor|onionheaven|onionheaven-(poll|takeover)-[0-9]+")
+
+# A takeover worker's container name (the farm stop's match, as the
+# launchers' bash stop matched it).
+FARM_WORKER_NAME = re.compile(r"onionheaven-(poll|takeover)-[0-9]+")
 
 
 # What OnionPress puts on onionpress-network: its compose services (wordpress
@@ -676,8 +680,9 @@ class ContainerManager:
         self._log("Stopping all containers...")
         args = ["down"]
 
-        cf_token = read_value(self.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
-        compose_files = self._compose_files(include_cloudflare=bool(cf_token))
+        # Always with the override file, token or not: a cloudflared
+        # started before its token was removed goes down with the rest.
+        compose_files = self._compose_files(include_cloudflare=True)
 
         result = self.docker.compose(args, compose_files=compose_files, timeout=120, extra_env=self._build_env())
         if result.ok:
@@ -849,7 +854,7 @@ class ContainerManager:
 
         workers = [
             name.strip() for name in result.output.splitlines()
-            if name.strip().startswith(("onionheaven-takeover-", "onionheaven-poll-"))
+            if FARM_WORKER_NAME.fullmatch(name.strip())
         ]
 
         if not workers:
@@ -963,5 +968,5 @@ class ContainerManager:
             return []
         return [
             name.strip() for name in result.output.splitlines()
-            if name.strip().startswith(("onionheaven-takeover-", "onionheaven-poll-"))
+            if FARM_WORKER_NAME.fullmatch(name.strip())
         ]

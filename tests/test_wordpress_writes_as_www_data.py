@@ -363,15 +363,16 @@ exit 1
 
 class TestLaunchersShareThePutScript(unittest.TestCase):
     def test_wp_put_runs_wp_files_script_as_www_data(self):
-        for path in LAUNCHERS:
-            text = _read(path)
-            start = text.index("\nwp_put() {\n")
-            body = text[start:text.index("\n}\n", start)]
-            with self.subTest(path):
-                self.assertIn("docker exec -i -u www-data onionpress-wordpress", body)
-                m = re.search(r"sh -c '([^']*)' \\\n\s*sh \"\$1\" \"\$\{2:-600\}\"", body)
-                self.assertIsNotNone(m, body)
-                self.assertEqual(m.group(1), wp_files.PUT_FILE_SCRIPT)
+        # Only Linux keeps a wp_put (the mu-plugins' install); the Mac's had
+        # no caller left and went.
+        text = _read("linux/onionpress")
+        start = text.index("\nwp_put() {\n")
+        body = text[start:text.index("\n}\n", start)]
+        self.assertIn("docker exec -i -u www-data onionpress-wordpress", body)
+        m = re.search(r"sh -c '([^']*)' \\\n\s*sh \"\$1\" \"\$\{2:-600\}\"", body)
+        self.assertIsNotNone(m, body)
+        self.assertEqual(m.group(1), wp_files.PUT_FILE_SCRIPT)
+        self.assertNotRegex(_read("app/MacOS/onionpress"), r"\bwp_put\b")
 
 
 
