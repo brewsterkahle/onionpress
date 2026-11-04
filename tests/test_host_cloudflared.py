@@ -155,14 +155,39 @@ class TestShareBundle(unittest.TestCase):
     def _stat(self, mode=0o40755, uid=None):
         return mock.Mock(st_mode=mode, st_uid=os.getuid() if uid is None else uid)
 
-    def share(self, path="/Applications/OnionPress.app", st=None):
-        run = mock.Mock(return_value=_done(0))
+    def share(self, path="/Applications/OnionPress.app", st=None, run=None, log=None):
+        run = run or mock.Mock(return_value=_done(0))
+        # The admin group is a Mac's: answered here so these run on the
+        # Linux CI runner too (the updater's coverage floor).
         with mock.patch.object(updater.os.path, "realpath", side_effect=lambda p: p), \
-                mock.patch.object(updater.os, "stat", return_value=st or self._stat()):
-            changed = updater.share_bundle_with_admins(path, run=run)
+                mock.patch.object(updater.os, "stat", return_value=st or self._stat()), \
+                mock.patch("grp.getgrnam", return_value=mock.Mock(gr_name="admin")):
+            changed = updater.share_bundle_with_admins(path, log=log, run=run)
         return changed, [c[0][0] for c in run.call_args_list]
 
-    @unittest.skipUnless(sys.platform == "darwin", "the admin group is a Mac's")
+    def test_no_admin_group_changes_nothing(self):
+        run = mock.Mock(return_value=_done(0))
+        with mock.patch.object(updater.os.path, "realpath", side_effect=lambda p: p), \
+                mock.patch.object(updater.os, "stat", return_value=self._stat()), \
+                mock.patch("grp.getgrnam", side_effect=KeyError("admin")):
+            self.assertFalse(updater.share_bundle_with_admins("/Applications/OnionPress.app", run=run))
+        run.assert_not_called()
+
+    def test_a_failed_chmod_or_chgrp_is_reported(self):
+        logged = []
+        changed, calls = self.share(run=mock.Mock(side_effect=[_done(0), _done(1)]),
+                                    log=logged.append)
+        self.assertFalse(changed)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Multi-user: could not update every file's permissions", logged)
+
+    def test_an_error_is_logged_never_raised(self):
+        logged = []
+        changed, _ = self.share(run=mock.Mock(side_effect=subprocess.TimeoutExpired("chmod", 30)),
+                                log=logged.append)
+        self.assertFalse(changed)
+        self.assertTrue(any("could not fix app bundle permissions" in m for m in logged))
+
     def test_an_owned_bundle_in_applications(self):
         changed, calls = self.share()
         self.assertTrue(changed)
@@ -179,7 +204,6 @@ class TestShareBundle(unittest.TestCase):
             with self.subTest(path=path, st=st):
                 self.assertEqual(self.share(path, st), (False, []))
 
-    @unittest.skipUnless(sys.platform == "darwin", "stages with a Mac's xattr")
     def test_staging_shares_the_copy_before_it_is_live(self):
         src = tempfile.mkdtemp(prefix="op-src-")
         parent = tempfile.mkdtemp(prefix="op-apps-")
@@ -187,9 +211,17 @@ class TestShareBundle(unittest.TestCase):
         self.addCleanup(shutil.rmtree, parent, True)
         app = os.path.join(src, "OnionPress.app")
         os.makedirs(os.path.join(app, "Contents"))
-        with mock.patch.object(updater, "share_bundle_with_admins") as share:
+        real_run = subprocess.run
+
+        def run(argv, **kw):
+            # The copy is real; xattr is a Mac's, answered off one.
+            return _done(0) if argv[0] == "xattr" else real_run(argv, **kw)
+
+        with mock.patch.object(updater, "share_bundle_with_admins") as share, \
+                mock.patch.object(updater.subprocess, "run", side_effect=run):
             staged = updater.stage_new_bundle(app, os.path.join(parent, "OnionPress.app"))
         share.assert_called_once_with(staged)
+        self.assertTrue(os.path.isdir(os.path.join(staged, "Contents")))
 
     def test_the_daemon_runs_it_once_per_start_on_a_mac(self):
         with open(os.path.join(os.path.dirname(HERE), "src", "onionpress", "daemon.py"),
