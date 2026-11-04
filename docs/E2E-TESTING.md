@@ -8,7 +8,9 @@ install on a real Mac or Linux box comes up, serves its site over Tor, keeps
 its address, backs up and restores, and that the hardening holds on real
 containers. Today that evidence comes from hand-run QA (2.5.3's on
 2026-10-14 found twelve problems the unit suite had passed). This suite
-makes that QA repeatable.
+makes that QA repeatable; what it does not reach yet is in
+`docs/MANUAL-TEST-PLAN.md`, the hand-run checklist, whose table maps its
+sections to the steps of §8.
 
 It is slow (hours for the whole thing) and runs on demand. It is **not**
 part of releasing: releases come too often for a run of hours, so none is
@@ -485,6 +487,8 @@ what this host could test without starting anything.
      restore with the same address and content, the pinned format-2
      fixture.
 
+   Each batch that lands moves its checks out of
+   `docs/MANUAL-TEST-PLAN.md` into that file's "Now automated" list.
    Harness work it needs: `node.as_www_data` (b), `setup_wordpress`
    through `setup --json` with the password in the environment, and
    malicious archives built with `backup.pack_backup` at run time (e).

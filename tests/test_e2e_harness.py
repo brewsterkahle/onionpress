@@ -13,7 +13,7 @@ import unittest
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
 
-from harness import hardening, platforms, safety, scenario  # noqa: E402
+from harness import hardening, platforms, proc, safety, scenario  # noqa: E402
 from harness.nodes.base import parse_curl_include, wp_port_from_status  # noqa: E402
 from harness.nodes.linux_vm import LinuxVMNode, guest_template  # noqa: E402
 from harness.nodes.mac import MacNode, pick_port_offset  # noqa: E402
@@ -507,6 +507,24 @@ class _FakeNode:
         self.wp_admin_user = user
 
 
+class _FakeVisitor:
+    """tor_fetch answers in turn: an exception is raised (no answer), anything
+    else is the response."""
+
+    name = "visitor"
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.fetched = []
+
+    def tor_fetch(self, address, path, *, timeout):
+        self.fetched.append((address, path))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
 class _FakeSession:
     def __init__(self):
         self.verified = []
@@ -539,6 +557,32 @@ class ScenarioTest(unittest.TestCase):
     def test_t0_uses_the_same_admin(self):
         with open(os.path.join(PROJECT_DIR, "e2e", "test_t0_stack.py"), encoding="utf-8") as f:
             self.assertIn("from harness.scenario import ADMIN_PASSWORD, ADMIN_USER", f.read())
+
+    def _tor_page(self, answers, timeout=1):
+        node = _FakeNode(address="c" * 56 + ".onion")
+        node.name, node.timings, node.log, node.notes = "linux-1", None, None, []
+        visitor = _FakeVisitor(answers)
+        return node, visitor, lambda: scenario.tor_page(node, visitor, "/", timeout=timeout, every=0)
+
+    def test_tor_page_retries_a_fetch_that_got_no_answer(self):
+        node, visitor, fetch = self._tor_page([RuntimeError("curl: (28) timed out"), "answer"])
+        self.assertEqual(fetch(), "answer")
+        self.assertEqual(visitor.fetched, [(node.address, "/")] * 2)
+        self.assertEqual(len(node.notes), 1)
+        self.assertIn("1 failed attempts", node.notes[0])
+
+    def test_tor_page_takes_the_first_answer_whatever_its_status(self):
+        """Only a missing answer is retried; a 403 or 500 is the caller's
+        to judge, so it is returned at once."""
+        node, visitor, fetch = self._tor_page(["a 403", "never asked"])
+        self.assertEqual(fetch(), "a 403")
+        self.assertEqual(len(visitor.fetched), 1)
+        self.assertEqual(node.notes, [])
+
+    def test_tor_page_gives_up_with_the_last_error(self):
+        _, _, fetch = self._tor_page([RuntimeError("curl: (28) timed out")] * 1000, timeout=0)
+        with self.assertRaisesRegex(proc.WaitTimeout, "timed out"):
+            fetch()
 
     def test_every_tier_file_is_found_by_run_sh(self):
         """run.sh takes e2e/test_<tier>_*.py."""

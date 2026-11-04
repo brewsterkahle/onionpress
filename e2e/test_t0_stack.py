@@ -14,7 +14,7 @@ import pytest
 
 from harness.nodes.base import CORE_CONTAINERS
 from harness.proc import wait_until
-from harness.scenario import ADMIN_PASSWORD, ADMIN_USER
+from harness.scenario import ADMIN_PASSWORD, ADMIN_USER, tor_page
 
 pytestmark = [pytest.mark.tier("t0"), pytest.mark.incremental, pytest.mark.platform("any")]
 
@@ -120,11 +120,11 @@ def test_onion_reachable(node, e2e, record_property):
     """A visitor reaches the site over the Tor network."""
     visitor = _wait_reachable(e2e, node, "health file")
     record_property("visitor", visitor.name)
-    resp = visitor.tor_fetch(node.address, "/", timeout=90)
+    resp = tor_page(node, visitor, "/")
     assert resp.status in (200, 301, 302), f"/ over Tor answered {resp.status}"
     # The installer rule stays after setup (issue #464).
     for page in INSTALLER_PAGES:
-        resp = visitor.tor_fetch(node.address, page, timeout=90)
+        resp = tor_page(node, visitor, page)
         assert resp.status == 403, f"{page} over Tor answered {resp.status}"
 
 

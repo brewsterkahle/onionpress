@@ -152,6 +152,15 @@ class TestSmallListeners(unittest.TestCase):
         self.assertIn("max_connections=SERVICE_CONNECTIONS", serve)
         self.assertIn("http_listener.serve(RedirectHandler", _read("onionheaven-redirect.py"))
 
+    def test_a_listener_binds_without_a_reverse_lookup(self):
+        """HTTPServer.server_bind asks socket.getfqdn for the listen
+        address, seconds each on a macOS runner; nothing reads the name."""
+        with mock.patch.object(socket, "getfqdn", side_effect=AssertionError("getfqdn")):
+            server = self.hl.BoundedThreadingHTTPServer(("127.0.0.1", 0), self.ws.HealthcheckHandler)
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_name, "127.0.0.1")
+        self.assertEqual(server.server_port, server.server_address[1])
+
     def test_connections_beyond_the_cap_are_closed(self):
         with mock.patch.object(sys, "stderr", io.StringIO()), \
                 self.harness.serving(self.ws.HealthcheckHandler, max_connections=2) as port:
