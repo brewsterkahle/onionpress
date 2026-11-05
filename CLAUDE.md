@@ -662,6 +662,14 @@
   ends with the launcher's start and `onionheaven.reset_hub_state`. Each
   launcher's case is the delegation, `-y` confirming through
   `ONIONPRESS_CONFIRMED` / `--yes`. `tests/test_uninstall_linux.py`.
+- **A Mac uninstall moves OnionPress.app to the Trash, last, only when
+  nobody else uses it** (`uninstall.trash_app`): only the bundle the code
+  runs from, directly in `/Applications` or `~/Applications`; kept while
+  any other account (or another data folder of this one) has a
+  `~/.onionpress`, or a home cannot be looked into. Foundation's
+  `trashItemAtURL` (Put Back works), else a rename into `~/.Trash`; never
+  a write into the bundle. The answer's `app` is shown through
+  `ui_client.uninstall_app_line`. `tests/test_uninstall_trashes_app.py`.
 - **The launchers hold no verb of their own** (#529): `restore` is the
   CLI's pass-through (its argparse and `cli.read_backup_password` do the
   refusals), `scrub` is `scrub.run_scrub`'s platform cycle (the Mac's
