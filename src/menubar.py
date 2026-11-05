@@ -2328,10 +2328,13 @@ class OnionPressApp(PortAttributes, rumps.App):
                     hub_notice = ("\n\n" + hub_notice + " Ask the hub's "
                                   "operator to remove it if you need it gone.")
                 # Use show_native_alert which already handles main thread
+                # The CLI moved the app to the Trash unless another
+                # account still uses it (uninstall.trash_app).
+                app_line = ui_client.uninstall_app_line(ans.get("app") or {"kept": ""})
                 self.show_native_alert(
                     title="Uninstall Complete",
                     message=("OnionPress has been uninstalled." + hub_notice +
-                             "\n\nFinal step: Move OnionPress.app to the Trash.\n\nClick OK to quit."),
+                             f"\n\n{app_line}\n\nClick OK to quit."),
                     buttons=["OK"]
                 )
                 rumps.quit_application()
