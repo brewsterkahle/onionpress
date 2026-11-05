@@ -85,10 +85,9 @@ UI_SUBPROCESS_ALLOWED = {
         # The menubar's own single-instance pid file: a pid file older
         # than the boot is stale (a read of the host, for the UI itself).
         ("__init__", "sysctl"),
-        # Desktop openers: the clipboard, a URL, a browser app.
+        # Desktop opener: the clipboard. A browser and the download page
+        # are `onionpress open`'s (#546).
         ("copy_address", "pbcopy"),
-        ("show_browser_install_dialog", "open"),
-        ("_auto_open_browser_inner", "open"),
         # After an update: waits for this process to exit, then `open`s
         # the new bundle (the menubar relaunching itself).
         ("_relaunch_app", "bash"),
