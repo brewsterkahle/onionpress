@@ -56,6 +56,18 @@ def _fail(stderr="error", code=1):
     return DockerResult(returncode=code, stdout="", stderr=stderr)
 
 
+PHASE_DONE = ('250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 '
+              'TAG=done SUMMARY="Done"\r\n250 OK\r\n')
+
+
+def _control_answers(phase, other=""):
+    """docker.exec's answers: `phase` for a control-port session (the
+    script naming port 9051), `other` for anything else."""
+    def answer(container, argv, **kw):
+        return _ok(phase if "9051" in argv[-1] else other)
+    return answer
+
+
 class TestContainerStatus(unittest.TestCase):
     def test_defaults(self):
         s = ContainerStatus()
@@ -320,21 +332,38 @@ class TestWaitForTor(unittest.TestCase):
 
     def test_tor_bootstrapped(self):
         docker = mock.Mock(spec=Docker)
-        docker.compose.return_value = _ok("Bootstrapped 100% (done): Done")
+        docker.exec.side_effect = _control_answers(PHASE_DONE)
         cm = ContainerManager(docker, self.paths, self.port_config)
         result = cm.wait_for_tor(timeout=5)
         self.assertTrue(result)
 
-    def test_tor_sufficiently_bootstrapped(self):
+    def test_asks_the_control_port_not_the_last_log_lines(self):
+        # An hour after the start the watchdog's heartbeats had pushed
+        # "Bootstrapped 100%" out of the last 50 lines, and `onionpress
+        # status` said tor_bootstrapped false on a healthy site.
         docker = mock.Mock(spec=Docker)
-        docker.compose.return_value = _ok("Sufficiently bootstrapped to build circuits")
+        docker.exec.side_effect = _control_answers(PHASE_DONE)
+        docker.run.return_value = _ok("[tor-watchdog] alive — bootstrapped=True\n" * 50)
+        docker.compose.return_value = _ok("[tor-watchdog] alive — bootstrapped=True\n" * 50)
         cm = ContainerManager(docker, self.paths, self.port_config)
-        result = cm.wait_for_tor(timeout=5)
-        self.assertTrue(result)
+        self.assertTrue(cm._is_tor_bootstrapped())
+        container, argv = docker.exec.call_args.args[:2]
+        self.assertEqual(container, "onionpress-tor")
+        self.assertIn("GETINFO status/bootstrap-phase", argv[-1])
+        docker.run.assert_not_called()
+        docker.compose.assert_not_called()
+
+    def test_reads_the_log_when_the_control_port_is_silent(self):
+        docker = mock.Mock(spec=Docker)
+        docker.exec.side_effect = _control_answers("")
+        docker.run.return_value = _ok("Bootstrapped 100% (done): Done")
+        cm = ContainerManager(docker, self.paths, self.port_config)
+        self.assertTrue(cm._is_tor_bootstrapped())
 
     def test_tor_timeout(self):
         docker = mock.Mock(spec=Docker)
-        docker.compose.return_value = _ok("Bootstrapped 5%")
+        docker.exec.side_effect = _control_answers(
+            '250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=5 TAG=conn SUMMARY="x"\r\n')
         cm = ContainerManager(docker, self.paths, self.port_config)
         result = cm.wait_for_tor(timeout=1, interval=0.2)
         self.assertFalse(result)
@@ -422,9 +451,8 @@ class TestGetStatus(unittest.TestCase):
             {"Name": "onionpress-tor", "State": "running"},
             {"Name": "onionpress-wordpress", "State": "running"},
         ]
-        docker.exec.return_value = _ok(ONION + "\n")
+        docker.exec.side_effect = _control_answers(PHASE_DONE, other=ONION + "\n")
         docker.container_running.return_value = True
-        docker.compose.return_value = _ok("Bootstrapped 100%")
 
         cm = ContainerManager(docker, self.paths, self.port_config)
         status = cm.get_status()
