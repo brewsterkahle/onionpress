@@ -14,6 +14,7 @@ from typing import Callable
 
 from . import onion_hostname, platform, wordpress_egress
 from .docker import Docker, DockerError
+from .health import HealthChecker
 from .config import (
     SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
     read_value,
@@ -703,24 +704,16 @@ class ContainerManager:
         return result.ok
 
     def wait_for_tor(self, timeout: int = 120, interval: int = 2) -> bool:
-        """Wait for Tor to bootstrap (100% or sufficiently bootstrapped).
+        """Wait for Tor to bootstrap (`_is_tor_bootstrapped`).
 
         Returns True if Tor bootstraps within timeout.
         """
         self._log("Waiting for Tor to bootstrap...")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            result = self.docker.compose(
-                ["logs", "--tail", "100", "tor"],
-                compose_files=self._compose_files(),
-                timeout=15,
-                extra_env=self._build_env(),
-            )
-            if result.ok:
-                output = result.stdout
-                if "Bootstrapped 100%" in output or "Sufficiently bootstrapped" in output:
-                    self._log("Tor bootstrapped")
-                    return True
+            if self._is_tor_bootstrapped():
+                self._log("Tor bootstrapped")
+                return True
             time.sleep(interval)
 
         self._log("Tor did not bootstrap in time")
@@ -745,17 +738,12 @@ class ContainerManager:
         return status
 
     def _is_tor_bootstrapped(self) -> bool:
-        """Quick check if Tor is bootstrapped from recent logs."""
-        result = self.docker.compose(
-            ["logs", "--tail", "50", "tor"],
-            compose_files=self._compose_files(),
-            timeout=10,
-            extra_env=self._build_env(),
-        )
-        if not result.ok:
-            return False
-        output = result.stdout
-        return "Bootstrapped 100%" in output or "Sufficiently bootstrapped" in output
+        """Whether onionpress-tor's Tor has bootstrapped: the daemon's check
+        (`HealthChecker.check_tor_bootstrap`, the control port, the log only
+        when that does not answer). The last 50 log lines lost the
+        "Bootstrapped 100%" line to the watchdog's heartbeats within the
+        hour, and `onionpress status` said false on every healthy site."""
+        return HealthChecker(self.docker).check_tor_bootstrap()[0]
 
     # -- OnionHeaven farm --
 
