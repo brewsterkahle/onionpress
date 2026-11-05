@@ -110,15 +110,16 @@ class TestSettingsPageHandlers(unittest.TestCase):
                 self.assertLess(block.index("onionpress_settings_owner_allowed()"),
                                 block.index(HOST))
             checked += 1
-        # action handler, config save, download, poll, update check, and
-        # the page itself (the Share Now REST route went with #528)
-        self.assertEqual(checked, 6)
+        # action handler, config save, download, poll, update check, the
+        # page itself (the Share Now REST route went with #528), and the
+        # OnionHeaven page
+        self.assertEqual(checked, 7)
 
     def test_field_list_is_read_only_after_the_gate(self):
         calls = [b for b in _blocks(self.php)
                  if "onionpress_settings_fields()" in b
                  and not b.startswith("function onionpress_settings_fields()")]
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)  # the save handler, the page, the OnionHeaven page
         for block in calls:
             with self.subTest(block=block.split("\n", 1)[0]):
                 self.assertLess(block.index(OWNER_GATE),

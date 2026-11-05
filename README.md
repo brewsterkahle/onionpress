@@ -141,10 +141,18 @@ first start (below), or run your own hub (`ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`
 on a node you control) and point your sites at it. Either way your site is
 unreachable while your computer is off.
 
-- **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*, or
+- **Mac:** menu bar → OnionHeaven… (the OnionHeaven screen: which hub keeps
+  your site reachable, whether it is a host OnionPress knows such as the
+  Internet Archive's hub, the last accepted heartbeat, and, on a hub, the
+  sites it keeps reachable; *Keep site reachable via OnionHeaven* and the hub
+  address are its controls), or
   `/Applications/OnionPress.app/Contents/MacOS/onionpress onionheaven enable`
-  (or `disable`, `status`)
-- **Linux:** `onionpress onionheaven enable` (or `disable`, `status`)
+  (or `disable`, `status`, `overview`)
+- **Linux:** `onionpress onionheaven enable` (or `disable`, `status`,
+  `overview`)
+- **WordPress:** OnionPress → OnionHeaven in the site's admin (the owner's
+  page): the same screen, with the registration choice and, on a hub, the
+  takeover settings; the hub address is shown there, changed on the host
 - **Config file:** `REGISTER_WITH_ONIONHEAVEN=yes|no` in `~/.onionpress/config`
   (unset means yes)
 
