@@ -132,7 +132,9 @@
   a version means its new hash. `tests/test_dmg_build_pins.py`.
 - **A release's Mac app is universal** (`ONIONPRESS_RELEASE_BUILD=1`
   refuses single-arch Python; every Mach-O must have arm64 + x86_64). The
-  `.deb`'s files are root's, with no AppleDouble `._` members (run
+  `.deb`'s files are root's, with no AppleDouble `._` members and no PAX
+  headers (dpkg cannot unpack them; the Mac's bsdtar writes GNU tar
+  without xattrs, `build/check-deb-tar.py` checks; run
   `build/check-deb.sh` on any package before handing it out).
   `tests/test_build_release_hygiene.py`.
 - CI rebuilds, lintian-checks and attests the `.deb` on every published

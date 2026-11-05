@@ -19,6 +19,9 @@
 #   Depends field, and an /etc file not marked as a conffile. None of that
 #   was visible from `sudo apt install ./onionpress.deb`, which does not
 #   check signatures or run lintian either.
+#   2.7.0's Mac-built package put a PAX header on every member (bsdtar's
+#   copy of macOS's com.apple.provenance attribute): GNU tar, dpkg-deb
+#   --contents and lintian only warn, dpkg refuses to unpack it.
 
 set -uo pipefail
 
@@ -146,6 +149,17 @@ if [ -n "$LITTER" ]; then
 else
     ok "no AppleDouble, .DS_Store or __pycache__ members"
 fi
+
+# dpkg's unpacker reads ustar and GNU tar only; a PAX header (bsdtar's
+# xattrs) stops `dpkg -i` while everything above reads straight past it.
+for part in ctrl fsys; do
+    if dpkg-deb "--$part-tarfile" "$DEB" 2>/dev/null \
+            | python3 -I "$(dirname "$0")/check-deb-tar.py" "$part tarball" -; then
+        ok "$part tarball has no PAX headers"
+    else
+        fail "the $part tarball is not one dpkg can unpack (see above)"
+    fi
+done
 
 member_line() { printf '%s\n' "$CONTENTS" | awk -v p="$1" '$6 == p { print; exit }'; }
 

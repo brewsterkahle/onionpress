@@ -33,8 +33,13 @@ No PyYAML: CI installs nothing beyond CPython and PyNaCl, so the workflow is
 read with regexes, like tests/test_publish_workflow.py.
 """
 
+import io
 import os
 import re
+import subprocess
+import sys
+import tarfile
+import tempfile
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -299,6 +304,24 @@ class LinuxPackageWorkflowTest(unittest.TestCase):
             build, r'DEBIAN/conffiles" <<EOF\n/etc/xdg/autostart/onionpress-tray\.desktop\nEOF',
             f"{BUILD}: the autostart entry in /etc must be listed in DEBIAN/conffiles")
 
+    def test_no_pax_headers_reach_dpkg(self):
+        # 2.7.0's Mac-built package: bsdtar wrote com.apple.provenance as a
+        # PAX header on every member; dpkg refused it, while dpkg-deb
+        # --contents and GNU tar only warned, so check-deb.sh passed it.
+        build = _code(_read(BUILD))
+        self.assertIn(
+            "--format gnutar --no-xattrs --no-acls --no-fflags --no-mac-metadata", build,
+            f"{BUILD}: the bsdtar (macOS) fallback must write GNU tar without xattrs")
+        self.assertIn(
+            '"$BUILD_DIR/check-deb-tar.py"', build,
+            f"{BUILD}: the macOS fallback must check the tarballs it wrote")
+        check = _code(_read(CHECK))
+        self.assertIn("for part in ctrl fsys; do", check)
+        self.assertIn(
+            'dpkg-deb "--$part-tarfile" "$DEB"', check,
+            f"{CHECK}: must run check-deb-tar.py on both of the package's tarballs")
+        self.assertIn("check-deb-tar.py", check)
+
     # ── 4. The smoke test runs the installer twice ────────────────────────
 
     def test_smoke_job_runs_install_sh_twice_and_only_for_linux_changes(self):
@@ -333,6 +356,37 @@ class LinuxPackageWorkflowTest(unittest.TestCase):
         self.assertNotRegex(
             installer, r'cp -r "\$REPO_DIR/[^"]+" "\$INSTALL_DIR/',
             f"{INSTALLER}: no `cp -r` from the checkout into $INSTALL_DIR")
+
+
+class CheckDebTarTest(unittest.TestCase):
+    """build/check-deb-tar.py fails a tar with a PAX header and passes the
+    GNU and ustar formats dpkg unpacks."""
+
+    def _run(self, fmt, pax_headers=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "data.tar.gz")
+            with tarfile.open(path, "w:gz", format=fmt) as tar:
+                info = tarfile.TarInfo("./opt/onionpress/VERSION")
+                info.size = 6
+                if pax_headers:
+                    info.pax_headers = pax_headers
+                tar.addfile(info, io.BytesIO(b"2.7.0\n"))
+            return subprocess.run(
+                [sys.executable, "-I", os.path.join(PROJECT_ROOT, "build/check-deb-tar.py"),
+                 "data.tar.gz", path],
+                capture_output=True, text=True)
+
+    def test_refuses_a_pax_xattr_header(self):
+        r = self._run(tarfile.PAX_FORMAT,
+                      {"LIBARCHIVE.xattr.com.apple.provenance": "AQIADGa5OvZ5VQw"})
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("./opt/onionpress/VERSION", r.stderr)
+
+    def test_passes_gnu_and_ustar(self):
+        for fmt in (tarfile.GNU_FORMAT, tarfile.USTAR_FORMAT):
+            r = self._run(fmt)
+            self.assertEqual(r.returncode, 0, f"format {fmt}: {r.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()
