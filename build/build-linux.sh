@@ -794,7 +794,12 @@ else
     if tar --version 2>/dev/null | grep -q "GNU tar"; then
         ROOT_OWNED=(--owner=root:0 --group=root:0)
     else
-        ROOT_OWNED=(--uid 0 --gid 0 --uname root --gname root)
+        # GNU format, no xattrs: bsdtar's default (restricted pax) writes
+        # each file's macOS attributes, com.apple.provenance on everything
+        # downloaded or built, as PAX headers, and dpkg cannot unpack them
+        # (2.7.0: "unsupported PAX tar header type 'x'").
+        ROOT_OWNED=(--uid 0 --gid 0 --uname root --gname root
+                    --format gnutar --no-xattrs --no-acls --no-fflags --no-mac-metadata)
     fi
 
     # debian-binary
@@ -810,6 +815,11 @@ else
 
     # data.tar.gz — everything except DEBIAN/
     (cd "$DEB_ROOT" && tar "${ROOT_OWNED[@]}" -czf "$DEB_TMP/data.tar.gz" --exclude='./DEBIAN' .)
+
+    for part in control data; do
+        python3 -I "$BUILD_DIR/check-deb-tar.py" "$part.tar.gz" "$DEB_TMP/$part.tar.gz" \
+            || { echo "ERROR: $part.tar.gz is not a tar dpkg can unpack" >&2; exit 1; }
+    done
 
     # Assemble with ar (BSD ar on macOS needs 'r' not 'rcs')
     # But macOS ar adds Mach-O warnings, so use a simple concatenation approach
