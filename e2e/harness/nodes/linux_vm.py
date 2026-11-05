@@ -34,11 +34,16 @@ from .base import Node, wp_port_from_status
 
 AS_USER_SH = """#!/bin/bash
 # Run a command as the install's user with a fresh login (group
-# membership from /etc/group) and their systemd user session.
+# membership from /etc/group) and their systemd user session. Not
+# `sudo -i`: it joins the argv into a string for the login shell and
+# escapes every character but `$`, so an argument holding `$` (PHP for
+# `wp eval`, an `sh -c` script) was expanded on the way. The login
+# shell here gets the argv as its own "$@", never re-parsed.
 u="$1"; shift
 uid=$(id -u "$u")
-exec sudo -iu "$u" env XDG_RUNTIME_DIR="/run/user/$uid" \\
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
+exec sudo -u "$u" -H env XDG_RUNTIME_DIR="/run/user/$uid" \\
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \\
+    bash -lc 'cd ~ && exec "$@"' as-user "$@"
 """
 
 # What the .deb's postinst prints when it could not start OnionPress itself.

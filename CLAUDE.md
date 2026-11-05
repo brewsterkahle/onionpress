@@ -307,6 +307,10 @@
   suite reaches it; T1 (a)'s capability check imports
   `tests/test_container_capabilities.py`'s census, never a copy.
   `ScenarioTest` / `HardeningTest` in `tests/test_e2e_harness.py`.
+- **A linux-vm node runs the argv it is given**: `as-user.sh` hands it to
+  a login shell as `"$@"`, never through `sudo -i` (which escapes every
+  character but `$`, so `wp eval` PHP and `sh -c` scripts arrived
+  expanded). `NodeHelpersTest` in `tests/test_e2e_harness.py`.
 - The e2e suite's platforms are OS families, `macos` and `linux`
   (`e2e/harness/platforms.py`); the distro is a node fact. Linux-host gates
   use `HostFacts.debian_based` (`ID` or `ID_LIKE`), never `distro ==

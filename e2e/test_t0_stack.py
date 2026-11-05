@@ -141,12 +141,40 @@ def test_status_and_address_agree(node):
     assert node.onion_address() == node.address
 
 
+DAEMON_STATE_FRESH = 90       # daemon_client.STALE_AFTER_SECONDS
+
+
+def test_daemon_state_agrees(node):
+    """The daemon's state file, which the menubar and tray show, is fresh,
+    names the same address, says running once the probe has seen the
+    site, and its ports are the ones docker publishes."""
+    def running():
+        state = node.daemon_state()
+        return state if (state.get("status") or {}).get("state") == "running" else None
+
+    state = wait_until(running, timeout=600, every=15, label=f"{node.name}: daemon state running",
+                       timings=node.timings, log=node.log)
+    age = node.now() - float(state.get("updated_at") or 0)
+    assert age < DAEMON_STATE_FRESH, f"daemon-state.json is {age:.0f}s old"
+    assert state.get("onion_address") == node.address, f"daemon state names {state.get('onion_address')!r}"
+    assert state["status"].get("onion_address") == node.address
+    published = node.published_wp_port()
+    assert published, "docker publishes no port for WordPress"
+    assert (state.get("ports") or {}).get("wp") == published, \
+        f"daemon state says WordPress is on {state.get('ports')}, docker publishes {published}"
+    node.first_wp_port = published
+
+
 def _same_site_back(e2e, node, label):
     """Same address, same key, nothing minted or replaced, the site back
     locally and over Tor."""
     assert node.wait_for_address() == node.address
     assert node.served_key_digest() == node.first_key_digest, "the served key changed"
     assert not node.exists(".onionpress/replaced-keys"), "a key was replaced"
+    # The port stays put (issue #507: a probe beside the install's own
+    # running stack moved it to the next offset).
+    assert node.published_wp_port() == node.first_wp_port, \
+        f"WordPress moved from port {node.first_wp_port} to {node.published_wp_port()}"
     node.wait_for_local_site()
     _wait_reachable(e2e, node, label)
 

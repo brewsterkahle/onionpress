@@ -1,6 +1,6 @@
 # End-to-end tests (design)
 
-Status: design agreed in outline, 2026-10-24 (decisions in §9). Built so far: the harness, T0 and T1 (a) (§8, §10).
+Status: design agreed in outline, 2026-10-24 (decisions in §9). Built so far: the harness, T0 and T1 (a)–(c) (§8, §10).
 
 The unit suite (`make test-unit`, ~150 files) checks code and text: censuses,
 pins, fake iptables, PHP harnesses. What it cannot say is that a fresh
@@ -478,27 +478,33 @@ what this host could test without starting anything.
    (`harness/scenario.py`), so `--tier t1` runs on its own. The batch,
    about 50 min per platform, needing only the `node` role:
    - **a, hardening** (built): read-only, about 3 min.
-   - **b, the Settings page's requests** (#528): requests written as
+   - **b, chaos** (built, #139, #266; §6 "Onion service health"): tor
+     paused, its networks flapped, no route and a captive portal (Linux).
+   - **c, the daemon** (built, #407, #503): `daemon status` and the
+     state file agree; the daemon reaches the launcher's Docker (Linux);
+     `kill -9` → restarted by its unit, one daemon after (Linux);
+     `daemon offline` acknowledged; a killed tor-watchdog restarted.
+   - **d, the Settings page's requests** (#528): requests written as
      www-data into the shared volume (`refresh-status`, `update` and its
      throttle, `upload-analytics` refused while sharing is off, an unknown
      verb dropped, a malformed `archive-login` removed unread, a config
      write allowlisted), their results carrying the request id, and what
      `status.json` and `config-current.json` show WordPress.
-   - **c, onionnames** (#527, #554): the setup's name recorded, never
+   - **e, onionnames** (#527, #554): the setup's name recorded, never
      registered; `onionname set --rename-admin` renames the login.
-   - **d, keys** (#311): damaged C Tor files re-derived with the same
+   - **f, keys** (#311): damaged C Tor files re-derived with the same
      address; garbage, small-order and bit-255 keys refused; a valid
      import moving the address (last in the module).
-   - **e, backup and restore** (runs last): CLI backup, wrong password,
+   - **g, backup and restore** (runs last): CLI backup, wrong password,
      truncated, newer-format and malicious archives refused, reset →
      restore with the same address and content, the pinned format-2
      fixture.
 
    Each batch that lands moves its checks out of
    `docs/MANUAL-TEST-PLAN.md` into that file's "Now automated" list.
-   Harness work it needs: `node.as_www_data` (b), `setup_wordpress`
+   Harness work it needs: `node.as_www_data` (d), `setup_wordpress`
    through `setup --json` with the password in the environment, and
-   malicious archives built with `backup.pack_backup` at run time (e).
+   malicious archives built with `backup.pack_backup` at run time (g).
 4. T1 WordPress features with Playwright.
 5. T2 federation.
 6. §5.2 and T3 upgrade/updater.

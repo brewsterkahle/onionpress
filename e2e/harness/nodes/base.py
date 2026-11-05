@@ -68,6 +68,16 @@ def parse_curl_include(text):
     return HttpResponse(status, headers, rest, raw)
 
 
+def published_port(text):
+    """The host port in `docker port`'s answer: one line per address
+    family ("0.0.0.0:8080", "[::]:8080") naming one port, else 0."""
+    ports = {line.rsplit(":", 1)[-1] for line in (text or "").split() if ":" in line}
+    if len(ports) != 1:
+        return 0
+    port = ports.pop()
+    return int(port) if port.isdigit() else 0
+
+
 def wp_port_from_status(text):
     """The WordPress port a node's launcher published, from its
     `~/.onionpress/status.json`, or None. The launcher moves every port
@@ -97,6 +107,7 @@ class Node:
         self.installed = False
         self.address = ""           # set once the node serves one
         self.first_key_digest = ""  # the served key at the first start
+        self.first_wp_port = 0      # WordPress's published port once running
         self.install_findings = []  # what the install needed that a user should not
         self.notes = []             # observations for the report
 
@@ -183,6 +194,25 @@ class Node:
                 states[name] = state
         return states
 
+    def daemon_state(self):
+        """daemon-state.json as the views read it, or {}."""
+        text = self.read_file(".onionpress/daemon-state.json")
+        try:
+            return json.loads(text) if text.strip() else {}
+        except ValueError:
+            return {}
+
+    def now(self):
+        """The node's clock (epoch seconds), to judge the age of what the
+        daemon wrote by the clock it wrote it with."""
+        r = self.exec(["date", "+%s"], timeout=30)
+        return int(r.out.strip())
+
+    def published_wp_port(self):
+        """The host port docker publishes WordPress's port 80 on, or 0."""
+        r = self.docker(["port", "onionpress-wordpress", "80/tcp"])
+        return published_port(r.out) if r.ok else 0
+
     def container_started_at(self, name):
         """When *name* last started (docker's State.StartedAt), or ""."""
         r = self.docker(["inspect", "--format", "{{.State.StartedAt}}", name])
@@ -212,12 +242,14 @@ class Node:
             raise RuntimeError(r.describe())
         return parse_curl_include(r.out)
 
-    def http_from_tor(self, path, *, timeout=30):
+    def http_from_tor(self, path, *, headers=(), timeout=30):
         """A request to WordPress from the tor container: the source every
         Tor visitor's request arrives from, without waiting for a
         descriptor."""
-        r = self.docker(["exec", "onionpress-tor", "curl", "-sS", "-i", "--max-time", str(timeout),
-                         f"http://wordpress:80{path}"], timeout=timeout + 30)
+        argv = ["exec", "onionpress-tor", "curl", "-sS", "-i", "--max-time", str(timeout)]
+        for h in headers:
+            argv += ["-H", h]
+        r = self.docker([*argv, f"http://wordpress:80{path}"], timeout=timeout + 30)
         if not r.ok:
             raise RuntimeError(r.describe())
         return parse_curl_include(r.out)
