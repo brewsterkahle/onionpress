@@ -9,7 +9,7 @@ has none.
 Each section's heading is `## X.Y.Z — YYYY-MM-DD`. Full lists of changes are
 on each [GitHub release](https://github.com/brewsterkahle/onionpress/releases).
 
-## 2.7.0 — 2026-11-04
+## 2.7.0 — 2026-11-06
 
 Linux now runs the same background daemon as the Mac, and both apps hand
 all their work to the one `onionpress` command. Fresh tor and WordPress
@@ -37,10 +37,16 @@ images ship with it.
   `--pre` and `--force`. The Settings page's update button only checks.
 - **First-run setup, backup, restore and key import all run through
   `onionpress`** on both platforms (#527, #406, #524), so the Mac app,
-  the Linux tray and the terminal do the same thing the same way.
+  the Linux tray and the terminal do the same thing the same way. The
+  menubar and the tray now only show the daemon's state and run
+  `onionpress` commands (#526, #547).
 - **`onionpress open`** picks the browser on both platforms (#546): Tor
   Browser or a browser with the extension opens the site logged in, Brave
   gets the plain address.
+- **Mac: Uninstall moves OnionPress.app to the Trash** (#570), as its
+  last step, so nothing is left behind (Finder's Put Back works). If
+  another account on this Mac still uses OnionPress, the app stays in
+  Applications and the uninstall names that account.
 
 ### Also in this release
 - Onionnames are registered with OnionHome only while OnionHeaven is on
@@ -50,11 +56,24 @@ images ship with it.
   release line, Share Now and the archive.org login go through the host.
 - The tor image serves its healthcheck and redirect from Python with
   connection limits, no longer from shell scripts (#559).
+- `onionpress status` asks Tor itself whether it has bootstrapped; it
+  could say `"tor_bootstrapped": false` about a site that was up (#568).
+- A restore keeps the site on its own port, instead of moving it to
+  18080 because its own running site held 8080 (#507).
+- Mac: the app starts its VM through the same code as `onionpress
+  start` (#545). A new install's VM gets 2 GB of memory (was 1 GB), and
+  every start gets the VM recovery and disk check.
 - Mac: a second install on the same account no longer takes the first
   one's daemon for its own (#505); the menubar no longer stalls for three
-  minutes at launch.
+  minutes at launch; the terminal `setup` suggests a username again.
 - Linux: Cache Enabler installs with Debian 13's Compose; the `.deb` no
   longer leaves the old heartbeat's runtime hold behind (#506).
+
+### Worth knowing
+- Linux: if another program already holds one of OnionPress's ports (a
+  system `tor` on 9050 is the usual one), every OnionPress port moves up
+  by 10000 and the site is at http://localhost:18080, although the
+  install message says 8080.
 
 ### OnionHeaven hub and OnionHome operators
 - The tor image's healthcheck answers a plain `OK` on 127.0.0.1 only and
