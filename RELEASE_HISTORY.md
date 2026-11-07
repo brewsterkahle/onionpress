@@ -9,6 +9,78 @@ has none.
 Each section's heading is `## X.Y.Z — YYYY-MM-DD`. Full lists of changes are
 on each [GitHub release](https://github.com/brewsterkahle/onionpress/releases).
 
+## 2.7.0 — 2026-11-06
+
+Linux now runs the same background daemon as the Mac, and both apps hand
+all their work to the one `onionpress` command. Fresh tor and WordPress
+images ship with it.
+
+### What to do
+- **Linux, if you first installed with 2.6.0 or 2.6.1: take a new backup
+  after updating.** A first start on those versions could pick a Tor key
+  that never reached the key volume, and a backup of that site could not
+  be restored (#519). 2.7.0 recovers the key from Tor's own files and
+  puts it in every backup; one with no readable key now says so instead
+  of writing an archive no restore accepts.
+- Backup passwords are no longer accepted as a command-line argument
+  (#504): give them in `ONIONPRESS_BACKUP_PASSWORD`, on stdin or at the
+  prompt.
+
+### Highlights
+- **Linux: one daemon, `onionpress-daemon.service`** (#407). It replaces
+  the heartbeat service and the watcher timer, which the update retires.
+  It runs the OnionHeaven heartbeat, the reachability probe and the Tor
+  recovery loop, writes the site's status and handles sleep and wake,
+  as the Mac's daemon does.
+- **One updater on both platforms** (#525): `onionpress update` is the
+  same command on a Mac and on Linux, and takes `--version X.Y.Z`,
+  `--pre` and `--force`. The Settings page's update button only checks.
+- **First-run setup, backup, restore and key import all run through
+  `onionpress`** on both platforms (#527, #406, #524), so the Mac app,
+  the Linux tray and the terminal do the same thing the same way. The
+  menubar and the tray now only show the daemon's state and run
+  `onionpress` commands (#526, #547).
+- **`onionpress open`** picks the browser on both platforms (#546): Tor
+  Browser or a browser with the extension opens the site logged in, Brave
+  gets the plain address.
+- **Mac: Uninstall moves OnionPress.app to the Trash** (#570), as its
+  last step, so nothing is left behind (Finder's Put Back works). If
+  another account on this Mac still uses OnionPress, the app stays in
+  Applications and the uninstall names that account.
+
+### Also in this release
+- Onionnames are registered with OnionHome only while OnionHeaven is on
+  and an OnionHome is configured (#554). The reachability probe asks the
+  hub only while you are registered with it.
+- The WordPress Settings page no longer does the host's work (#528): its
+  release line, Share Now and the archive.org login go through the host.
+- The tor image serves its healthcheck and redirect from Python with
+  connection limits, no longer from shell scripts (#559).
+- `onionpress status` asks Tor itself whether it has bootstrapped; it
+  could say `"tor_bootstrapped": false` about a site that was up (#568).
+- A restore keeps the site on its own port, instead of moving it to
+  18080 because its own running site held 8080 (#507).
+- Mac: the app starts its VM through the same code as `onionpress
+  start` (#545). A new install's VM gets 2 GB of memory (was 1 GB), and
+  every start gets the VM recovery and disk check.
+- Mac: a second install on the same account no longer takes the first
+  one's daemon for its own (#505); the menubar no longer stalls for three
+  minutes at launch; the terminal `setup` suggests a username again.
+- Linux: Cache Enabler installs with Debian 13's Compose; the `.deb` no
+  longer leaves the old heartbeat's runtime hold behind (#506).
+
+### Worth knowing
+- Linux: if another program already holds one of OnionPress's ports (a
+  system `tor` on 9050 is the usual one), every OnionPress port moves up
+  by 10000 and the site is at http://localhost:18080, although the
+  install message says 8080.
+
+### OnionHeaven hub and OnionHome operators
+- The tor image's healthcheck answers a plain `OK` on 127.0.0.1 only and
+  no longer names its content address (#559); nothing read the old body.
+- As before: take a backup and note the registry and name counts before
+  updating, compare them afterwards, and never downgrade.
+
 ## 2.6.1 — 2026-10-31
 
 Fixes from the first live checks of 2.6.0 on Ubuntu 24.04 with rootless

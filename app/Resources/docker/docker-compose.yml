@@ -42,7 +42,7 @@
 # back; none of them uses a capability (see each).
 services:
   tor:
-    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}
+    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:83031ca71d850dda2872ca2cd9426b85075162dfba95fe5ccc47ea578ce77df5}
     container_name: onionpress-tor
     logging:
       driver: json-file
@@ -126,7 +126,7 @@ services:
         protocol: tcp
 
   wordpress:
-    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:0a473bb33e400d03e7f794ce94a27d583cb1e44b697bbbef8455bbd73f8a7ca7}
+    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:038b4c151d3042b8c76769481be85e7388d210f1db22bd53328a4ee70b8fc915}
     container_name: onionpress-wordpress
     logging:
       driver: json-file
@@ -380,7 +380,7 @@ services:
   # SOCKS-only Tor with no network instead of trying to be the site's Tor.
   # Refusals and every request are logged (`docker logs onionheaven-farm`).
   onionheaven-farm:
-    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}}
+    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:83031ca71d850dda2872ca2cd9426b85075162dfba95fe5ccc47ea578ce77df5}}
     container_name: onionheaven-farm
     logging:
       driver: json-file
@@ -393,7 +393,7 @@ services:
       - NO_ONION_SERVICE=1
       # Takeover workers run this, the same reference as `image:` above —
       # never a floating tag (onionheaven-farm.py's takeover_image).
-      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}}
+      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:83031ca71d850dda2872ca2cd9426b85075162dfba95fe5ccc47ea578ce77df5}}
       # What each worker is told to hold at most (MAX_TAKEOVER_SERVICES);
       # the same value the onionheaven container plans with.
       - ONIONHEAVEN_MAX_SERVICES=${ONIONHEAVEN_MAX_SERVICES:-50}
@@ -411,7 +411,7 @@ services:
     restart: unless-stopped
 
   onionheaven:
-    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}}
+    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:83031ca71d850dda2872ca2cd9426b85075162dfba95fe5ccc47ea578ce77df5}}
     container_name: onionheaven
     logging:
       driver: json-file

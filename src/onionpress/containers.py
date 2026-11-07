@@ -34,7 +34,7 @@ ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 # Pinned to digest. The literal below is propagated from build/image-pins.env
 # by build/refresh-image-digests.sh, which writes every consumer at once;
 # tests/test_image_pins.py fails if any of them drift apart.
-ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3"
+ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:83031ca71d850dda2872ca2cd9426b85075162dfba95fe5ccc47ea578ce77df5"
 
 
 def tor_image(config_file: str | None = None) -> str:
