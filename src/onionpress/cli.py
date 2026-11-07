@@ -697,11 +697,14 @@ def cmd_uninstall(paths, docker, log, launcher, *, check: bool = False,
         go_on, backup_path = offer_backup_before_uninstall(docker, launcher, log)
         if not go_on:
             return 1
+    app = {}
     remaining = _uninstall.run(paths, docker, log, launcher,
-                               out=sys.stderr if json_output else sys.stdout, os_name=os_name)
+                               out=sys.stderr if json_output else sys.stdout, os_name=os_name,
+                               app_out=app)
     if not json_output:
-        print("OnionPress has been uninstalled." + (
-            " Move OnionPress.app to the Trash." if os_name == "macos" else ""))
+        from .ui_client import uninstall_app_line
+        line = uninstall_app_line(app)
+        print("OnionPress has been uninstalled." + (f" {line}" if line else ""))
         if remaining:
             from . import onionheaven
             print("Note: " + onionheaven.describe_remaining(remaining))
@@ -709,6 +712,7 @@ def cmd_uninstall(paths, docker, log, launcher, *, check: bool = False,
             print(f"\nYour backup is at: {backup_path}")
             print(f"Use it to restore: onionpress restore {backup_path}")
     return _confirm.answer_ok(json_output, remaining=remaining,
+                              **({"app": app} if app else {}),
                               **({"backup": backup_path} if backup_path else {}))
 
 

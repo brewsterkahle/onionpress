@@ -367,6 +367,27 @@ UNINSTALL_DELETES = (
 )
 
 
+def uninstall_app_line(app: dict) -> str:
+    """What became of OnionPress.app, from `onionpress uninstall --json`'s
+    "app" (uninstall.trash_app): the one wording for the CLI's closing line
+    and the menubar's last dialog. "" when there was no bundle (Linux)."""
+    if not app:
+        return ""
+    if app.get("trashed"):
+        return "OnionPress.app is in the Trash."
+    reason = app.get("reason")
+    if reason == "other-accounts":
+        who = ", ".join(app.get("accounts") or [])
+        return (f"OnionPress.app stays in Applications: OnionPress is still "
+                f"installed for {who}. Move it to the Trash once they have "
+                "uninstalled too.")
+    if reason == "unsure":
+        return ("OnionPress.app stays in Applications: OnionPress could not tell "
+                "whether another account on this Mac uses it. Move it to the "
+                "Trash if nobody does.")
+    return "Final step: move OnionPress.app to the Trash."
+
+
 def uninstall_warning(tail: str) -> str:
     """The first uninstall dialog's text, ending in *tail* (the Mac asks
     about a backup first; the Linux tray says a terminal opens)."""

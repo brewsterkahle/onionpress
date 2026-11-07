@@ -11,16 +11,26 @@ container can sign the request that makes the hub delete it), then
 "uninstall" itself; the run needs both confirmed. It then asks the hubs
 to delete the key (release_onionheaven), stops OnionPress through the
 launcher, stops and deletes the Colima VM (the Docker volumes live in
-it), removes the login item, the daemon's LaunchAgent and ~/.onionpress. The app bundle is the
-person's to move to the Trash; the menubar quits after.
+it), removes the login item, the daemon's LaunchAgent and ~/.onionpress,
+and moves OnionPress.app to the Trash (trash_app) unless another account,
+or another data folder of this one, still uses it: one bundle in
+/Applications serves every account on a multi-user Mac. The menubar quits
+after.
 """
 
 import os
+import pwd
 import shutil
 import subprocess
 import time
 
 from . import confirm, daemon as op_daemon, login_item
+
+# Where an installed app lives: the bundle's own folder must be one of these
+# (a build in a checkout or a copy elsewhere is left where it is).
+APP_FOLDERS = ("/Applications", os.path.join(os.path.expanduser("~"), "Applications"))
+# Below this a macOS account is a system one (_www, daemon, nobody...).
+FIRST_USER_UID = 500
 
 DELETES = (
     "Your onion address and private key",
@@ -162,9 +172,93 @@ def _remove_linux(paths, docker, log):
         log("Uninstall: data directory removed")
 
 
-def run(paths, docker, log, launcher, out=None, os_name="macos"):
+def other_installs(data_dir, accounts=None):
+    """Whether OnionPress is installed for anyone else on this Mac: every
+    account's ~/.onionpress but *data_dir* (this account's own default
+    counts when *data_dir* is another folder). Returns (names, unsure):
+    the accounts that have one, and whether some home could not be looked
+    into (then nobody can say the app is unused)."""
+    accounts = pwd.getpwall() if accounts is None else accounts
+    mine = os.path.realpath(data_dir)
+    names, unsure = [], False
+    for a in accounts:
+        if a.pw_uid < FIRST_USER_UID or not a.pw_dir or a.pw_dir == "/var/empty":
+            continue
+        candidate = os.path.join(a.pw_dir, ".onionpress")
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            unsure = True
+            continue
+        if os.path.realpath(candidate) != mine:
+            names.append(a.pw_name)
+    return names, unsure
+
+
+def _trash_item(path):
+    """Move *path* to the Trash, the way Finder does where Foundation is
+    there (the bundle's Python has PyObjC), so Put Back works; else a rename
+    into ~/.Trash. Returns where it went. A rename, never a write into the
+    bundle: the app may be running from it (the updater's rule)."""
+    try:
+        from Foundation import NSFileManager, NSURL
+    except ImportError:
+        NSFileManager = None
+    if NSFileManager is not None:
+        ok, where, err = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+            NSURL.fileURLWithPath_(path), None, None)
+        if ok:
+            return where.path() if where is not None else path
+        raise OSError(str(err.localizedDescription()) if err is not None else "could not trash")
+    trash = os.path.join(os.path.expanduser("~"), ".Trash")
+    os.makedirs(trash, mode=0o700, exist_ok=True)
+    name = os.path.basename(path)
+    target, n = os.path.join(trash, name), 1
+    while os.path.lexists(target):
+        n += 1
+        stem, ext = os.path.splitext(name)
+        target = os.path.join(trash, f"{stem} {n}{ext}")
+    os.rename(path, target)
+    return target
+
+
+def trash_app(app_bundle, data_dir, log, *, accounts=None, trash=_trash_item,
+              running_from=__file__):
+    """Move the installed OnionPress.app to the Trash once nobody on this
+    Mac uses it. Returns {"trashed": where} or {"kept": path, "reason": …},
+    or {} with no bundle at all. Only the bundle this code runs from: a
+    checkout's CLI resolves /Applications/OnionPress.app as a fallback
+    (platform.find_app_bundle), and must not trash the installed app."""
+    if not app_bundle:
+        return {}
+    app = os.path.realpath(app_bundle)
+    if (not app.endswith(".app")
+            or os.path.dirname(app) not in {os.path.realpath(f) for f in APP_FOLDERS}
+            or not os.path.isfile(os.path.join(app, "Contents", "Info.plist"))
+            or not os.path.realpath(running_from).startswith(app + os.sep)):
+        return {"kept": app, "reason": "not-installed"}
+    names, unsure = other_installs(data_dir, accounts)
+    if names:
+        log(f"Uninstall: {app} stays: OnionPress is still installed for {', '.join(names)}")
+        return {"kept": app, "reason": "other-accounts", "accounts": names}
+    if unsure:
+        log(f"Uninstall: {app} stays: could not tell whether another account uses it")
+        return {"kept": app, "reason": "unsure"}
+    try:
+        where = trash(app)
+    except OSError as e:
+        log(f"Uninstall: could not move {app} to the Trash: {e}")
+        return {"kept": app, "reason": "trash-failed"}
+    log(f"Uninstall: {app} moved to the Trash")
+    return {"trashed": where}
+
+
+def run(paths, docker, log, launcher, out=None, os_name="macos", app_out=None):
     """Uninstall. Returns what may remain on a hub (release_onionheaven's
-    list: [] when nothing). *os_name* picks the platform's removal."""
+    list: [] when nothing). *os_name* picks the platform's removal. On a
+    Mac, *app_out* (a dict) gets trash_app's answer."""
     from .onionheaven import release_onionheaven
     # The daemon first: its heartbeat carries the key, so it must not put
     # the key back on a hub after the /unregister below. Its launchd agent
@@ -225,4 +319,8 @@ def run(paths, docker, log, launcher, out=None, os_name="macos"):
     if os.path.exists(paths.data_dir):
         shutil.rmtree(paths.data_dir)
         log("Uninstall: data directory removed")
+    # Last: everything else is gone, so only other installs keep the app.
+    app = trash_app(paths.app_bundle, paths.data_dir, log)
+    if app_out is not None:
+        app_out.update(app)
     return remaining
