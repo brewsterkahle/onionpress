@@ -1359,9 +1359,15 @@
   `_setup_post_same_origin` also needs `Sec-Fetch-Site: same-origin` when
   it is sent. Absolute-form responses get no CSP: that page is the
   onion's own origin.
-- Fallback pages only link the Wayback Machine, never redirect. Not
-  live-tested on a Mac; the native host likely does not start from a
-  py2app build.
+- Fallback pages only link the Wayback Machine, never redirect.
+- **The native messaging host in a built app is
+  `Contents/MacOS/native-messaging-host`** (`app/MacOS/`, copied by
+  `build-dmg-simple.sh` and `rebuild-menubar.sh`): it runs
+  `onionpress.native_messaging_host` on the MenubarApp's Python with the
+  launcher's `bundled_python` environment. The manifests never name the
+  package's `.py` inside a bundle (no Python on a Mac runs it); a bundle
+  without the wrapper gets no manifests. Not live-tested on a Mac.
+  `tests/test_native_host_bundle.py`.
 
 ## Cloudflare Tunnel Runs on Both Platforms (issue #352)
 - `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`.

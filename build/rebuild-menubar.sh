@@ -75,6 +75,10 @@ fi
 # Remove broken .pyo symlinks
 find "$MENUBAR_APP_DIR" -name '*.pyo' -type l -delete 2>/dev/null || true
 
+# The native messaging host runs the MenubarApp's Python (issue #318); an
+# app built before it shipped gets it here.
+install -m 755 "$PROJECT_DIR/app/MacOS/native-messaging-host" "$APP_PATH/Contents/MacOS/"
+
 # Sync the parent app's Info.plist version with the freshly-built MenubarApp.
 # self.version in menubar.py reads from $APP_PATH/Contents/Info.plist (the
 # parent), and that's what gets written to /var/lib/onionpress/version for
