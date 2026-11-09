@@ -17,6 +17,11 @@ an offline fallback (issue #318).
   page at a name its DNS points at 127.0.0.1 looks like the proxy's own
   page), and a /proxy/ page is sandboxed off the proxy's origin; the links
   rewritten into it carry a token so its own requests still pass.
+- An onion site's Set-Cookie and Location reach the browser (issue #323,
+  item 3: auto-login's cookie and redirect were dropped), and the
+  browser's cookies go back to the site: unchanged in the extension's
+  forward form, renamed and scoped to the host's tokened /proxy/ path in
+  the /proxy/ form; a redirect off the onion is refused, never followed.
 """
 import http.client
 import json
@@ -464,6 +469,182 @@ class TestProxy(unittest.TestCase):
             return 502, {"content-type": "text/html"}, b"<h1>Bad gateway</h1>"
         resp, body = self._fetch_onion("text/html", site_502)
         self.assertEqual(body, b"<h1>Bad gateway</h1>")
+
+
+class TestCookiesAndRedirects(unittest.TestCase):
+    """Issue #323 item 3: auto-login through the extension's proxy."""
+
+    OTHER = "b" * 56 + ".onion"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proxy = _ProxyServer(self.tmp.name)
+        self.proxy.server.cache = onion_proxy.ProxyCache()
+        self.fetched = []
+
+    def tearDown(self):
+        self.proxy.close()
+        self.tmp.cleanup()
+
+    def _serving(self, respond):
+        def fetch(handler, url, **kw):
+            self.fetched.append((url, kw.get("cookie", "")))
+            return respond(url)
+        return mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch)
+
+    @staticmethod
+    def _wordpress(url):
+        """auto_login's ?op_login= answer, then the page, logged in or not."""
+        if "op_login=" in url:
+            return 302, {"content-type": "text/html", "location": "/name/",
+                         "set-cookie": [
+                             f"wordpress_logged_in_x=v1; expires=Wed, 01 Jan 2031 00:00:00 GMT; "
+                             f"Max-Age=99; path=/; domain={ONION}; HttpOnly",
+                             f"wordpress_x=v2; path=/wp-admin; domain={ONION}; HttpOnly"]}, b""
+        return 200, {"content-type": "text/plain", "cache-control": "max-age=600"}, b"page"
+
+    def test_auto_login_through_the_extensions_forward_form(self):
+        with self._serving(self._wordpress):
+            resp, _ = self.proxy.request("GET", f"http://{ONION}/name/", {"Host": ONION})
+            self.assertEqual(resp.status, 200)   # cached, logged out
+            resp, _ = self.proxy.request("GET", f"http://{ONION}/name/?op_login=" + "t" * 40,
+                                         {"Host": ONION})
+            self.assertEqual(resp.status, 302)
+            self.assertEqual(resp.getheader("Location"), f"http://{ONION}/name/")
+            # The browser keeps them under the onion's name: unchanged.
+            self.assertEqual(resp.msg.get_all("Set-Cookie"),
+                             self._wordpress("op_login=")[1]["set-cookie"])
+            self.assertIsNone(resp.getheader("Content-Security-Policy"))
+            resp, body = self.proxy.request(
+                "GET", f"http://{ONION}/name/",
+                {"Host": ONION, "Cookie": "wordpress_logged_in_x=v1; other=1"})
+            self.assertEqual((resp.status, body), (200, b"page"))
+        # The logged-in request was fetched, not answered from the cache.
+        self.assertEqual(self.fetched[-1], (f"http://{ONION}/name/",
+                                            "wordpress_logged_in_x=v1; other=1"))
+        self.assertEqual(len(self.fetched), 3)
+        self.assertNotIn(f"http://{ONION}/name/?op_login=" + "t" * 40,
+                         self.proxy.server.cache._cache)
+
+    def test_the_proxy_form_scopes_cookies_to_the_hosts_tokened_path(self):
+        token = onion_proxy.PROXY_PAGE_TOKEN
+        prefix = onion_proxy.proxied_cookie_prefix(ONION)
+        with self._serving(self._wordpress):
+            resp, _ = self.proxy.request(
+                "GET", f"/proxy/{token}/{ONION}/name/?op_login=" + "t" * 40)
+            self.assertEqual(resp.status, 302)
+            self.assertEqual(resp.getheader("Location"), f"/proxy/{token}/{ONION}/name/")
+            self.assertEqual(resp.getheader("Content-Security-Policy"),
+                             onion_proxy.PROXIED_PAGE_CSP)
+            self.assertEqual(resp.msg.get_all("Set-Cookie"), [
+                f"{prefix}wordpress_logged_in_x=v1; Path=/proxy/{token}/{ONION}/; "
+                "expires=Wed, 01 Jan 2031 00:00:00 GMT; Max-Age=99; HttpOnly; SameSite=Lax",
+                f"{prefix}wordpress_x=v2; Path=/proxy/{token}/{ONION}/wp-admin; "
+                "HttpOnly; SameSite=Lax"])
+            # 127.0.0.1's cookies: local WordPress's (cookies ignore the
+            # port), another proxied site's, and this site's.
+            other = onion_proxy.proxied_cookie_prefix(self.OTHER)
+            resp, _ = self.proxy.request("GET", f"/proxy/{token}/{ONION}/name/", {
+                "Cookie": f"wordpress_logged_in_local=admin; {other}sess=theirs; "
+                          f"{prefix}wordpress_logged_in_x=v1",
+                "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"})
+            self.assertEqual(resp.status, 200)
+            resp, _ = self.proxy.request("GET", f"/proxy/{self.OTHER}/",
+                                         {"Cookie": f"{prefix}wordpress_logged_in_x=v1"})
+        self.assertEqual(self.fetched[-2], (f"http://{ONION}/name/", "wordpress_logged_in_x=v1"))
+        self.assertEqual(self.fetched[-1], (f"http://{self.OTHER}/", ""))
+
+    def test_proxied_set_cookie(self):
+        token = onion_proxy.PROXY_PAGE_TOKEN
+        prefix = onion_proxy.proxied_cookie_prefix(ONION)
+        self.assertNotEqual(prefix, onion_proxy.proxied_cookie_prefix(self.OTHER))
+        for header, want in (
+                ("a=1", f"{prefix}a=1; Path=/proxy/{token}/{ONION}/; SameSite=Lax"),
+                ("a=1; Domain=.example.com; Secure; SameSite=None; Partitioned; Path=x",
+                 f"{prefix}a=1; Path=/proxy/{token}/{ONION}/; SameSite=Lax"),
+                ("a=; Path=/b", f"{prefix}a=; Path=/proxy/{token}/{ONION}/b; SameSite=Lax"),
+                ("__Host-a=1; Path=/", f"{prefix}__Host-a=1; Path=/proxy/{token}/{ONION}/; "
+                                       "SameSite=Lax")):
+            with self.subTest(header=header):
+                self.assertEqual(onion_proxy.proxied_set_cookie(header, ONION), want)
+        for header in ("novalue", "=1", "a b=1", "a;b=1", ""):
+            with self.subTest(header=header):
+                self.assertIsNone(onion_proxy.proxied_set_cookie(header, ONION))
+
+    def test_a_redirect_off_the_onion_is_refused(self):
+        token = onion_proxy.PROXY_PAGE_TOKEN
+        for location in ("https://example.com/", "//example.com/x", "http://127.0.0.1:8080/",
+                         "http://localhost:9077/status", "javascript:alert(1)",
+                         "file:///etc/passwd", "http://evil.onion/", f"http://user@{ONION}/",
+                         f"http://{ONION}:99999/", f"http://{ONION}.example.com/",
+                         "/a\r\nSet-Cookie: x=1", "/a b"):
+            for path, host in ((f"http://{ONION}/", ONION), (f"/proxy/{token}/{ONION}/", None)):
+                with self.subTest(location=location, path=path):
+                    with self._serving(lambda url: (302, {"location": location}, b"")):
+                        resp, _ = self.proxy.request("GET", path, {"Host": host} if host else {})
+                    self.assertEqual(resp.status, 502)
+                    self.assertIsNone(resp.getheader("Location"))
+        # Not a redirect: the Location is left out, the response stands.
+        with self._serving(lambda url: (201, {"location": "https://example.com/"}, b"made")):
+            resp, body = self.proxy.request("GET", f"http://{ONION}/made", {"Host": ONION})
+        self.assertEqual((resp.status, body, resp.getheader("Location")), (201, b"made", None))
+
+    def test_redirect_targets(self):
+        token = onion_proxy.PROXY_PAGE_TOKEN
+        base = f"http://{ONION}/dir/page?q=1"
+        for location, forward, proxied in (
+                ("/x?y=1#f", f"http://{ONION}/x?y=1#f", f"/proxy/{token}/{ONION}/x?y=1#f"),
+                ("next", f"http://{ONION}/dir/next", f"/proxy/{token}/{ONION}/dir/next"),
+                (f"https://{self.OTHER}/", f"http://{self.OTHER}/", f"/proxy/{token}/{self.OTHER}/"),
+                (f"https://{self.OTHER}:443/", f"http://{self.OTHER}/",
+                 f"/proxy/{token}/{self.OTHER}/"),
+                (f"//www.{ONION.upper()}./a", f"http://www.{ONION}/a",
+                 f"/proxy/{token}/www.{ONION}/a"),
+                (f"http://{ONION}:8080/", f"http://{ONION}:8080/", None),
+                ("/\\example.com", f"http://{ONION}/\\example.com",
+                 f"/proxy/{token}/{ONION}/\\example.com")):
+            with self.subTest(location=location):
+                self.assertEqual(onion_proxy.redirect_target(location, base, False), forward)
+                self.assertEqual(onion_proxy.redirect_target(location, base, True), proxied)
+
+    def test_a_response_that_sets_a_cookie_is_never_cached(self):
+        cookie = (200, {"content-type": "text/plain", "cache-control": "max-age=600",
+                        "set-cookie": ["s=1; path=/"]}, b"x")
+        with self._serving(lambda url: cookie):
+            for _ in range(2):
+                resp, _ = self.proxy.request("GET", f"http://{ONION}/", {"Host": ONION})
+                self.assertEqual(resp.getheader("Set-Cookie"), "s=1; path=/")
+        self.assertEqual(len(self.fetched), 2)
+
+    def test_fetch_via_php_sends_the_cookie_and_keeps_every_set_cookie(self):
+        conn = mock.MagicMock()
+        resp = conn.getresponse.return_value
+        resp.status = 302
+        resp.read.return_value = b""
+        resp.getheaders.return_value = [("Location", "/x"), ("Set-Cookie", "a=1"),
+                                        ("Set-Cookie", "b=2")]
+        h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
+        h.server = types.SimpleNamespace(_wp_unreachable_since=None, log_func=None,
+                                         wp_port=18080)
+        with mock.patch.object(onion_proxy.http.client, "HTTPConnection", return_value=conn):
+            status, headers, _ = h._fetch_via_php(f"http://{ONION}/", cookie="a=1")
+            self.assertEqual(conn.request.call_args.kwargs["headers"]["X-OnionPress-Cookie"],
+                             "a=1")
+            h._fetch_via_php(f"http://{ONION}/")
+            self.assertNotIn("X-OnionPress-Cookie", conn.request.call_args.kwargs["headers"])
+        self.assertEqual((status, headers["location"], headers["set-cookie"]),
+                         (302, "/x", ["a=1", "b=2"]))
+
+    def test_the_forwarder_hands_back_redirects_and_cookies(self):
+        php = _read("src/onion-forward.php")
+        self.assertIn("CURLOPT_FOLLOWLOCATION  => false", php)
+        self.assertNotIn("CURLOPT_FOLLOWLOCATION  => true", php)
+        self.assertIn("$_SERVER['HTTP_X_ONIONPRESS_COOKIE']", php)
+        self.assertIn("curl_setopt($ch, CURLOPT_COOKIE, $cookie)", php)
+        forward = re.search(r"\$forward = \[(.*?)\];", php, re.S).group(1)
+        self.assertIn("'location'", forward)
+        self.assertIn("'set-cookie'", forward)
+        self.assertIn("header($line, $name !== 'set-cookie', $status);", php)
 
 
 class TestExtensionSources(unittest.TestCase):
