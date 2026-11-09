@@ -13,15 +13,21 @@ world-writable /tmp before the daemon bound it. It is now
 whose image runs as root, with no -u.
 
 The post-takeover audit fetches the registry's healthcheck_address through
-Tor, and an answer releases the takeover. The registry is writable by
-onionpress-tor and every worker, so the value is fetched only if it is one
-v3 onion address, whole; anything else is recorded as
-invalid_healthcheck_address, never fetched, never a release.
+Tor. The registry is writable by onionpress-tor and every worker, so the
+value is fetched only if it is one v3 onion address, whole; anything else
+is recorded as invalid_healthcheck_address, never fetched.
+
+No audit releases a takeover (issue #455). The answer is unsigned: an old
+backup or the old machine holding the healthcheck key, or a cached or
+proxied page, answers as well as the site does. It is recorded as
+unsigned_answer and logged; the site's own /online, signed with its
+content key and sent every minute, is the one release.
 
 No Docker: the socket is bound in a temp directory, the audit runs against
 a temp registry with subprocess mocked.
 """
 
+import ast
 import importlib.util
 import io
 import os
@@ -235,7 +241,8 @@ HOSTILE_HEALTHCHECKS = [
 ]
 
 
-class AuditInputTest(unittest.TestCase):
+class _AuditCase(unittest.TestCase):
+    """A temp registry, this worker's name, releases and curl recorded."""
 
     def setUp(self):
         self.base = tempfile.mkdtemp(prefix="op-audit-")
@@ -274,6 +281,9 @@ class AuditInputTest(unittest.TestCase):
         return self.conn.execute(
             "SELECT * FROM registry WHERE healthcheck_address IS ?", (hc,)).fetchone()
 
+
+class AuditInputTest(_AuditCase):
+
     def test_a_non_address_is_never_fetched(self):
         for value in HOSTILE_HEALTHCHECKS:
             self.assertFalse(worker._check_healthcheck(value), repr(value))
@@ -305,13 +315,79 @@ class AuditInputTest(unittest.TestCase):
         worker.process_audits(self.conn)
         row = dict(self._row("example.com"))
         self.assertTrue(row["audit_result"])          # heartbeat: no new audit
-        self.assertNotEqual(row["audit_result"], "false_positive")  # nor a release
+        self.assertEqual(row["status"], "taken-over")  # nor a release
 
-    def test_a_real_address_that_answers_is_released(self):
-        self._seed(HC)
-        self.assertEqual(worker.process_audits(self.conn), 1)
-        self.assertEqual(self.released, [ADDR])
-        self.assertEqual(self._row(HC)["audit_result"], "false_positive")
+
+# ---------------------------------------------------------------------------
+# No audit is a release (issue #455)
+# ---------------------------------------------------------------------------
+
+class AuditNeverReleasesTest(_AuditCase):
+    """An answer at the healthcheck address is unsigned: it is recorded and
+    logged, and the takeover stays until the site's signed /online."""
+
+    def _audit(self, stdout="200", returncode=0):
+        def run(argv, **kwargs):
+            self.runs.append(argv)
+            return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+        with mock.patch.object(worker.subprocess, "run", run):
+            self._seed(HC)
+            self.assertEqual(worker.process_audits(self.conn), 1)
+        return self._row(HC)
+
+    def test_an_answer_is_recorded_not_released(self):
+        for code in ("200", "301"):
+            with self.subTest(code=code):
+                self.conn.execute("DELETE FROM registry")
+                self.conn.commit()
+                row = self._audit(stdout=code)
+                self.assertEqual(row["audit_result"], worker.AUDIT_UNSIGNED_ANSWER)
+                self.assertEqual(row["status"], "taken-over")
+                self.assertIsNone(row["audit_pending"])
+                self.assertIsNone(row["last_released"])
+        self.assertEqual(self.released, [])
+        self.assertTrue(any("unsigned" in line for line in self.logged))
+
+    def test_no_answer_is_confirmed_dead(self):
+        row = self._audit(stdout="000", returncode=7)
+        self.assertEqual(row["audit_result"], worker.AUDIT_CONFIRMED_DEAD)
+        self.assertEqual(row["status"], "taken-over")
+        self.assertEqual(self.released, [])
+
+    def test_the_audit_has_no_release_in_it(self):
+        """A census: neither the worker's audit nor the heartbeat (which
+        acts on audit results) can reach a release; the worker's own
+        releases are the hub's release_pending rows, set by /online."""
+        tree = ast.parse(_read(WORKER_SOURCE))
+        audit = next(node for node in ast.walk(tree)
+                     if isinstance(node, ast.FunctionDef) and node.name == "process_audits")
+        self.assertEqual(_called_names(audit) & RELEASES, set())
+        heartbeat = ast.parse(_read(HEARTBEAT_SOURCE))
+        self.assertEqual(_called_names(heartbeat) & RELEASES, set())
+        # Nor is the old releasing result written or read anywhere.
+        for source in (tree, heartbeat):
+            self.assertNotIn("false_positive", {
+                node.value for node in ast.walk(source)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)})
+
+
+WORKER_SOURCE = "app/Resources/docker/tor/onionheaven-takeover-worker.py"
+HEARTBEAT_SOURCE = "app/Resources/docker/tor/onionheaven-heartbeat.py"
+RELEASES = {"release_function", "_release_local", "release_local"}
+
+
+def _called_names(tree):
+    """Every name called or imported in tree (a call through an attribute
+    counts by its attribute name)."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            names.add(func.attr if isinstance(func, ast.Attribute)
+                      else getattr(func, "id", ""))
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.name for alias in node.names)
+    return names
 
 
 if __name__ == "__main__":

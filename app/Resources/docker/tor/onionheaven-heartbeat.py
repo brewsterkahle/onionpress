@@ -13,7 +13,8 @@ which updates last_healthy timestamps. This monitor:
   1. Scans the DB for stale heartbeats (missed 3+ beats = 180s) → takeover,
      and for /offline requests the API server recorded → takeover now
      (web-server.py cannot reach the farm controller; this container can)
-  2. Audits recent takeovers by pinging the healthcheck address → detect false positives
+  2. Audits recent takeovers by pinging the healthcheck address (logged only:
+     an unsigned answer releases nothing; the site's signed /online does)
   3. Manages farm scaling for takeover workers
 
 All operations are local:
@@ -36,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    takeover_function, release_function, unregister_entry,
+    takeover_function, unregister_entry,
     check_worker_bootstrap, cleanup_dead_workers, fix_assigned_count_drift,
     farm_exec,
     takeover_requested_now, clear_takeover_request,
@@ -190,7 +191,7 @@ def startup_reconciliation(conn):
     # But first: if the content_address has an online sibling, the takeover
     # is stale (instance re-registered with a new healthcheck) — unregister instead.
     taken_over = conn.execute(
-        "SELECT content_address, healthcheck_address, audit_result FROM registry "
+        "SELECT content_address, healthcheck_address FROM registry "
         "WHERE status = 'taken-over' AND unregistered_at IS NULL"
     ).fetchall()
 
@@ -198,7 +199,6 @@ def startup_reconciliation(conn):
     if taken_over:
         for row in taken_over:
             ca, ha = row[0], row[1]
-            audit_result = row[2]
             sibling_online = conn.execute(
                 "SELECT 1 FROM registry WHERE content_address = ? AND status = 'online' "
                 "AND unregistered_at IS NULL LIMIT 1",
@@ -207,10 +207,10 @@ def startup_reconciliation(conn):
             if sibling_online:
                 log(f"  startup: {ca} has online sibling — unregistering stale takeover for {ha}")
                 unregister_entry(conn, ca, ha, reason="superseded-by-new-healthcheck")
-            elif audit_result == "false_positive":
-                log(f"  startup: {ca} audit was false_positive — releasing instead of re-taking-over")
-                release_function(conn, ca, ha)
             else:
+                # No audit result releases (issue #455), not even a
+                # false_positive an older worker left: only the site's
+                # signed /online does.
                 if ca not in re_takeover_addrs:
                     re_takeover_addrs.append(ca)
         db_commit_with_retry(conn)
@@ -544,15 +544,12 @@ def main():
                             pass
 
                     # Act on audit results / queue new audits
+                    # (never a release, issue #455: an answer at the
+                    # healthcheck address is unsigned; only the site's
+                    # signed /online releases, and release_function clears
+                    # audit_result so a later takeover gets a fresh audit)
                     audit_result = entry.get("audit_result")
-                    if audit_result == "false_positive":
-                        # Site is alive — release the takeover
-                        # (release_function clears audit_result so future
-                        # takeovers get a fresh audit)
-                        log(f"Releasing false-positive takeover for {ca} (healthcheck {ha} is alive)")
-                        release_function(conn, ca, ha)
-                        continue
-                    elif not audit_result and not entry.get("audit_pending"):
+                    if not audit_result and not entry.get("audit_pending"):
                         if 10 < since_takeover <= 300:
                             conn.execute(
                                 "UPDATE registry SET audit_pending = ? "
