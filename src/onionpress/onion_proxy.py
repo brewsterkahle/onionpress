@@ -34,6 +34,7 @@ the proxy rewrites into such a page carry PROXY_PAGE_TOKEN, which is how
 the page's own requests are told from another site's.
 """
 
+import hashlib
 import hmac
 import os
 import re
@@ -49,7 +50,7 @@ from collections import OrderedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from html import escape as html_escape
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urljoin, urlparse, parse_qs
 
 # The ports this process found in its environment at import: the defaults
 # for a server built without its own (ThreadingHTTPServer's *ports*) and
@@ -119,6 +120,9 @@ HTTPS_ONION_RE = re.compile(
     r'https://((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)',
     re.IGNORECASE
 )
+
+# A cookie name (RFC 6265's token).
+COOKIE_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 # Cache settings
 CACHE_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
@@ -478,6 +482,94 @@ def _onion_host(host):
     return host, is_onion, ok
 
 
+# Cookies and redirects (issue #323, item 3). An onion site's Set-Cookie
+# and Location reach the browser, so its login (and auto_login's
+# ?op_login=, which sets WordPress's cookies and redirects) works through
+# the proxy, and the browser's cookies for the site go back to it.
+#
+# In the forward form (GET http://x.onion/, the extension's) the browser
+# keeps the cookies under the onion's own name and sends the proxy only
+# those: both directions pass unchanged. In the /proxy/ form every site
+# shares this proxy's 127.0.0.1, where other local services' cookies live
+# too (WordPress's own on localhost:<wp port>: cookies ignore the port).
+# So a proxied site's cookie is renamed with a prefix of its host
+# (proxied_cookie_prefix) and its Path moved under that host's tokened
+# prefix, Domain dropped; only cookies carrying the target's prefix go to
+# it. The sandboxed page cannot read any of them (an opaque origin has no
+# document.cookie) and its requests are cross-site, so they are
+# SameSite=Lax: sent on the page's link clicks, not on its form posts or
+# fetches. The extension's form is the one that logs in fully.
+
+def proxied_cookie_prefix(host):
+    """The name prefix of every cookie a /proxy/ page of *host* sets."""
+    return "__op" + hashlib.sha256(host.encode("ascii")).hexdigest()[:16] + "_"
+
+
+def proxied_set_cookie(header, host):
+    """*host*'s Set-Cookie value rewritten for its /proxy/ pages: the name
+    prefixed, Path under /proxy/<token>/<host>, Domain, Secure and the
+    site's SameSite dropped, SameSite=Lax. None for a malformed cookie."""
+    parts = header.split(";")
+    name, eq, value = parts[0].partition("=")
+    name = name.strip()
+    if not eq or not COOKIE_NAME_RE.fullmatch(name):
+        return None
+    path = "/"
+    kept = []
+    for attr in parts[1:]:
+        key, _, val = attr.strip().partition("=")
+        key = key.strip().lower()
+        if key == "path" and val.strip().startswith("/"):
+            path = val.strip()
+        elif key in ("expires", "max-age"):
+            kept.append(attr.strip())
+        elif key == "httponly":
+            kept.append("HttpOnly")
+    return "; ".join([f"{proxied_cookie_prefix(host)}{name}={value.strip()}",
+                      f"Path=/proxy/{PROXY_PAGE_TOKEN}/{host}{path}",
+                      *kept, "SameSite=Lax"])
+
+
+def proxied_request_cookies(header, host):
+    """The cookies in a /proxy/ request's Cookie *header* that *host*'s
+    pages set, under their own names: none of another site's or of
+    another local service's."""
+    prefix = proxied_cookie_prefix(host)
+    return "; ".join(pair.strip()[len(prefix):] for pair in (header or "").split(";")
+                     if pair.strip().startswith(prefix))
+
+
+def redirect_target(location, base_url, proxied):
+    """Where the browser goes for an onion site's Location (resolved
+    against *base_url*, the URL fetched): an onion URL in the request's
+    own form (the tokened /proxy/ path when *proxied*, else absolute
+    http://, the proxy carries no https), or None for anything that is
+    not a v3 onion over http(s), which is never followed."""
+    if any(ord(c) <= 0x20 or ord(c) == 0x7f for c in location):
+        return None
+    try:
+        parsed = urlparse(urljoin(base_url, location))
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+        return None
+    host, is_onion, ok = _onion_host(parsed.hostname)
+    if not (is_onion and ok):
+        return None
+    if port == (443 if parsed.scheme == "https" else 80):
+        port = None
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    if parsed.fragment:
+        path += "#" + parsed.fragment
+    if proxied:
+        # The /proxy/ form names no port.
+        return None if port else f"/proxy/{PROXY_PAGE_TOKEN}/{host}{path}"
+    return f"http://{host}{f':{port}' if port else ''}{path}"
+
+
 class OnionProxyHandler(BaseHTTPRequestHandler):
     """HTTP forward proxy: .onion via Tor, clearnet direct."""
 
@@ -665,20 +757,27 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 post_data = self.rfile.read(content_length)
             content_type = self.headers.get('Content-Type', 'application/x-www-form-urlencoded')
 
-        # Check cache for GET requests
+        # The browser's cookies for the site (proxied_request_cookies).
+        cookie = self.headers.get('Cookie', '')
+        if not is_forward_proxy:
+            cookie = proxied_request_cookies(cookie, target_host)
+
+        # Check cache for GET requests. A request with cookies may get a
+        # page for that login (a cached logged-out copy hid auto-login's).
         cache = self.server.cache
-        if self.command == 'GET' and cache:
+        if self.command == 'GET' and cache and not cookie:
             cached = cache.get(target_url)
             if cached:
                 status, resp_headers, body = cached
-                self._send_response(status, resp_headers, body, head_only)
+                self._relay(status, resp_headers, body, head_only,
+                            target_url, not is_forward_proxy)
                 return
 
         # Fetch through Tor
         try:
             status, resp_headers, body = self._fetch_via_php(
                 target_url, post_data=post_data, content_type=content_type,
-                head_only=head_only
+                head_only=head_only, cookie=cookie
             )
         except Exception as e:
             if is_onion and self._wants_page():
@@ -704,16 +803,44 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             else:
                 body = self._rewrite_onion_links(body, target_host)
 
-        # Cache successful GET responses
-        if self.command == 'GET' and cache and 200 <= status < 400:
+        # Cache successful GET responses; never one that sets a cookie
+        # (the next request would get it), nor one for a request with
+        # cookies.
+        if (self.command == 'GET' and cache and 200 <= status < 400
+                and not cookie and 'set-cookie' not in resp_headers):
             ttl = _cache_ttl(resp_content_type,
                              resp_headers.get('cache-control', ''))
             cache.put(target_url, status, resp_headers, body, ttl)
 
-        self._send_response(status, resp_headers, body, head_only)
+        self._relay(status, resp_headers, body, head_only,
+                    target_url, not is_forward_proxy)
 
-    def _send_response(self, status, resp_headers, body, head_only=False):
-        """Send an HTTP response to the client."""
+    def _relay(self, status, resp_headers, body, head_only, target_url, proxied):
+        """Send an onion site's response, its Location and Set-Cookie in the
+        request's form (redirect_target, proxied_set_cookie). A redirect
+        off the onion is refused, never followed."""
+        extra = []
+        location = resp_headers.get('location')
+        if location is not None:
+            location = redirect_target(location, target_url, proxied)
+            if location is not None:
+                extra.append(('Location', location))
+            elif 300 <= status < 400:
+                self.send_error(502, "The onion site redirected off .onion; "
+                                     "this proxy carries .onion sites only")
+                return
+        host = urlparse(target_url).hostname
+        cookies = resp_headers.get('set-cookie', ())
+        for value in [cookies] if isinstance(cookies, str) else cookies:
+            if proxied:
+                value = proxied_set_cookie(value, host)
+            if value:
+                extra.append(('Set-Cookie', value))
+        self._send_response(status, resp_headers, body, head_only, extra)
+
+    def _send_response(self, status, resp_headers, body, head_only=False, extra=()):
+        """Send an HTTP response to the client: *resp_headers*' plain
+        headers, and *extra* (name, value) pairs as they are."""
         self.send_response(status)
         forward_headers = {'content-type', 'cache-control', 'etag',
                            'last-modified', 'content-disposition',
@@ -721,6 +848,8 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         for name, value in resp_headers.items():
             if name.lower() in forward_headers:
                 self.send_header(name, value)
+        for name, value in extra:
+            self.send_header(name, value)
         self.send_header('Content-Length', str(len(body)))
         cors_origin = self._get_cors_origin()
         if cors_origin:
@@ -749,11 +878,16 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                                   'cache-control': 'no-store'},
                             body, head_only)
 
-    def _fetch_via_php(self, url, post_data=None, content_type=None, head_only=False):
-        """Fetch a .onion URL through the PHP proxy (via Tor SOCKS)."""
+    def _fetch_via_php(self, url, post_data=None, content_type=None, head_only=False,
+                       cookie=''):
+        """Fetch a .onion URL through the PHP proxy (via Tor SOCKS), with
+        *cookie* as the request's Cookie. The headers come back lowercased,
+        'set-cookie' a list of every one."""
         headers = {"X-OnionPress-URL": url, "X-OnionPress-Token": PHP_PROXY_TOKEN}
         if content_type:
             headers["Content-Type"] = content_type
+        if cookie:
+            headers["X-OnionPress-Cookie"] = cookie
 
         method = "HEAD" if head_only else ("POST" if post_data else "GET")
 
@@ -764,6 +898,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             resp = conn.getresponse()
             body = resp.read()
             resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+            set_cookies = [v for k, v in resp.getheaders() if k.lower() == 'set-cookie']
+            if set_cookies:
+                resp_headers['set-cookie'] = set_cookies
             status = resp.status
             conn.close()
         except OSError as e:

@@ -108,12 +108,21 @@ curl_setopt_array($ch, [
     CURLOPT_PROXY           => 'socks5h://onionpress-tor:9050',
     CURLOPT_RETURNTRANSFER  => true,
     CURLOPT_HEADER          => true,
-    CURLOPT_FOLLOWLOCATION  => true,
-    CURLOPT_MAXREDIRS       => 10,
+    // A redirect goes back to the browser, through onion_proxy.py, which
+    // passes it on only to an onion URL (redirect_target): followed here,
+    // the Set-Cookie on it was lost (auto-login's, issue #323) and the
+    // browser never saw the address it landed on.
+    CURLOPT_FOLLOWLOCATION  => false,
     CURLOPT_TIMEOUT         => 30,
     CURLOPT_CONNECTTIMEOUT  => 15,
     CURLOPT_SSL_VERIFYPEER  => false,  // .onion TLS is self-authenticating
 ]);
+
+// The browser's cookies for this site, as onion_proxy.py picked them.
+$cookie = $_SERVER['HTTP_X_ONIONPRESS_COOKIE'] ?? '';
+if (is_string($cookie) && $cookie !== '' && !preg_match('/[\x00-\x1f\x7f]/', $cookie)) {
+    curl_setopt($ch, CURLOPT_COOKIE, $cookie);
+}
 
 // Forward request method and body
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -144,14 +153,16 @@ curl_close($ch);
 // Send status code
 http_response_code($status);
 
-// Forward selected response headers
+// Forward selected response headers; onion_proxy.py rewrites Location and
+// Set-Cookie for the browser. Every Set-Cookie is kept (not replaced by
+// the next), and the site's status stands (a Location makes PHP send 302).
 $forward = ['content-type', 'cache-control', 'etag', 'last-modified',
-            'content-disposition', 'content-encoding'];
+            'content-disposition', 'content-encoding', 'location', 'set-cookie'];
 foreach (explode("\r\n", $headers_raw) as $line) {
     if (!$line || strpos($line, ':') === false) continue;
     $name = strtolower(trim(explode(':', $line, 2)[0]));
     if (in_array($name, $forward)) {
-        header($line);
+        header($line, $name !== 'set-cookie', $status);
     }
 }
 
