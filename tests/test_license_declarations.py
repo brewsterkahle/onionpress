@@ -55,6 +55,7 @@ ENTRY_SCRIPTS = (
     "src/onionpress/__init__.py",
     "app/MacOS/onionpress",
     "app/MacOS/launcher.sh",
+    "app/MacOS/native-messaging-host",
     "linux/onionpress",
     "linux/onionpress-tray",
     "app/Resources/docker/tor/entrypoint.sh",
