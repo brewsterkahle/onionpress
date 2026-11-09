@@ -1079,6 +1079,10 @@
 - The queue manager socket is 0600 from bind(); every client is root.
   `healthcheck_address` is fetched only if it is one v3 address.
   `tests/test_takeover_worker_hardening.py`.
+- **No audit releases a takeover** (#455): an answer at the healthcheck
+  address is unsigned, so it is only logged (`unsigned_answer`); the one
+  release is the site's own signed `/online`. `AuditNeverReleasesTest` in
+  `tests/test_takeover_worker_hardening.py`.
 
 ## OnionHome Name Registry Volume
 - `onionnames.db` lives on `onionpress-onionnames-data`, mounted by
