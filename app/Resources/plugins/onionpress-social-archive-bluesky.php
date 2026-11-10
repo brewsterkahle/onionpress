@@ -174,10 +174,7 @@ function onionpress_bluesky_import_page() {
             // Fire-and-forget — kick the daemon via a loopback wp-cron
             // call so the admin request doesn't block for 30 min.
             delete_option( ONIONPRESS_BLUESKY_DAEMON_LOCK );
-            delete_transient( 'doing_cron' );
-            wp_schedule_single_event( time(), ONIONPRESS_BLUESKY_CRON_HOOK );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_social_run_now( ONIONPRESS_BLUESKY_CRON_HOOK );
             $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_bluesky_reset'] ) ) {
             check_admin_referer( 'onionpress_bluesky_reset', 'onionpress_bluesky_reset_nonce' );

@@ -149,8 +149,13 @@ class TestSweepStateIsTheNetworks(unittest.TestCase):
 
     def test_kick_runs_the_main_sites_cron(self):
         hook = _hook(self.php, "add_action( 'admin_post_onionpress_wayback_action'")
-        self.assertIn("get_site_url( $main, 'wp-cron.php?doing_wp_cron='", hook)
-        self.assertNotIn("site_url( 'wp-cron.php", hook.replace("get_site_url( $main, 'wp-cron.php", ""))
+        # spawn_cron() on the main site, whose loopback the tor proxy's
+        # cron_request filter sends to http://localhost (#409).
+        switched = hook.index("switch_to_blog( $main );")
+        self.assertLess(switched, hook.index("delete_transient( 'doing_cron' );"))
+        self.assertLess(hook.index("delete_transient( 'doing_cron' );"), hook.index("spawn_cron();"))
+        self.assertLess(hook.index("spawn_cron();"), hook.index("restore_current_blog();", switched))
+        self.assertNotIn("wp_remote_post(", hook)
 
     def test_old_per_blog_state_is_retired_once(self):
         fn = _function(self.php, "onionpress_wayback_retire_blog_state")

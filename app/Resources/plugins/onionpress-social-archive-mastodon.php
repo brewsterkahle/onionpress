@@ -203,10 +203,7 @@ function onionpress_mastodon_import_page() {
             // actually fires it right now. The admin page then re-
             // renders with a "running" indicator that auto-refreshes.
             delete_option( ONIONPRESS_MASTODON_DAEMON_LOCK );
-            delete_transient( 'doing_cron' );
-            wp_schedule_single_event( time(), ONIONPRESS_MASTODON_CRON_HOOK );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_social_run_now( ONIONPRESS_MASTODON_CRON_HOOK );
             $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_mastodon_reset'] ) ) {
             check_admin_referer( 'onionpress_mastodon_reset', 'onionpress_mastodon_reset_nonce' );

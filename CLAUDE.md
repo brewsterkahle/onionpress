@@ -764,6 +764,10 @@
   locked, time-budgeted, backs off and keeps a failing follow's items.
   wp-cron's loopback goes to `http://localhost/`.
   `tests/test_blogroll_refresh.py`.
+- **A "run it now" kick is `spawn_cron()`** (#409; the importers'
+  `onionpress_social_run_now`), whose loopback that filter sends to
+  localhost: no PHP names `wp-cron.php` in code (`site_url()` is the
+  request's host). `tests/test_cron_kicks_reach_localhost.py`.
 
 ## WordPress Resolves No Name Outside Docker
 - A DNS lookup in the wordpress container is a leak. onionpress-tor-proxy

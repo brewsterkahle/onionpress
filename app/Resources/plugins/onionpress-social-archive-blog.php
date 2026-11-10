@@ -266,10 +266,7 @@ function onionpress_blog_import_page() {
         } elseif ( isset( $_POST['onionpress_blog_sync_now'] ) ) {
             check_admin_referer( 'onionpress_blog_sync_now', 'onionpress_blog_sync_nonce' );
             delete_option( ONIONPRESS_BLOG_DAEMON_LOCK );
-            delete_transient( 'doing_cron' );
-            wp_schedule_single_event( time(), ONIONPRESS_BLOG_CRON_HOOK );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_social_run_now( ONIONPRESS_BLOG_CRON_HOOK );
             $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_blog_reset'] ) ) {
             check_admin_referer( 'onionpress_blog_reset', 'onionpress_blog_reset_nonce' );
@@ -535,10 +532,7 @@ function onionpress_blog_handle_save_url_post() {
     // the lock, schedule an immediate single event, fire off a non-
     // blocking loopback POST to wp-cron.php to make WP actually run it.
     delete_option( ONIONPRESS_BLOG_DAEMON_LOCK );
-    delete_transient( 'doing_cron' );
-    wp_schedule_single_event( time(), ONIONPRESS_BLOG_CRON_HOOK );
-    $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-    wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+    onionpress_social_run_now( ONIONPRESS_BLOG_CRON_HOOK );
 
     return array(
         'level'   => 'success',

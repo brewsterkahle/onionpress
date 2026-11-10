@@ -1562,22 +1562,24 @@ add_action( 'admin_post_onionpress_wayback_action', function () {
             // time in practice. Clearing it lets cron fire immediately.
             // It is the main site's cron that runs the sweep, so its
             // transient and its wp-cron.php, whichever site the page is on.
+            // Schedule an immediate cron fire so the sweep starts in a
+            // separate request (admin page doesn't hang for the whole
+            // daemon run).
+            onionpress_wayback_schedule_now();
             $main = function_exists( 'get_main_site_id' ) ? get_main_site_id() : 1;
             if ( is_multisite() ) {
                 switch_to_blog( $main );
             }
             delete_transient( 'doing_cron' );
+            // And have WP run it right now (WP-Cron only fires on HTTP).
+            // spawn_cron()'s loopback goes through `cron_request`, which
+            // onionpress-tor-proxy.php points at http://localhost; the
+            // main site's own URL (#409) was the onion or the owner's
+            // localhost:8080, neither reachable from the container.
+            spawn_cron();
             if ( is_multisite() ) {
                 restore_current_blog();
             }
-            // Schedule an immediate cron fire so the sweep starts in a
-            // separate request (admin page doesn't hang for the whole
-            // daemon run).
-            onionpress_wayback_schedule_now();
-            // Also spawn a loopback to wp-cron.php so WP actually runs
-            // scheduled events right now (WP-Cron only fires on HTTP).
-            $cron_url = get_site_url( $main, 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
             $msg = 'Daemon kicked — archiving will begin within a few seconds.';
             break;
         case 'clear_backoff':

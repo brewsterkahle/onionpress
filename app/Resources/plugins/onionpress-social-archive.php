@@ -53,6 +53,26 @@ function onionpress_social_plain_text( $text ) {
     return sanitize_text_field( wp_strip_all_tags( (string) $text ) );
 }
 
+/**
+ * Run an importer's cron hook now, in a request of its own, so Sync now
+ * does not hold the admin page for the whole sync (#409).
+ *
+ * spawn_cron() sends its loopback through the `cron_request` filter,
+ * which onionpress-tor-proxy.php points at http://localhost inside the
+ * container. The importers used to post to site_url( 'wp-cron.php' )
+ * themselves: the request's own host, so the owner's
+ * http://localhost:8080 named a port nothing listens on in the
+ * container and an onion or clearnet host went out through Tor with a
+ * 0.01 s timeout. Either way the sync waited for the next page view.
+ * The stale `doing_cron` lock is cleared first, as before, or
+ * spawn_cron() would wait out a dead run's lock.
+ */
+function onionpress_social_run_now( $hook ) {
+    delete_transient( 'doing_cron' );
+    wp_schedule_single_event( time(), $hook );
+    spawn_cron();
+}
+
 // ──────────────────────── uploaded archives (#473) ────────────────────────
 //
 // The Twitter and Reddit importers take a ZIP from any site administrator
