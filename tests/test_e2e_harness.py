@@ -758,6 +758,14 @@ class ChaosTest(unittest.TestCase):
         self.assertIn("never read 'offline'", joined)
         self.assertIn("'stuck'", joined)
 
+    def test_stuck_on_the_way_back_is_named(self):
+        """The second live run: offline during no-route, then "stuck"
+        right after the route came back (the offline time counted)."""
+        _, outcome = self._run("no-route", lambda on, since: "offline" if on
+                               else ("stuck" if since < 30 else "available"))
+        self.assertEqual(len(outcome.findings), 1)
+        self.assertIn("once the fault was off", outcome.findings[0])
+
     def test_a_paused_tor_must_not_read_offline(self):
         _, outcome = self._run("tor-paused", _offline_while_on)
         self.assertTrue(any("sick stack" in f for f in outcome.findings), outcome.findings)

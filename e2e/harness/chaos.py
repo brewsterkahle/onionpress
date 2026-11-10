@@ -12,10 +12,11 @@ are the product's (CLAUDE.md, "Onion Service Recovery"):
   republish (`reachability: … republish` in the daemon's log), since the
   key and descriptor were never at fault.
 - A host with no route out reads "offline", never "stuck" ("Slow to
-  connect — try Restart"); so does one whose network carries nothing
-  past the route (a captive portal: Tor's own report, issue #139).
-- A sick stack is not an offline host: tor paused reads "starting",
-  never "offline".
+  connect — try Restart"), during the fault or on the way back; so does
+  one whose network carries nothing past the route (a captive portal:
+  Tor's own report, issue #139).
+- A sick stack is not an offline host: tor paused reads "stopped" (the
+  daemon sees a container not running) or "starting", never "offline".
 - After the revert the site is "available" again, at the same address.
 
 Host faults (no route, captive portal) change the VM's routing table and
@@ -242,6 +243,8 @@ def findings(fault, outcome, address):
         found.append(f"{fault.name}: no readable daemon state while the fault was on")
     if "stuck" in during:
         found.append(f"{fault.name}: the daemon read 'stuck' (Slow to connect) during the fault")
+    if "stuck" in outcome.states("recovery"):
+        found.append(f"{fault.name}: the daemon read 'stuck' (Slow to connect) once the fault was off")
     if fault.expect_offline and "offline" not in during:
         found.append(f"{fault.name}: never read 'offline' during the fault ({_runs(during)})")
     if fault.never_offline and "offline" in during:

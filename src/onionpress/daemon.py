@@ -1005,6 +1005,12 @@ class Daemon(PortAttributes):
                     self.log("Internet connectivity lost")
                 elif self._has_internet and not had_internet:
                     self.log("Internet connectivity restored")
+                    # The time offline is not time spent failing to
+                    # connect: the stuck clock ("Slow to connect")
+                    # starts now (#139, T1 (b) no-route read "stuck"
+                    # right after the route came back).
+                    if not self.is_ready:
+                        self._yellow_since = time.time()
                     self.publish_state()
 
                 if not self._has_internet:
