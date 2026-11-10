@@ -404,7 +404,9 @@ class Daemon(PortAttributes):
     _read_config_value = read_config_value
 
     def check_internet_connectivity(self):
-        return self._health_checker.check_internet_connectivity()
+        # A default route, and Tor not saying it reaches no relay (a
+        # captive portal, #139): HealthChecker.network_reachable.
+        return self._health_checker.network_reachable()
 
     def run_launcher(self, args, timeout=60, env=None):
         """`<launcher> <args>`: the returncode and stdout (stripped), or

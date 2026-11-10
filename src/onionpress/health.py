@@ -221,6 +221,77 @@ def linux_has_default_route(route="/proc/net/route", route6="/proc/net/ipv6_rout
     return False
 
 
+def mac_has_default_route() -> bool:
+    """True if a Mac's routing table has a default route (v4 or v6).
+
+    `route -n get default` asks the kernel over a PF_ROUTE socket: no
+    packet leaves the host, no name is resolved, so no Local Network
+    prompt. It exits non-zero with "not in table" when there is no
+    route. Any other failure (no `route`, a timeout, an error it does not
+    recognise) is True: a quirk never reads as offline.
+    """
+    for family in ([], ["-inet6"]):
+        try:
+            result = subprocess.run(
+                ["/sbin/route", "-n", "get"] + family + ["default"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=3)
+        except Exception:
+            return True
+        if result.returncode == 0:
+            return True
+        if "not in table" not in (result.stdout or "") + (getattr(result, "stderr", "") or ""):
+            return True
+    return False
+
+
+# Tor's bootstrap REASONs that mean it could not talk to a relay at all
+# (or_conn_end_reason_to_control_string, plus DONE/MISC for a TLS
+# handshake a portal cut). IDENTITY, CLOCK_SKEW, RESOURCELIMIT and
+# PT_MISSING are Tor's or the relay's problem, not the network's.
+TOR_NETWORK_REASONS = frozenset({
+    "DONE", "CONNECTREFUSED", "CONNECTRESET", "TIMEOUT", "NOROUTE",
+    "IOERROR", "MISC",
+})
+
+
+def tor_no_network_reason(answer: str) -> str:
+    """From control-port replies to `GETINFO status/bootstrap-phase` and
+    `GETINFO network-liveness`, why Tor reaches no relay, or "".
+
+    "bootstrap N%: REASON" for a bootstrap below 100 % whose problem is
+    in TOR_NETWORK_REASONS and that Tor recommends warning about (a
+    single failure says RECOMMENDATION=ignore); "network-liveness down"
+    once bootstrapped. Anything else, an empty answer included, is "".
+    """
+    phase = {}
+    liveness = ""
+    for line in (answer or "").splitlines():
+        line = line.strip()
+        if "status/bootstrap-phase=" in line:
+            words = line.split("status/bootstrap-phase=", 1)[1].split()
+            phase["severity"] = words[0] if words else ""
+            for word in words:
+                if "=" in word:
+                    k, _, v = word.partition("=")
+                    phase[k] = v.strip('"')
+        elif "network-liveness=" in line:
+            liveness = line.split("network-liveness=", 1)[1].strip().lower()
+    try:
+        pct = int(phase.get("PROGRESS", ""))
+    except ValueError:
+        return ""
+    if pct < 100:
+        reason = phase.get("REASON", "")
+        if (phase.get("severity") == "WARN" and reason in TOR_NETWORK_REASONS
+                and phase.get("RECOMMENDATION") == "warn"):
+            return f"bootstrap {pct}%: {reason}"
+        return ""
+    if liveness == "down":
+        return "network-liveness down"
+    return ""
+
+
 class HealthChecker:
     """Stateless health check operations.
 
@@ -939,39 +1010,56 @@ class HealthChecker:
 
     @staticmethod
     def check_internet_connectivity() -> bool:
-        """Check if the host has network access without triggering TCC.
+        """Does the host have a route out? Both platforms read the
+        kernel's routing table for a default route (issue #139):
+        linux_has_default_route on Linux, mac_has_default_route on a Mac.
 
-        Linux: the kernel's routing table (linux_has_default_route; the
-        heartbeat's check until issue #407). Mac: scans `ifconfig`
-        output for any non-loopback interface with an IPv4 address. Does
-        NOT call SCNetworkReachability (which fires the macOS Local
-        Network permission prompt on Sequoia+, even though the call makes
-        no traffic). On any failure, assumes connected rather than block
-        the app.
+        An interface with an address is not enough: a Mac on Wi-Fi whose
+        DHCP failed has a 169.254 address and no route, and read as
+        online ("Connecting to Tor…", then "Slow to connect") until
+        #139. Reading the routing table sends no packet and touches no
+        LAN host, so it never fires macOS's Local Network prompt (which
+        SCNetworkReachability does, on Sequoia+). A captive portal has a
+        route; Tor's own report covers it (tor_reports_no_network). On
+        any failure, assumes connected rather than block the app.
         """
         from .platform import OS, detect_os
         if detect_os() == OS.LINUX:
             return linux_has_default_route()
-        try:
-            result = subprocess.run(
-                ["ifconfig"],
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-                timeout=3,
-            )
-        except Exception:
-            return True
+        return mac_has_default_route()
 
-        if result.returncode != 0:
-            return True
+    def tor_reports_no_network(self) -> str:
+        """Why Tor says it reaches no relay, or "" (issue #139).
 
-        current_iface = None
-        for line in result.stdout.splitlines():
-            if line and not line[0].isspace():
-                current_iface = line.split(":", 1)[0]
-            elif current_iface and current_iface != "lo0" and "\tinet " in line:
-                return True
-        return False
+        The host check cannot see a captive portal or a network that
+        drops Tor: there is a route, and nothing past it. Tor can, and
+        says so on its control port: a bootstrap stuck below 100 % with
+        a connection-class problem it RECOMMENDs warning about, or, once
+        bootstrapped, `network-liveness` "down" (a circuit closed with no
+        cell received since it was launched; any cell sets it "up"
+        again). This is about the host's network, never the site's
+        reachability: the dual probe alone measures that. No answer (the
+        stack stopped, tor paused or restarting) is "": a sick container
+        is not an offline host.
+        """
+        answer = self._control_session(
+            "onionpress-tor",
+            ["GETINFO status/bootstrap-phase", "GETINFO network-liveness"])
+        return tor_no_network_reason(answer)
+
+    def network_reachable(self) -> bool:
+        """The daemon's "has internet": a default route, and Tor not
+        reporting that it reaches no relay. Says why when Tor is the
+        reason (once per change)."""
+        if not self.check_internet_connectivity():
+            self._tor_no_network = ""
+            return False
+        why = self.tor_reports_no_network()
+        if why != getattr(self, "_tor_no_network", ""):
+            if why:
+                self._log(f"Tor reaches no relay ({why}) — treating the network as offline")
+            self._tor_no_network = why
+        return not why
 
     def tor_container_unhealthy(self) -> bool:
         """Check Tor container logs for signs of sickness.

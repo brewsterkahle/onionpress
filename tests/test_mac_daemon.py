@@ -220,6 +220,9 @@ class FakeHealth:
     def check_internet_connectivity(self):
         return self.internet
 
+    def network_reachable(self):
+        return self.internet
+
     def check_vm_wedge(self):
         return None
 

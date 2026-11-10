@@ -13,7 +13,7 @@ import unittest
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
 
-from harness import hardening, platforms, proc, safety, scenario  # noqa: E402
+from harness import chaos, hardening, platforms, proc, safety, scenario  # noqa: E402
 from harness.nodes.base import parse_curl_include, wp_port_from_status  # noqa: E402
 from harness.nodes.linux_vm import LinuxVMNode, guest_template  # noqa: E402
 from harness.nodes.mac import MacNode, pick_port_offset  # noqa: E402
@@ -590,6 +590,202 @@ class ScenarioTest(unittest.TestCase):
             if name.startswith("test_") and name.endswith(".py"):
                 with self.subTest(name):
                     self.assertRegex(name, r"^test_t\d_[a-z0-9_]+\.py$")
+
+
+class _ChaosClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def now(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+
+
+class _ChaosNode:
+    """A node whose daemon answers the way *behaviour* says: a function
+    of (fault on, seconds since the last change) to a display state."""
+
+    ADDRESS = "b" * 56 + ".onion"
+
+    def __init__(self, clock, behaviour, *, republish_on_fault=False):
+        self.clock = clock
+        self.behaviour = behaviour
+        self.republish_on_fault = republish_on_fault
+        self.on = False
+        self.changed = 0.0
+        self.calls = []
+        self.log_text = "old line\nreachability: x — requested descriptor republish from tor-watchdog\n"
+        self.log = proc.NodeLog(os.path.join(tempfile.mkdtemp(prefix="op-chaos-"), "node.log"))
+        self.inspect = [{"Name": "/onionpress-tor", "Id": "abcdef0123456789",
+                         "NetworkSettings": {"Networks": {
+                             "onionpress-network": {"Aliases": ["onionpress-tor", "tor", "abcdef012345"]},
+                             "onionpress-wp": {"Aliases": ["tor"]}}}}]
+
+    def _result(self, argv, out="", rc=0):
+        return proc.Result(argv, rc, out, "", 0.1)
+
+    def _flip(self, on):
+        if on == self.on:
+            return
+        self.on, self.changed = on, self.clock.now()
+        if on and self.republish_on_fault:
+            self.log_text += "reachability: 70% failing — requested descriptor republish\n"
+
+    def docker(self, argv, **_):
+        self.calls.append(("docker", argv))
+        if argv[0] == "inspect":
+            return self._result(argv, json.dumps(self.inspect))
+        if argv[:1] == ["pause"] or argv[:2] == ["network", "disconnect"]:
+            self._flip(True)
+        elif argv[:1] == ["unpause"] or argv[:2] == ["network", "connect"]:
+            self._flip(False)
+        return self._result(argv)
+
+    def vm_run(self, argv, **_):
+        self.calls.append(("vm", argv))
+        if argv[1:4] == ["ip", "route", "show"]:
+            return self._result(argv, "default via 192.168.5.2 dev eth0 proto dhcp src 192.168.5.15 metric 100\n")
+        if argv[1:4] == ["ip", "-6", "route"] and argv[4] == "show":
+            return self._result(argv, "")
+        if "del" in argv or argv[1:3] == ["iptables", "-N"]:
+            self._flip(True)
+        elif "replace" in argv or argv[1:3] == ["iptables", "-X"]:
+            self._flip(False)
+        return self._result(argv)
+
+    def exec(self, argv, **_):
+        return self._result(argv, self.log_text)
+
+    def read_file(self, path):
+        assert path == chaos.STATE_FILE
+        state = self.behaviour(self.on, self.clock.now() - self.changed)
+        return json.dumps({"display_state": state, "has_internet": state != "offline",
+                           "probe": {"code": "200"}, "onion_address": self.ADDRESS})
+
+
+def _offline_while_on(on, since):
+    if on:
+        return "starting" if since < 20 else "offline"
+    return "starting" if since < 60 else "available"
+
+
+class ChaosTest(unittest.TestCase):
+    """T1 (b)'s faults and verdicts (e2e/test_t1_b_chaos.py, issues #139
+    and #266 item 3)."""
+
+    def _run(self, name, behaviour, **node_kw):
+        clock = _ChaosClock()
+        node = _ChaosNode(clock, behaviour, **node_kw)
+        outcome = chaos.run_fault(node, chaos.FAULTS[name], node.ADDRESS, clock=clock,
+                                  recover_timeout=300)
+        return node, outcome
+
+    def test_attachments_keep_compose_aliases_only(self):
+        doc = _ChaosNode(_ChaosClock(), _offline_while_on).inspect[0]
+        attached = chaos.attachments(doc)
+        self.assertEqual(attached, [("onionpress-network", ["tor"]), ("onionpress-wp", ["tor"])])
+        self.assertEqual(chaos.connect_argvs("onionpress-tor", attached)[0],
+                         ["network", "connect", "--alias", "tor", "onionpress-network", "onionpress-tor"])
+        self.assertEqual(chaos.disconnect_argvs("onionpress-tor", attached)[1],
+                         ["network", "disconnect", "onionpress-wp", "onionpress-tor"])
+
+    def test_default_routes_are_put_back_as_they_were(self):
+        v4 = chaos.default_routes("default via 192.168.5.2 dev eth0 proto dhcp metric 100\n"
+                                  "192.168.5.0/24 dev eth0 proto kernel scope link\n")
+        v6 = chaos.default_routes("default via fe80::2 dev eth0 proto ra metric 100 expires 1789sec pref medium\n")
+        self.assertEqual(chaos.route_add_argvs(v4, v6), [
+            ["ip", "route", "replace", "default", "via", "192.168.5.2", "dev", "eth0", "proto", "dhcp", "metric", "100"],
+            ["ip", "-6", "route", "replace", "default", "via", "fe80::2", "dev", "eth0", "proto", "ra",
+             "metric", "100", "pref", "medium"]])
+        self.assertEqual(chaos.route_del_argvs(v4, [])[0][:3], ["ip", "route", "del"])
+
+    def test_the_captive_portal_keeps_private_ranges_and_undoes_itself(self):
+        on = chaos.captive_on_argvs()
+        returns = [a[a.index("-d") + 1] for a in on if "RETURN" in a]
+        self.assertIn("192.168.0.0/16", returns)     # Lima's network: ssh keeps working
+        self.assertIn("172.16.0.0/12", returns)      # Docker's bridges
+        self.assertTrue(any("REJECT" in a and "NEW" in a for a in on))
+        jumps = {a[2] for a in on if a[1] == "-I"}
+        self.assertEqual(jumps, {"OUTPUT", "FORWARD"})
+        off = chaos.captive_off_argvs()
+        self.assertEqual({a[2] for a in off if a[1] == "-D"}, jumps)
+        self.assertEqual(off[-1], ["iptables", "-X", chaos.CAPTIVE_CHAIN])
+
+    def test_samples_survive_a_half_written_state(self):
+        self.assertEqual(chaos.sample_of("{", 3, "fault").state, "")
+        self.assertEqual(chaos.sample_of("[]", 3, "fault").state, "")
+        s = chaos.sample_of(json.dumps({"display_state": "offline", "has_internet": False,
+                                        "probe": None}), 3, "fault")
+        self.assertEqual((s.state, s.has_internet, s.probe), ("offline", False, ""))
+
+    def test_no_route_that_reads_offline_and_recovers_passes(self):
+        node, outcome = self._run("no-route", _offline_while_on)
+        self.assertEqual(outcome.findings, [])
+        self.assertIsNotNone(outcome.recovered_after)
+        self.assertEqual(outcome.republish_lines, 0, "the log's earlier lines are not this fault's")
+        self.assertFalse(node.on, "the fault is reverted")
+        self.assertIn(["sudo", "ip", "route", "replace", "default", "via", "192.168.5.2", "dev", "eth0",
+                       "proto", "dhcp", "src", "192.168.5.15", "metric", "100"],
+                      [c[1] for c in node.calls if c[0] == "vm"])
+
+    def test_the_bug_139_was_is_named(self):
+        """Route there, nothing past it: "starting" then "stuck" is what
+        #139 reported."""
+        _, outcome = self._run("captive-portal",
+                               lambda on, since: ("stuck" if since > 300 else "starting") if on
+                               else "available")
+        joined = "\n".join(outcome.findings)
+        self.assertIn("never read 'offline'", joined)
+        self.assertIn("'stuck'", joined)
+
+    def test_a_paused_tor_must_not_read_offline(self):
+        _, outcome = self._run("tor-paused", _offline_while_on)
+        self.assertTrue(any("sick stack" in f for f in outcome.findings), outcome.findings)
+        _, outcome = self._run("tor-paused", lambda on, since: "starting" if on else "available")
+        self.assertEqual(outcome.findings, [])
+
+    def test_a_flap_reconnects_every_time_and_counts_new_republish_lines(self):
+        node, outcome = self._run("network-flap", lambda on, since: "starting" if on else "available",
+                                  republish_on_fault=True)
+        ops = [c[1][:2] for c in node.calls if c[0] == "docker" and c[1][0] == "network"]
+        self.assertEqual(ops.count(["network", "disconnect"]), 2 * 3)
+        self.assertEqual(ops.count(["network", "connect"]), 2 * 3)
+        self.assertEqual(outcome.republish_lines, 3)
+        self.assertTrue(any("republish line" in f for f in outcome.findings))
+
+    def test_a_node_that_never_comes_back_is_named(self):
+        node, outcome = self._run("tor-paused", lambda on, since: "starting")
+        self.assertIsNone(outcome.recovered_after)
+        self.assertTrue(any("not 'available' again" in f for f in outcome.findings))
+        self.assertFalse(node.on)
+
+    def test_a_revert_runs_even_when_sampling_fails(self):
+        clock = _ChaosClock()
+        node = _ChaosNode(clock, _offline_while_on)
+
+        def boom(path):
+            raise RuntimeError("ssh went away")
+        node.read_file = boom
+        with self.assertRaisesRegex(RuntimeError, "ssh went away"):
+            chaos.run_fault(node, chaos.FAULTS["captive-portal"], node.ADDRESS, clock=clock)
+        self.assertFalse(node.on)
+        self.assertIn(["sudo", "iptables", "-X", chaos.CAPTIVE_CHAIN], [c[1] for c in node.calls])
+
+    def test_host_faults_are_linux_only(self):
+        import ast
+        path = os.path.join(PROJECT_DIR, "e2e", "test_t1_b_chaos.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        marks = {}
+        for fn in tree.body:
+            if isinstance(fn, ast.FunctionDef):
+                marks[fn.name] = [ast.unparse(d) for d in fn.decorator_list]
+        for name, fault in chaos.FAULTS.items():
+            test = "test_" + name.replace("-", "_")
+            self.assertIn(test, marks, f"{name} has no test in T1 (b)")
+            self.assertEqual("pytest.mark.platform('linux')" in marks[test], fault.host, test)
 
 
 if __name__ == "__main__":

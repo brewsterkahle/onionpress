@@ -241,8 +241,9 @@ class TestCheckInternalConnectivity(unittest.TestCase):
 
 
 class TestCheckInternetConnectivity(unittest.TestCase):
-    """Interface-scan based check — no TCC-gated API calls (the Mac's;
-    Linux reads the routing table: tests/test_linux_daemon.py)."""
+    """The Mac reads its routing table (`route -n get default`), no
+    TCC-gated API and no packet (issue #139; Linux reads /proc:
+    tests/test_linux_daemon.py)."""
 
     def setUp(self):
         from onionpress.platform import OS
@@ -250,41 +251,121 @@ class TestCheckInternetConnectivity(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def _run(self, stdout, returncode=0):
-        return mock.Mock(returncode=returncode, stdout=stdout)
+    def _run(self, stdout="", returncode=0, stderr=""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
 
-    def test_real_en0_has_internet(self):
-        ifconfig = (
-            "lo0: flags=8049<UP,LOOPBACK> mtu 16384\n"
-            "\tinet 127.0.0.1 netmask 0xff000000\n"
-            "en0: flags=8863<UP,BROADCAST> mtu 1500\n"
-            "\tinet 192.168.1.42 netmask 0xffffff00\n"
-        )
+    NO_ROUTE = "route: writing to routing socket: not in table"
+
+    def test_a_default_route_is_online(self):
+        out = "   route to: default\ndestination: default\n    gateway: 192.168.1.1\n  interface: en0\n"
         with mock.patch("onionpress.health.subprocess.run",
-                        return_value=self._run(ifconfig)):
+                        return_value=self._run(out)) as run:
+            self.assertTrue(HealthChecker.check_internet_connectivity())
+        argv = run.call_args[0][0]
+        self.assertEqual(argv, ["/sbin/route", "-n", "get", "default"])
+
+    def test_an_address_without_a_route_is_offline(self):
+        """Wi-Fi up, DHCP failed (169.254 self-assigned), no route: read
+        online by the old ifconfig scan."""
+        with mock.patch("onionpress.health.subprocess.run",
+                        return_value=self._run(returncode=1, stderr=self.NO_ROUTE)) as run:
+            self.assertFalse(HealthChecker.check_internet_connectivity())
+        self.assertEqual([c[0][0][3:-1] for c in run.call_args_list], [[], ["-inet6"]])
+
+    def test_an_ipv6_only_route_is_online(self):
+        answers = [self._run(returncode=1, stderr=self.NO_ROUTE), self._run("gateway: fe80::1%en0\n")]
+        with mock.patch("onionpress.health.subprocess.run", side_effect=answers):
             self.assertTrue(HealthChecker.check_internet_connectivity())
 
-    def test_only_loopback_means_offline(self):
-        ifconfig = (
-            "lo0: flags=8049<UP,LOOPBACK> mtu 16384\n"
-            "\tinet 127.0.0.1 netmask 0xff000000\n"
-            "en0: flags=8863<UP,BROADCAST> mtu 1500\n"
-            "\tether aa:bb:cc:dd:ee:ff\n"
-        )
+    def test_an_unrecognised_failure_assumes_connected(self):
+        """Don't block the app if route can't answer for some reason."""
         with mock.patch("onionpress.health.subprocess.run",
-                        return_value=self._run(ifconfig)):
-            self.assertFalse(HealthChecker.check_internet_connectivity())
-
-    def test_ifconfig_failure_assumes_connected(self):
-        """Don't block the app if ifconfig can't run for some reason."""
-        with mock.patch("onionpress.health.subprocess.run",
-                        return_value=self._run("", returncode=1)):
+                        return_value=self._run(returncode=1, stderr="route: bad thing")):
             self.assertTrue(HealthChecker.check_internet_connectivity())
 
     def test_subprocess_exception_assumes_connected(self):
         with mock.patch("onionpress.health.subprocess.run",
                         side_effect=OSError("boom")):
             self.assertTrue(HealthChecker.check_internet_connectivity())
+
+    def test_no_interface_scan_and_no_reachability_api(self):
+        """The check stays off every TCC-gated or LAN-touching path."""
+        import inspect
+        from onionpress import health
+        src = inspect.getsource(health.mac_has_default_route) + \
+            inspect.getsource(HealthChecker.check_internet_connectivity)
+        for banned in ("ifconfig", "SCNetworkReachability", "socket.", "ping"):
+            self.assertNotIn(banned, src.replace("SCNetworkReachability does", ""))
+
+
+class TestTorReportsNoNetwork(unittest.TestCase):
+    """A captive portal has a route; Tor's control port says it reaches
+    no relay (issue #139). The probe is not asked."""
+
+    def _hc(self, answer, ok=True):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok(answer) if ok else _fail()
+        log = mock.Mock()
+        return HealthChecker(docker, log_func=log, hub_reference=REGISTERED), docker, log
+
+    STUCK = ("250-status/bootstrap-phase=WARN BOOTSTRAP PROGRESS=5 TAG=conn "
+             'SUMMARY="Connecting to a relay" WARNING="Connection timed out" '
+             "REASON=TIMEOUT COUNT=4 RECOMMENDATION=warn HOSTADDR=1.2.3.4:443\r\n"
+             "250-network-liveness=down\r\n250 OK\r\n")
+
+    def test_a_bootstrap_stuck_on_connections_is_no_network(self):
+        hc, docker, _ = self._hc(self.STUCK)
+        self.assertEqual(hc.tor_reports_no_network(), "bootstrap 5%: TIMEOUT")
+        script = docker.exec.call_args[0][1][2]
+        self.assertIn("GETINFO status/bootstrap-phase", script)
+        self.assertIn("GETINFO network-liveness", script)
+        self.assertNotIn("curl", script)
+
+    def test_a_single_failure_tor_ignores_is_not(self):
+        hc, _, _ = self._hc(self.STUCK.replace("RECOMMENDATION=warn", "RECOMMENDATION=ignore"))
+        self.assertEqual(hc.tor_reports_no_network(), "")
+
+    def test_a_relay_or_clock_problem_is_not_the_network(self):
+        for reason in ("IDENTITY", "CLOCK_SKEW", "RESOURCELIMIT", "PT_MISSING"):
+            hc, _, _ = self._hc(self.STUCK.replace("REASON=TIMEOUT", f"REASON={reason}"))
+            self.assertEqual(hc.tor_reports_no_network(), "", reason)
+
+    def test_a_bootstrap_making_progress_is_not(self):
+        hc, _, _ = self._hc("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=45 "
+                            "TAG=requesting_descriptors\r\n250-network-liveness=down\r\n250 OK\r\n")
+        self.assertEqual(hc.tor_reports_no_network(), "")
+
+    def test_liveness_down_after_bootstrap_is_no_network(self):
+        hc, _, _ = self._hc("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done "
+                            'SUMMARY="Done"\r\n250-network-liveness=down\r\n250 OK\r\n')
+        self.assertEqual(hc.tor_reports_no_network(), "network-liveness down")
+
+    def test_liveness_up_after_bootstrap_is_not(self):
+        hc, _, _ = self._hc("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done\r\n"
+                            "250-network-liveness=up\r\n250 OK\r\n")
+        self.assertEqual(hc.tor_reports_no_network(), "")
+
+    def test_no_answer_is_never_offline(self):
+        """tor paused, restarting or stopped: a sick stack, not an
+        offline host."""
+        for hc in (self._hc("", ok=False)[0], self._hc("")[0],
+                   self._hc("515 Authentication failed\r\n")[0]):
+            self.assertEqual(hc.tor_reports_no_network(), "")
+
+    def test_network_reachable_combines_both_and_logs_a_change_once(self):
+        hc, docker, log = self._hc(self.STUCK)
+        with mock.patch.object(HealthChecker, "check_internet_connectivity", return_value=True):
+            self.assertFalse(hc.network_reachable())
+            self.assertFalse(hc.network_reachable())
+        self.assertEqual(sum("Tor reaches no relay" in c[0][0] for c in log.call_args_list), 1)
+        with mock.patch.object(HealthChecker, "check_internet_connectivity", return_value=False):
+            docker.exec.reset_mock()
+            self.assertFalse(hc.network_reachable())
+            docker.exec.assert_not_called()   # no route: Tor is not asked
+        docker.exec.return_value = _ok("250-status/bootstrap-phase=NOTICE BOOTSTRAP "
+                                       "PROGRESS=100 TAG=done\r\n250-network-liveness=up\r\n")
+        with mock.patch.object(HealthChecker, "check_internet_connectivity", return_value=True):
+            self.assertTrue(hc.network_reachable())
 
 
 def _resp(code, body="onionpress-health ok", takeover=False, timings="0.900 1.100 1.200"):
