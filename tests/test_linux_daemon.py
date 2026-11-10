@@ -127,16 +127,30 @@ class TestPlatformSeams(_LinuxDaemonCase):
         self.addCleanup(shutil.rmtree, d, True)
         route, route6 = os.path.join(d, "route"), os.path.join(d, "ipv6_route")
         with open(route, "w") as f:
-            f.write("Iface\tDestination\tGateway\nwlan0\t00000000\t0100A8C0\n")
+            f.write("Iface\tDestination\tGateway\tFlags\nwlan0\t00000000\t0100A8C0\t0003\n")
         self.assertTrue(health.linux_has_default_route(route, route6))
         with open(route, "w") as f:
-            f.write("Iface\tDestination\tGateway\nwlan0\t0000A8C0\t00000000\n")
+            f.write("Iface\tDestination\tGateway\tFlags\nwlan0\t0000A8C0\t00000000\t0001\n")
         with open(route6, "w") as f:
-            f.write("00000000000000000000000000000000 00 ... eth0\n")
+            f.write("0" * 32 + " 00 " + "0" * 32 + " 00 fe800000000000000000000000000002 "
+                    "00000400 00000001 00000000 00000003 eth0\n")
         self.assertTrue(health.linux_has_default_route(route, route6))
         with open(route6, "w") as f:
-            f.write("fe800000000000000000000000000000 40 ... eth0\n")
+            f.write("fe800000000000000000000000000000 40 " + "0" * 32 + " 00 " + "0" * 32
+                    + " 00000100 00000001 00000000 00000001 eth0\n")
         self.assertFalse(health.linux_has_default_route(route, route6))
+        # The kernel's own "no route" entry is listed as a default in the
+        # IPv6 table (lo, RTF_REJECT); it is not a route (#139, T1 (b)).
+        z = "0" * 32
+        with open(route6, "w") as f:
+            f.write(f"{z} 00 {z} 00 {z} ffffffff 00000001 00000000 00200200 lo\n")
+        self.assertFalse(health.linux_has_default_route(route, route6))
+        with open(route, "w") as f:
+            f.write("Iface\tDestination\tGateway\tFlags\nlo\t00000000\t00000000\t0201\n")
+        self.assertFalse(health.linux_has_default_route(route, route6))
+        with open(route6, "w") as f:
+            f.write(f"{z} 00 {z} 00 fe800000000000000000000000000002 000000c8 00000001 00000000 00450003 eth0\n")
+        self.assertTrue(health.linux_has_default_route(route, route6))
         # An unreadable table never reads as offline.
         self.assertTrue(health.linux_has_default_route(os.path.join(d, "none"), route6))
         with mock.patch("onionpress.platform.detect_os", return_value=OS.LINUX), \

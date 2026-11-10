@@ -220,6 +220,9 @@ class FakeHealth:
     def check_internet_connectivity(self):
         return self.internet
 
+    def network_reachable(self):
+        return self.internet
+
     def check_vm_wedge(self):
         return None
 
@@ -430,6 +433,19 @@ class TestStatusPass(_DaemonCase):
         self.assertIsNotNone(s["yellow_since"])
         self.assertEqual(s["probe"]["code"], "000:rc=28")
         self.assertIsNotNone(self.d._recovery.trigger.failing_since)
+
+    def test_time_offline_does_not_count_towards_stuck(self):
+        """#139: after a long outage the daemon read "stuck" (Slow to
+        connect) as soon as the network came back."""
+        self.tick()
+        self.health.internet = False
+        self.tick()
+        self.assertEqual(self.state()["display_state"], "offline")
+        self.d._yellow_since -= 3600
+        self.health.internet = True
+        self.health.external = (False, "000:rc=28")
+        self.tick()
+        self.assertEqual(self.state()["display_state"], "starting")
 
     def test_the_daemon_runs_the_shared_recovery_step(self):
         """Issue #480: one #266 driver. The daemon's trigger is a

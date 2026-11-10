@@ -404,7 +404,9 @@ class Daemon(PortAttributes):
     _read_config_value = read_config_value
 
     def check_internet_connectivity(self):
-        return self._health_checker.check_internet_connectivity()
+        # A default route, and Tor not saying it reaches no relay (a
+        # captive portal, #139): HealthChecker.network_reachable.
+        return self._health_checker.network_reachable()
 
     def run_launcher(self, args, timeout=60, env=None):
         """`<launcher> <args>`: the returncode and stdout (stripped), or
@@ -1003,6 +1005,12 @@ class Daemon(PortAttributes):
                     self.log("Internet connectivity lost")
                 elif self._has_internet and not had_internet:
                     self.log("Internet connectivity restored")
+                    # The time offline is not time spent failing to
+                    # connect: the stuck clock ("Slow to connect")
+                    # starts now (#139, T1 (b) no-route read "stuck"
+                    # right after the route came back).
+                    if not self.is_ready:
+                        self._yellow_since = time.time()
                     self.publish_state()
 
                 if not self._has_internet:
