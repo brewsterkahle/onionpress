@@ -614,6 +614,7 @@ class _ChaosNode:
         self.behaviour = behaviour
         self.republish_on_fault = republish_on_fault
         self.on = False
+        self.route_returns = 0       # no-route: times the route comes back while on
         self.changed = 0.0
         self.calls = []
         self.log_text = "old line\nreachability: x — requested descriptor republish from tor-watchdog\n"
@@ -646,6 +647,9 @@ class _ChaosNode:
     def vm_run(self, argv, **_):
         self.calls.append(("vm", argv))
         if argv[1:4] == ["ip", "route", "show"]:
+            if self.on and not self.route_returns:
+                return self._result(argv, "")
+            self.route_returns = max(0, self.route_returns - 1) if self.on else self.route_returns
             return self._result(argv, "default via 192.168.5.2 dev eth0 proto dhcp src 192.168.5.15 metric 100\n")
         if argv[1:4] == ["ip", "-6", "route"] and argv[4] == "show":
             return self._result(argv, "")
@@ -694,7 +698,8 @@ class ChaosTest(unittest.TestCase):
     def test_default_routes_are_put_back_as_they_were(self):
         v4 = chaos.default_routes("default via 192.168.5.2 dev eth0 proto dhcp metric 100\n"
                                   "192.168.5.0/24 dev eth0 proto kernel scope link\n")
-        v6 = chaos.default_routes("default via fe80::2 dev eth0 proto ra metric 100 expires 1789sec pref medium\n")
+        v6 = chaos.default_routes("default nhid 636719831 via fe80::2 dev eth0 proto ra metric 100 "
+                                  "expires 1789sec pref medium\n")
         self.assertEqual(chaos.route_add_argvs(v4, v6), [
             ["ip", "route", "replace", "default", "via", "192.168.5.2", "dev", "eth0", "proto", "dhcp", "metric", "100"],
             ["ip", "-6", "route", "replace", "default", "via", "fe80::2", "dev", "eth0", "proto", "ra",
@@ -706,7 +711,9 @@ class ChaosTest(unittest.TestCase):
         returns = [a[a.index("-d") + 1] for a in on if "RETURN" in a]
         self.assertIn("192.168.0.0/16", returns)     # Lima's network: ssh keeps working
         self.assertIn("172.16.0.0/12", returns)      # Docker's bridges
-        self.assertTrue(any("REJECT" in a and "NEW" in a for a in on))
+        rejects = [a for a in on if "REJECT" in a]
+        self.assertEqual(len(rejects), 1)
+        self.assertNotIn("--ctstate", rejects[0], "established guard connections must go too")
         jumps = {a[2] for a in on if a[1] == "-I"}
         self.assertEqual(jumps, {"OUTPUT", "FORWARD"})
         off = chaos.captive_off_argvs()
@@ -729,6 +736,17 @@ class ChaosTest(unittest.TestCase):
         self.assertIn(["sudo", "ip", "route", "replace", "default", "via", "192.168.5.2", "dev", "eth0",
                        "proto", "dhcp", "src", "192.168.5.15", "metric", "100"],
                       [c[1] for c in node.calls if c[0] == "vm"])
+
+    def test_a_default_route_that_comes_back_is_taken_away_again(self):
+        """A DHCP renewal or router advertisement in the hold."""
+        clock = _ChaosClock()
+        node = _ChaosNode(clock, _offline_while_on)
+        node.route_returns = 2
+        outcome = chaos.run_fault(node, chaos.FAULTS["no-route"], node.ADDRESS, clock=clock)
+        self.assertEqual(outcome.routes_came_back, 2)
+        dels = [c[1] for c in node.calls if c[0] == "vm" and "del" in c[1]]
+        self.assertEqual(len(dels), 3)
+        self.assertIn("re-deleted 2", outcome.summary())
 
     def test_the_bug_139_was_is_named(self):
         """Route there, nothing past it: "starting" then "stuck" is what

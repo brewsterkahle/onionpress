@@ -358,7 +358,7 @@ visitor views)
   `docker pause` of onionpress-tor (reads "starting", never "offline"),
   three `docker network disconnect`/`connect` flaps, and on a Linux VM the
   default routes deleted ("interface up, no route") and a captive portal
-  (iptables refusing new TCP past private ranges): both read "offline",
+  (iptables refusing TCP past private ranges): both read "offline",
   never "stuck". No fault may end in a republish; each ends "available"
   at the same address.
 

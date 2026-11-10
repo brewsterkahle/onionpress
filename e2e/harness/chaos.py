@@ -36,9 +36,12 @@ REPUBLISH_RE = re.compile(r"reachability: .*(republish)")
 # HealthChecker.network_reachable's line when Tor reaches no relay.
 TOR_NO_RELAY_RE = re.compile(r"Tor reaches no relay \(([^)]*)\)")
 
-# The chain the captive portal fault adds: new TCP to anything but a
-# private or loopback address is refused, so the VM keeps its route, its
-# DNS answers and Lima's ssh, and nothing past the "portal" answers.
+# The chain the captive portal fault adds: TCP to anything but a private
+# or loopback address is refused, established flows included (a portal is
+# a new network: Tor's guard connections from before do not survive it;
+# refusing only NEW left them up and the site reachable, first live run),
+# so the VM keeps its route, its DNS answers and Lima's ssh, and nothing
+# past the "portal" answers.
 CAPTIVE_CHAIN = "OP-E2E-CAPTIVE"
 PRIVATE_NETS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
                 "169.254.0.0/16")
@@ -67,7 +70,7 @@ FAULTS = {
         detail="the VM's default routes deleted: interface up, no route"),
     "captive-portal": Fault(
         "captive-portal", hold=420, host=True, expect_offline=True,
-        detail="route kept, every new TCP connection past private ranges refused"),
+        detail="route kept, every TCP packet past private ranges refused"),
 }
 
 
@@ -111,7 +114,9 @@ def connect_argvs(container, attached):
 def default_routes(text):
     """The `ip route add` arguments that put back each line of `ip route
     show default` (v4 or v6). `expires` (a router advertisement's
-    lifetime) is dropped: it is the kernel's to count, not ours to set."""
+    lifetime) is dropped: it is the kernel's to count, not ours to set;
+    so is `nhid` (the kernel's nexthop object, which `ip` refuses beside
+    `via`: seen on a Debian 13 guest)."""
     routes = []
     for line in text.splitlines():
         words = line.split()
@@ -122,7 +127,7 @@ def default_routes(text):
             if skip:
                 skip = False
                 continue
-            if word == "expires":
+            if word in ("expires", "nhid"):
                 skip = True
                 continue
             kept.append(word)
@@ -149,8 +154,8 @@ def captive_on_argvs():
     argvs = [["iptables", "-N", CAPTIVE_CHAIN]]
     for net in PRIVATE_NETS:
         argvs.append(["iptables", "-A", CAPTIVE_CHAIN, "-d", net, "-j", "RETURN"])
-    argvs.append(["iptables", "-A", CAPTIVE_CHAIN, "-p", "tcp", "-m", "conntrack",
-                  "--ctstate", "NEW", "-j", "REJECT", "--reject-with", "tcp-reset"])
+    argvs.append(["iptables", "-A", CAPTIVE_CHAIN, "-p", "tcp",
+                  "-j", "REJECT", "--reject-with", "tcp-reset"])
     for parent in ("OUTPUT", "FORWARD"):
         argvs.append(["iptables", "-I", parent, "1", "-j", CAPTIVE_CHAIN])
     return argvs
@@ -200,6 +205,7 @@ class Outcome:
     republish_lines: int = 0
     tor_no_relay: list = field(default_factory=list)
     recovered_after: object = None   # seconds after revert, or None
+    routes_came_back: int = 0        # no-route: routes taken away again
     findings: list = field(default_factory=list)
 
     def states(self, phase):
@@ -213,7 +219,8 @@ class Outcome:
         compact = {p: _runs(v) for p, v in seen.items()}
         return (f"{self.fault}: fault {compact.get('fault', [])}, recovery "
                 f"{compact.get('recovery', [])}, recovered after {self.recovered_after}s, "
-                f"republish lines {self.republish_lines}, tor no-relay {self.tor_no_relay or '-'}")
+                f"republish lines {self.republish_lines}, tor no-relay {self.tor_no_relay or '-'}"
+                + (f", default routes re-deleted {self.routes_came_back}" if self.routes_came_back else ""))
 
 
 def _runs(states):
@@ -292,12 +299,28 @@ class FaultDriver:
             if not self._attached:
                 raise RuntimeError("onionpress-tor is on no network")
         elif name == "no-route":
-            v4 = default_routes(self._sudo(["ip", "route", "show", "default"], "ip route").out)
-            v6 = default_routes(self._sudo(["ip", "-6", "route", "show", "default"], "ip -6 route",
-                                           check=False).out)
+            v4, v6 = self._current_routes()
             if not v4 and not v6:
                 raise RuntimeError("the VM has no default route to take away")
             self._routes = (v4, v6)
+
+    def _current_routes(self):
+        v4 = default_routes(self._sudo(["ip", "route", "show", "default"], "ip route").out)
+        v6 = default_routes(self._sudo(["ip", "-6", "route", "show", "default"], "ip -6 route",
+                                       check=False).out)
+        return v4, v6
+
+    def hold(self):
+        """Called at every sample while the fault is on: a default route
+        that came back (a DHCP renewal, a router advertisement: the
+        VM's network is still up) is taken away again. How many times
+        goes into the Outcome."""
+        if self.fault.name != "no-route":
+            return 0
+        v4, v6 = self._current_routes()
+        for argv in route_del_argvs(v4, v6):
+            self._sudo(argv, " ".join(argv))
+        return len(v4) + len(v6)
 
     def on(self):
         name = self.fault.name
@@ -356,6 +379,7 @@ def run_fault(node, fault, address, *, every=10, recover_timeout=900, clock=Cloc
             node.log.write(f"chaos: {fault.name} on ({i + 1}/{fault.flaps})")
             on_until = clock.now() + flap_len
             while clock.now() < on_until:
+                outcome.routes_came_back += driver.hold()
                 take("fault")
                 clock.sleep(every)
             if i + 1 < fault.flaps:
