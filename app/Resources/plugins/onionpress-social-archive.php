@@ -73,6 +73,215 @@ function onionpress_social_run_now( $hook ) {
     spawn_cron();
 }
 
+// ──────────────────────── fetching over Tor (#409) ────────────────────────
+//
+// One transport for every importer. wp_remote_get() offers no SOCKS
+// option, and a foreign name must never be looked up or reached from the
+// container network, so these use curl through onionheaven's SOCKS port
+// with the name resolved at the far end (socks5h). Redirects stay on
+// http(s) and on the same proxy.
+const ONIONPRESS_SOCIAL_SOCKS_PROXY  = 'onionheaven:9050';
+const ONIONPRESS_SOCIAL_HTTP_TIMEOUT = 45;
+const ONIONPRESS_SOCIAL_USER_AGENT   = 'OnionPress/SocialArchive (+https://onionpress.org)';
+
+/**
+ * GET a JSON API over Tor. Returns ['code' => int, 'body' => string,
+ * 'json' => array|null, 'headers' => lower-cased name => value] (the blog
+ * importer reads X-WP-Total / X-WP-TotalPages), or WP_Error on transport
+ * failure.
+ */
+function onionpress_social_tor_get( $url, $max_redirects = 3 ) {
+    if ( ! function_exists( 'curl_init' ) ) {
+        return new WP_Error( 'no_curl', 'curl extension required for social import' );
+    }
+    $headers = array();
+    $ch = curl_init( $url );
+    curl_setopt_array( $ch, array(
+        CURLOPT_RETURNTRANSFER  => true,
+        CURLOPT_FOLLOWLOCATION  => true,
+        CURLOPT_MAXREDIRS       => $max_redirects,
+        CURLOPT_PROTOCOLS       => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_PROXY           => ONIONPRESS_SOCIAL_SOCKS_PROXY,
+        CURLOPT_PROXYTYPE       => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_TIMEOUT         => ONIONPRESS_SOCIAL_HTTP_TIMEOUT,
+        CURLOPT_CONNECTTIMEOUT  => 30,
+        CURLOPT_USERAGENT       => ONIONPRESS_SOCIAL_USER_AGENT,
+        CURLOPT_HTTPHEADER      => array( 'Accept: application/json' ),
+        CURLOPT_HEADERFUNCTION  => function ( $ch, $line ) use ( &$headers ) {
+            $parts = explode( ':', $line, 2 );
+            if ( count( $parts ) === 2 ) {
+                $headers[ strtolower( trim( $parts[0] ) ) ] = trim( $parts[1] );
+            }
+            return strlen( $line );
+        },
+    ) );
+    $body = curl_exec( $ch );
+    if ( $body === false ) {
+        $err = curl_error( $ch );
+        curl_close( $ch );
+        return new WP_Error( 'curl', $err ?: 'curl failure' );
+    }
+    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    curl_close( $ch );
+    $json = json_decode( $body, true );
+    return array(
+        'code'    => $code,
+        'body'    => $body,
+        'json'    => is_array( $json ) ? $json : null,
+        'headers' => $headers,
+    );
+}
+
+/**
+ * Download a file over Tor to $dest_path. Returns the path, or WP_Error
+ * (with nothing left at the path) on any failure or non-2xx answer.
+ */
+function onionpress_social_fetch_file( $url, $dest_path ) {
+    if ( ! function_exists( 'curl_init' ) ) {
+        return new WP_Error( 'no_curl', 'curl extension required for social import' );
+    }
+    $fh = @fopen( $dest_path, 'wb' );
+    if ( ! $fh ) return new WP_Error( 'io', 'open temp failed' );
+    $ch = curl_init( $url );
+    curl_setopt_array( $ch, array(
+        CURLOPT_FILE            => $fh,
+        CURLOPT_FOLLOWLOCATION  => true,
+        CURLOPT_MAXREDIRS       => 5,
+        CURLOPT_PROTOCOLS       => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_PROXY           => ONIONPRESS_SOCIAL_SOCKS_PROXY,
+        CURLOPT_PROXYTYPE       => CURLPROXY_SOCKS5_HOSTNAME,
+        CURLOPT_TIMEOUT         => 120,
+        CURLOPT_CONNECTTIMEOUT  => 30,
+        CURLOPT_USERAGENT       => ONIONPRESS_SOCIAL_USER_AGENT,
+    ) );
+    $ok   = curl_exec( $ch );
+    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $err  = curl_error( $ch );
+    curl_close( $ch );
+    fclose( $fh );
+    if ( ! $ok || $code < 200 || $code >= 300 ) {
+        @unlink( $dest_path );
+        return new WP_Error( 'curl', 'HTTP ' . $code . ' ' . $err );
+    }
+    return $dest_path;
+}
+
+/**
+ * The imported post whose `_source_id` postmeta is $source_id, or 0.
+ */
+function onionpress_social_find_post_by_source_id( $source_id ) {
+    $posts = get_posts( array(
+        'post_type'      => 'post',
+        'meta_key'       => '_source_id',
+        'meta_value'     => $source_id,
+        'post_status'    => 'any',
+        'posts_per_page' => 1,
+        'fields'         => 'ids',
+    ) );
+    return ! empty( $posts ) ? (int) $posts[0] : 0;
+}
+
+// ──────────────────────── media into uploads ────────────────────────
+
+/**
+ * Put $src_path into this month's uploads as $name (made unique) and
+ * register it as an attachment of $post_id. $move renames a temp file
+ * in (falling back to a copy); otherwise the source is copied and left.
+ * Returns the attachment ID, or 0 with nothing left in uploads.
+ *
+ * Nothing here runs wp_handle_sideload()'s checks, so the caller must
+ * already have held $name to a media type wp_check_filetype() accepts
+ * (never .php and the like): onionpress_social_sideload_url() does, and
+ * the Twitter importer checks each archive member's name.
+ */
+function onionpress_social_store_upload( $src_path, $name, $post_id, $move ) {
+    require_once ABSPATH . 'wp-admin/includes/image.php';
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    require_once ABSPATH . 'wp-admin/includes/media.php';
+
+    $upload    = wp_upload_dir();
+    $dest_name = wp_unique_filename( $upload['path'], $name );
+    $dest_path = $upload['path'] . '/' . $dest_name;
+    $stored    = $move
+        ? ( @rename( $src_path, $dest_path ) || @copy( $src_path, $dest_path ) )
+        : @copy( $src_path, $dest_path );
+    if ( $move ) {
+        @unlink( $src_path );
+    }
+    if ( ! $stored ) {
+        return 0;
+    }
+
+    $filetype  = wp_check_filetype( $dest_name );
+    $attach_id = wp_insert_attachment( array(
+        'post_mime_type' => $filetype['type'] ?? 'application/octet-stream',
+        'post_title'     => sanitize_title( pathinfo( $dest_name, PATHINFO_FILENAME ) ),
+        'post_content'   => '',
+        'post_status'    => 'inherit',
+    ), $dest_path, $post_id );
+    if ( is_wp_error( $attach_id ) || ! $attach_id ) {
+        @unlink( $dest_path );
+        return 0;
+    }
+
+    $meta = wp_generate_attachment_metadata( $attach_id, $dest_path );
+    wp_update_attachment_metadata( $attach_id, $meta );
+    return (int) $attach_id;
+}
+
+/**
+ * Download $url over Tor into uploads as `<stem>-<random>.<ext>`, an
+ * attachment of $post_id. Returns the attachment ID or 0.
+ *
+ * The foreign server picks the URL, and the file goes into uploads
+ * without wp_handle_sideload()'s checks: the URL's extension is kept
+ * only if it is one WordPress accepts for media, else $fallback_ext.
+ */
+function onionpress_social_sideload_url( $url, $post_id, $stem, $fallback_ext ) {
+    $ext = strtolower( pathinfo( parse_url( $url, PHP_URL_PATH ) ?? '', PATHINFO_EXTENSION ) );
+    if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) || ! wp_check_filetype( 'x.' . $ext )['ext'] ) {
+        $ext = $fallback_ext;
+    }
+    $basename = $stem . '-' . wp_generate_password( 6, false ) . '.' . $ext;
+    $tmp_path = sys_get_temp_dir() . '/' . $basename;
+    $fetched  = onionpress_social_fetch_file( $url, $tmp_path );
+    if ( is_wp_error( $fetched ) ) return 0;
+    return onionpress_social_store_upload( $tmp_path, $basename, $post_id, true );
+}
+
+/**
+ * The markup that shows an attachment in an imported post's body: an
+ * <img> (every URL in it made host-relative, so it renders on the onion,
+ * localhost and a clearnet host alike), a <video> (looping and muted for
+ * a $gif, Mastodon's gifv) or an <audio>; '' for anything else.
+ */
+function onionpress_social_media_tag( $attach_id, $gif = false ) {
+    $mime = (string) get_post_mime_type( $attach_id );
+    if ( strpos( $mime, 'image/' ) === 0 ) {
+        $img = wp_get_attachment_image(
+            $attach_id, 'large', false,
+            array( 'loading' => 'lazy', 'style' => 'max-width:100%;height:auto;' )
+        );
+        return preg_replace( '~https?://[^/\s"\']+/~', '/', $img );
+    }
+    $url = wp_make_link_relative( wp_get_attachment_url( $attach_id ) );
+    if ( strpos( $mime, 'video/' ) === 0 || $gif ) {
+        return sprintf(
+            '<video controls preload="metadata" style="max-width:100%%;"%s><source src="%s" type="%s"></video>',
+            $gif ? ' autoplay loop muted playsinline' : '', esc_url( $url ), esc_attr( $mime )
+        );
+    }
+    if ( strpos( $mime, 'audio/' ) === 0 ) {
+        return sprintf(
+            '<audio controls preload="metadata" style="max-width:100%%;"><source src="%s" type="%s"></audio>',
+            esc_url( $url ), esc_attr( $mime )
+        );
+    }
+    return '';
+}
+
 // ──────────────────────── uploaded archives (#473) ────────────────────────
 //
 // The Twitter and Reddit importers take a ZIP from any site administrator

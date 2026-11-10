@@ -283,7 +283,7 @@ class TestWaybackIsTheOwners(unittest.TestCase):
         self.assertIn("wp_die( 'Forbidden', 403 );", body[gate:gate + 80])
         for change in ("check_admin_referer(", "onionpress_wayback_net_delete(",
                        "onionpress_wayback_schedule_now(", "delete_transient(",
-                       "wp_remote_post("):
+                       "spawn_cron("):
             with self.subTest(change=change):
                 self.assertLess(gate, body.index(change))
 

@@ -421,21 +421,6 @@ function onionpress_twitter_parse_tweets_file( $file ) {
 }
 
 /**
- * Look up a Twitter post by `_source_id`. Returns post ID or 0.
- */
-function onionpress_twitter_find_post_by_source_id( $source_id ) {
-    $posts = get_posts( array(
-        'post_type'      => 'post',
-        'meta_key'       => '_source_id',
-        'meta_value'     => $source_id,
-        'post_status'    => 'any',
-        'posts_per_page' => 1,
-        'fields'         => 'ids',
-    ) );
-    return ! empty( $posts ) ? (int) $posts[0] : 0;
-}
-
-/**
  * Look up a Twitter comment by `_source_id` commentmeta.
  */
 function onionpress_twitter_find_comment_by_source_id( $source_id ) {
@@ -455,7 +440,7 @@ function onionpress_twitter_find_comment_by_source_id( $source_id ) {
  * comment's post and let comment_parent nest us under the comment.
  */
 function onionpress_twitter_find_attachable_post( $parent_source_id ) {
-    $pid = onionpress_twitter_find_post_by_source_id( $parent_source_id );
+    $pid = onionpress_social_find_post_by_source_id( $parent_source_id );
     if ( $pid ) return $pid;
     $cid = onionpress_twitter_find_comment_by_source_id( $parent_source_id );
     if ( $cid ) {
@@ -819,12 +804,7 @@ function onionpress_twitter_sideload_media( $post_id, $tweet_id, $media_dir ) {
     if ( ! is_dir( $media_dir ) ) {
         return;
     }
-    require_once ABSPATH . 'wp-admin/includes/image.php';
-    require_once ABSPATH . 'wp-admin/includes/file.php';
-    require_once ABSPATH . 'wp-admin/includes/media.php';
-
     $prefix = $tweet_id . '-';
-    $upload = wp_upload_dir();
     $tags   = array();
 
     foreach ( scandir( $media_dir ) as $f ) {
@@ -835,48 +815,17 @@ function onionpress_twitter_sideload_media( $post_id, $tweet_id, $media_dir ) {
         $src = $media_dir . '/' . $f;
         if ( ! is_file( $src ) ) continue;
 
-        $dest_name = wp_unique_filename( $upload['path'], $f );
-        $dest_path = $upload['path'] . '/' . $dest_name;
-        if ( ! copy( $src, $dest_path ) ) continue;
-
-        $type = wp_check_filetype( $dest_name );
-        $attach_id = wp_insert_attachment( array(
-            'post_mime_type' => $type['type'] ?? 'application/octet-stream',
-            'post_title'     => sanitize_title( pathinfo( $dest_name, PATHINFO_FILENAME ) ),
-            'post_content'   => '',
-            'post_status'    => 'inherit',
-        ), $dest_path, $post_id );
-
-        if ( is_wp_error( $attach_id ) ) continue;
-
-        $meta = wp_generate_attachment_metadata( $attach_id, $dest_path );
-        wp_update_attachment_metadata( $attach_id, $meta );
+        $attach_id = onionpress_social_store_upload( $src, $f, $post_id, false );
+        if ( ! $attach_id ) continue;
 
         // Set the first image as the post's featured image so archive
         // listings have a thumbnail. Later ones render inline.
-        if ( empty( $tags ) && strpos( $type['type'], 'image/' ) === 0 ) {
+        if ( empty( $tags ) && strpos( (string) get_post_mime_type( $attach_id ), 'image/' ) === 0 ) {
             set_post_thumbnail( $post_id, $attach_id );
         }
-
-        if ( strpos( $type['type'], 'image/' ) === 0 ) {
-            $img = wp_get_attachment_image(
-                $attach_id,
-                'large',
-                false,
-                array( 'loading' => 'lazy', 'style' => 'max-width:100%;height:auto;' )
-            );
-            // Strip absolute hostname from src/srcset so the <img> renders
-            // correctly on any host (onion, localhost, clearnet) the same
-            // post might be viewed through. wp_make_link_relative() would
-            // work on a single URL; we need to scrub every URL in the tag.
-            $tags[] = preg_replace( '~https?://[^/\s"\']+/~', '/', $img );
-        } elseif ( strpos( $type['type'], 'video/' ) === 0 ) {
-            $url = wp_make_link_relative( wp_get_attachment_url( $attach_id ) );
-            $tags[] = sprintf(
-                '<video controls preload="metadata" style="max-width:100%%;"><source src="%s" type="%s"></video>',
-                esc_url( $url ),
-                esc_attr( $type['type'] )
-            );
+        $tag = onionpress_social_media_tag( $attach_id );
+        if ( $tag !== '' ) {
+            $tags[] = $tag;
         }
     }
 
