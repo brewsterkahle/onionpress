@@ -197,16 +197,36 @@ HEALTHY_PATTERNS = [
 ]
 
 
+RTF_UP = 0x0001
+RTF_REJECT = 0x0200
+
+
+def _route_usable(flags_hex: str, iface: str) -> bool:
+    """A routing-table entry that can carry traffic: up, not a reject
+    (`unreachable`/`prohibit`) entry, not on loopback."""
+    try:
+        flags = int(flags_hex, 16)
+    except ValueError:
+        return True
+    return bool(flags & RTF_UP) and not flags & RTF_REJECT and iface != "lo"
+
+
 def linux_has_default_route(route="/proc/net/route", route6="/proc/net/ipv6_route") -> bool:
-    """True if the kernel has a default route (v4 or v6); True on any
-    read error so a quirky /proc never reads as offline (the probes and
-    uploads report their own failures)."""
+    """True if the kernel has a usable default route (v4 or v6); True on
+    any read error so a quirky /proc never reads as offline (the probes
+    and uploads report their own failures).
+
+    The IPv6 table always lists the kernel's own reject entry for "no
+    route" as a default (`lo`, flags 0x00200200): counted, it read a
+    host with no route as online (issue #139, found by T1 (b)'s live
+    run), so reject and loopback entries are not routes."""
     try:
         with open(route, encoding="utf-8") as fh:
             next(fh, None)  # header
             for line in fh:
                 parts = line.split()
-                if len(parts) > 1 and parts[1] == "00000000":
+                if (len(parts) > 3 and parts[1] == "00000000"
+                        and _route_usable(parts[3], parts[0])):
                     return True
     except OSError:
         return True
@@ -214,7 +234,8 @@ def linux_has_default_route(route="/proc/net/route", route6="/proc/net/ipv6_rout
         with open(route6, encoding="utf-8") as fh:
             for line in fh:
                 parts = line.split()
-                if len(parts) > 1 and parts[0] == "0" * 32 and parts[1] == "00":
+                if (len(parts) > 9 and parts[0] == "0" * 32 and parts[1] == "00"
+                        and _route_usable(parts[8], parts[9])):
                     return True
     except OSError:
         return True
@@ -256,19 +277,37 @@ TOR_NETWORK_REASONS = frozenset({
 
 
 def tor_no_network_reason(answer: str) -> str:
-    """From control-port replies to `GETINFO status/bootstrap-phase` and
-    `GETINFO network-liveness`, why Tor reaches no relay, or "".
+    """From control-port replies to `GETINFO status/bootstrap-phase`,
+    `GETINFO network-liveness` and `GETINFO entry-guards`, why Tor
+    reaches no relay, or "".
 
     "bootstrap N%: REASON" for a bootstrap below 100 % whose problem is
     in TOR_NETWORK_REASONS and that Tor recommends warning about (a
-    single failure says RECOMMENDATION=ignore); "network-liveness down"
-    once bootstrapped. Anything else, an empty answer included, is "".
+    single failure says RECOMMENDATION=ignore). Once bootstrapped,
+    "network-liveness down", or "all N guards down": no guard "up" and
+    at least one "down" (behind a captive portal Tor stays bootstrapped
+    with liveness up and only fails to find a first hop: T1 (b)'s live
+    run). Anything else, an empty answer included, is "".
     """
     phase = {}
     liveness = ""
+    guards = []
+    in_guards = False
     for line in (answer or "").splitlines():
         line = line.strip()
-        if "status/bootstrap-phase=" in line:
+        if in_guards:
+            if line == ".":
+                in_guards = False
+            elif line.startswith("$"):
+                words = line.split()
+                guards.append(words[1] if len(words) > 1 else "")
+            continue
+        if "entry-guards=" in line:
+            in_guards = line.startswith("250+")
+            rest = line.split("entry-guards=", 1)[1].split()
+            if not in_guards and len(rest) > 1:
+                guards.append(rest[1])
+        elif "status/bootstrap-phase=" in line:
             words = line.split("status/bootstrap-phase=", 1)[1].split()
             phase["severity"] = words[0] if words else ""
             for word in words:
@@ -289,6 +328,9 @@ def tor_no_network_reason(answer: str) -> str:
         return ""
     if liveness == "down":
         return "network-liveness down"
+    if guards and "up" not in guards and "never-connected" not in guards \
+            and "down" in guards:
+        return f"all {len(guards)} guards down"
     return ""
 
 
@@ -1037,14 +1079,16 @@ class HealthChecker:
         a connection-class problem it RECOMMENDs warning about, or, once
         bootstrapped, `network-liveness` "down" (a circuit closed with no
         cell received since it was launched; any cell sets it "up"
-        again). This is about the host's network, never the site's
-        reachability: the dual probe alone measures that. No answer (the
+        again) or every entry guard "down" (tor_no_network_reason). This
+        is about the host's network, never the site's reachability: the
+        dual probe alone measures that. No answer (the
         stack stopped, tor paused or restarting) is "": a sick container
         is not an offline host.
         """
         answer = self._control_session(
             "onionpress-tor",
-            ["GETINFO status/bootstrap-phase", "GETINFO network-liveness"])
+            ["GETINFO status/bootstrap-phase", "GETINFO network-liveness",
+             "GETINFO entry-guards"])
         return tor_no_network_reason(answer)
 
     def network_reachable(self) -> bool:

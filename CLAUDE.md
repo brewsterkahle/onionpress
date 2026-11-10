@@ -252,12 +252,14 @@
   `TestPlatformSeams` in `tests/test_linux_daemon.py`.
 - **"Offline" is the host's network, never the stack** (#139): the
   route check reads the routing table on both platforms (Linux `/proc`,
-  Mac `route -n get default`: no interface scan, no SCNetworkReachability,
-  no packet, so no Local Network prompt); the daemon's has-internet is
-  `HealthChecker.network_reachable`: that and Tor's control port not
-  saying it reaches no relay (`tor_no_network_reason`: a warned
-  connection-class bootstrap problem, or `network-liveness` down once
-  bootstrapped; a captive portal). No answer from Tor is never offline.
+  where a reject or `lo` entry is no route: IPv6 always lists one as a
+  default; Mac `route -n get default`: no interface scan, no
+  SCNetworkReachability, no packet, so no Local Network prompt); the
+  daemon's has-internet is `HealthChecker.network_reachable`: that and
+  Tor's control port not saying it reaches no relay
+  (`tor_no_network_reason`: a warned connection-class bootstrap
+  problem, `network-liveness` down, or every entry guard down: a
+  captive portal). No answer from Tor is never offline.
   `TestCheckInternetConnectivity`, `TestTorReportsNoNetwork` in
   `tests/test_onionpress_health.py`.
 - T1 (b) (`e2e/test_t1_b_chaos.py`) pauses tor, flaps its networks, and
