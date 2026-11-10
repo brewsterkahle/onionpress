@@ -499,6 +499,14 @@
   `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
   The launcher's `stop` runs `daemon offline` before stopping containers;
   `quit` runs `daemon stop` first.
+- **A Mac with no GUI session still gets its daemon** (#233, SSH only):
+  when launchctl refuses the agent, `daemon start` runs the plist's
+  program, environment and logs in a session of its own
+  (`daemon_client.start_detached`); `daemon status` says "without
+  launchd", `daemon stop` TERMs it. A Mac's `daemon serve` takes the data
+  dir's `daemon.lock` before opening a log, and exits 0 when another daemon
+  holds it (launchd leaves it down). Linux's unit takes no lock.
+  `TestNoGuiSession` in `tests/test_mac_daemon.py`.
 - **Labels are per data dir** (#505: launchd's gui domain is per user, and
   a second install on the account took the real daemon for its own):
   `daemon_client.data_dir_label` keeps `org.onionpress.daemon` /

@@ -29,6 +29,7 @@ clearnet dmesg capture and the browser extension's proxy. The files:
                                     ports, the pending question),
                                     rewritten atomically on every change
   ~/.onionpress/daemon.pid          this process
+  ~/.onionpress/daemon.lock         held by a Mac's daemon (one per data dir)
   status.json in the volume         as before, for the WordPress pages
   ~/.onionpress/onion_address       the cached address, as before
 
@@ -107,6 +108,7 @@ from .system_metrics import host_metrics, container_metrics
 # tests have always found it.
 from .daemon_client import (  # noqa: F401
     AGENT_LABEL,
+    LOCK_FILENAME,
     OFFLINE_ACK_MARKER,
     ONIONNAME_RETRY_MARKER,
     PID_FILENAME,
@@ -116,11 +118,13 @@ from .daemon_client import (  # noqa: F401
     STATE_FILENAME,
     _gui_domain,
     _launchctl,
+    acquire_daemon_lock,
     agent_label,
     agent_loaded_pid,
     agent_plist,
     agent_plist_path,
     agent_status,
+    daemon_lock_held,
     daemon_pid,
     data_dir_label,
     default_data_dir,
@@ -132,6 +136,7 @@ from .daemon_client import (  # noqa: F401
     remove_agent,
     request_offline,
     start_agent,
+    start_detached,
     state_is_fresh,
     state_path,
     stop_agent,
@@ -168,7 +173,22 @@ def run_daemon_command(sub, paths, log, *, launcher_script="", json_output=False
     out = out or sys.stdout
     sub = sub or "serve"
     if sub == "serve":
-        Daemon(paths, version=version, launcher_script=launcher_script).run()
+        # A Mac's daemon holds the data dir's serve lock (issue #233): a
+        # launchd start and one started without launchd never both run.
+        # A loser exits 0, which launchd's KeepAlive leaves down.
+        lock = None
+        if detect_os() != OS.LINUX:
+            os.makedirs(paths.data_dir, mode=0o700, exist_ok=True)
+            lock = acquire_daemon_lock(paths.data_dir)
+            if lock is None:
+                log(f"daemon: another daemon (pid {daemon_pid(paths.data_dir) or '?'}) "
+                    f"serves {paths.data_dir}; not starting a second")
+                return 0
+        try:
+            Daemon(paths, version=version, launcher_script=launcher_script).run()
+        finally:
+            if lock is not None:
+                os.close(lock)
         return 0
     if sub == "start":
         ok = start_agent(launcher_script, paths.data_dir, log,
@@ -189,6 +209,8 @@ def run_daemon_command(sub, paths, log, *, launcher_script="", json_output=False
             print(op_confirm.dumps(doc), file=out)
         else:
             running = f"running (pid {doc['pid']})" if doc.get("pid") else "not running"
+            if doc.get("without_launchd"):
+                running = f"running without launchd (pid {doc['pid']})"
             print(f"OnionPress daemon: {running}; agent "
                   f"{'loaded' if doc['loaded'] else 'not loaded'}; state "
                   f"{'fresh' if doc['state_fresh'] else 'stale or missing'}"
@@ -786,6 +808,9 @@ class Daemon(PortAttributes):
                 self.log(f"Onion address: {self.onion_address}")
             if os.environ.get("ONIONPRESS_DAEMON_LAUNCHD"):
                 self.log("Running under launchd (" + agent_label(self.app_support) + ")")
+            elif os.environ.get("ONIONPRESS_DAEMON_DETACHED"):
+                self.log("Running without launchd (no GUI session: restarted by the next "
+                         "`onionpress start`, not after a crash)")
             elif os.environ.get("INVOCATION_ID"):
                 self.log("Running under systemd (" + systemd_unit(self.app_support) + ")")
             # Signing goes on without libsodium (a heartbeat that cannot

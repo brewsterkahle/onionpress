@@ -13,6 +13,7 @@ onionpress.daemon re-exports every name here, so `daemon.read_state` and
 the rest keep working for the CLI, the uninstaller and the tests.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -24,6 +25,10 @@ import time
 
 STATE_FILENAME = "daemon-state.json"
 PID_FILENAME = "daemon.pid"
+# Held (flock) by a Mac's `daemon serve` for its whole life, before it
+# opens a log: one daemon per data dir, launchd's or a detached one
+# (issue #233).
+LOCK_FILENAME = "daemon.lock"
 # The agent of the account's own ~/.onionpress; any other data dir's is
 # derived from it by agent_label() (issue #505). e2e/harness/safety.py
 # reads this literal.
@@ -54,6 +59,42 @@ def state_path(data_dir):
 
 def pid_path(data_dir):
     return os.path.join(data_dir, PID_FILENAME)
+
+
+def lock_path(data_dir):
+    return os.path.join(data_dir, LOCK_FILENAME)
+
+
+def acquire_daemon_lock(data_dir):
+    """The data dir's serve lock: an fd holding an exclusive flock on
+    daemon.lock (close it to let go; not inherited by children), or None
+    when another process holds it. Taken by a Mac's `daemon serve` before
+    the daemon opens its logs, so a launchd start and a detached one
+    (no GUI session, issue #233) never both run: two processes never
+    write one RotatingLog."""
+    fd = os.open(lock_path(data_dir), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def daemon_lock_held(data_dir):
+    """Whether a daemon holds the data dir's serve lock now."""
+    try:
+        fd = os.open(lock_path(data_dir), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return False
 
 
 def read_state(data_dir):
@@ -342,10 +383,60 @@ def _start_unit(data_dir, log):
     return loaded
 
 
+# What a detached daemon keeps of its starter's environment: launchd's
+# agent starts with little more, and the starter's ports, DOCKER_HOST and
+# SSH variables are not the daemon's (it resolves its own).
+DETACHED_ENV_KEPT = ("PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL",
+                     "LC_CTYPE")
+
+
+def start_detached(launcher_script, data_dir, log, port_offset=None, wait=10):
+    """A Mac with no GUI session (an SSH-only login, issue #233): launchd's
+    gui domain refuses the agent, so run what the plist runs (its program,
+    environment and log files) in a session of its own (it outlives the
+    SSH login) and wait for it to take the serve lock. No KeepAlive here:
+    a crash stays down until the next `onionpress start`. A later GUI
+    login's agent finds the lock held and exits 0, which launchd leaves
+    down (SuccessfulExit false). True when a daemon holds the lock."""
+    logs_dir = os.path.join(data_dir, "logs")
+    os.makedirs(logs_dir, mode=0o700, exist_ok=True)
+    plist = agent_plist(launcher_script, logs_dir, port_offset, label=agent_label(data_dir))
+    env = {k: v for k, v in os.environ.items() if k in DETACHED_ENV_KEPT}
+    env.update(plist["EnvironmentVariables"])
+    env.pop("ONIONPRESS_DAEMON_LAUNCHD", None)
+    env["ONIONPRESS_DAEMON_DETACHED"] = "1"
+    try:
+        with open(plist["StandardOutPath"], "ab") as out, \
+                open(plist["StandardErrorPath"], "ab") as err:
+            proc = subprocess.Popen(plist["ProgramArguments"], stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=err, env=env, cwd="/",
+                                    start_new_session=True, close_fds=True)
+    except OSError as e:
+        log(f"daemon: could not start it without launchd: {e}")
+        return False
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if daemon_lock_held(data_dir):
+            log(f"daemon: started without launchd (no GUI session; pid "
+                f"{daemon_pid(data_dir) or proc.pid})")
+            return True
+        rc = proc.poll()
+        if rc is not None:
+            if daemon_lock_held(data_dir):      # another start got there first
+                return True
+            log(f"daemon: the daemon started without launchd exited (rc {rc}; see "
+                f"{plist['StandardErrorPath']})")
+            return False
+        time.sleep(0.25)
+    log(f"daemon: started without launchd (pid {proc.pid}) but it holds no lock yet")
+    return proc.poll() is None
+
+
 def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
     """Install the plist, bootstrap it (or kickstart a loaded one that is
-    not running). True when the agent is running afterwards. On Linux:
-    the user unit (_start_unit)."""
+    not running); where launchd refuses (no GUI session, issue #233) the
+    daemon is started without it (start_detached). True when a daemon is
+    running afterwards. On Linux: the user unit (_start_unit)."""
     if _on_linux():
         return _start_unit(data_dir, log)
     path = install_agent(launcher_script, data_dir, log, path, port_offset)
@@ -355,6 +446,8 @@ def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
     loaded, pid = agent_loaded_pid(data_dir)
     if loaded and pid:
         return True
+    if daemon_lock_held(data_dir):
+        return True     # one started without launchd serves this data dir
     if loaded:
         r = _launchctl(["kickstart", target])
     else:
@@ -362,8 +455,9 @@ def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
         if r.returncode != 0 and "already" in (r.stderr or "").lower():
             r = _launchctl(["kickstart", target])
     if r.returncode != 0:
-        log(f"daemon: launchctl failed (rc {r.returncode}): {(r.stderr or r.stdout).strip()}")
-        return False
+        log(f"daemon: launchctl failed (rc {r.returncode}): {(r.stderr or r.stdout).strip()}; "
+            "starting the daemon without launchd")
+        return start_detached(launcher_script, data_dir, log, port_offset)
     for _ in range(20):
         loaded, pid = agent_loaded_pid(data_dir)
         if pid:
@@ -408,8 +502,16 @@ def stop_agent(data_dir, log, path="", wait=30, offline=True):
         if r.returncode != 0:
             log(f"daemon: launchctl bootout failed (rc {r.returncode}): "
                 f"{(r.stderr or r.stdout).strip()}")
+        if pid and pid != agent_pid:
+            # The daemon is not the agent's: one started without launchd
+            # (issue #233) before a GUI login loaded the agent.
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
     elif pid:
-        # Running outside launchd (a terminal's `onionpress daemon`).
+        # Running outside launchd (started without a GUI session, issue
+        # #233, or a terminal's `onionpress daemon`).
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError:
@@ -458,6 +560,8 @@ def agent_status(data_dir):
         doc["label"] = doc["unit"] = systemd_unit(data_dir)
     else:
         doc.update({
+            # A daemon launchd does not run (issue #233: no GUI session).
+            "without_launchd": bool(doc["pid"]) and not pid,
             "label": agent_label(data_dir),
             "plist": agent_plist_path(data_dir),
             "plist_installed": os.path.exists(agent_plist_path(data_dir)),
