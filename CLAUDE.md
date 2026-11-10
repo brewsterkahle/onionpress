@@ -250,6 +250,21 @@
   DOCKER_HOST before the first `docker` call (a preset one kept; the unit
   sets no DOCKER_HOST, and must not: a system-Docker install has none).
   `TestPlatformSeams` in `tests/test_linux_daemon.py`.
+- **"Offline" is the host's network, never the stack** (#139): the
+  route check reads the routing table on both platforms (Linux `/proc`,
+  Mac `route -n get default`: no interface scan, no SCNetworkReachability,
+  no packet, so no Local Network prompt); the daemon's has-internet is
+  `HealthChecker.network_reachable`: that and Tor's control port not
+  saying it reaches no relay (`tor_no_network_reason`: a warned
+  connection-class bootstrap problem, or `network-liveness` down once
+  bootstrapped; a captive portal). No answer from Tor is never offline.
+  `TestCheckInternetConnectivity`, `TestTorReportsNoNetwork` in
+  `tests/test_onionpress_health.py`.
+- T1 (b) (`e2e/test_t1_b_chaos.py`) pauses tor, flaps its networks, and
+  (Linux VM only) takes the default route away and plays a captive
+  portal: no republish, "offline" for the host faults and never for
+  tor paused, never "stuck", available again at the same address.
+  `ChaosTest` in `tests/test_e2e_harness.py`.
 - The watchdog is started only through entrypoint.sh's `supervise_watchdog`
   (a function, not a `*tor-watchdog*` script: hosts signal
   `pgrep -f '[t]or-watchdog'`). `tests/test_tor_watchdog_supervised.py`.

@@ -354,6 +354,13 @@ visitor views)
   hold (second request within 15 min ignored).
 - Sleep/wake: `sleep-pre`/`sleep-post` (Linux), USR1/USR2 (Mac) → service
   removed and re-added, republish window reset, site reachable after wake.
+- Chaos (`test_t1_b_chaos.py`, #139 and #266 item 3; `harness/chaos.py`):
+  `docker pause` of onionpress-tor (reads "starting", never "offline"),
+  three `docker network disconnect`/`connect` flaps, and on a Linux VM the
+  default routes deleted ("interface up, no route") and a captive portal
+  (iptables refusing new TCP past private ranges): both read "offline",
+  never "stuck". No fault may end in a republish; each ends "available"
+  at the same address.
 
 ### T2 — federation (~2–3 h; roles: node, hub, home — any platforms)
 
