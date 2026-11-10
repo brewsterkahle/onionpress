@@ -258,10 +258,12 @@
   daemon's has-internet is `HealthChecker.network_reachable`: that and
   Tor's control port not saying it reaches no relay
   (`tor_no_network_reason`: a warned connection-class bootstrap
-  problem, `network-liveness` down, or every entry guard down: a
-  captive portal). No answer from Tor is never offline.
+  problem, `network-liveness` down, or no OR connection open: a
+  captive portal). No answer from Tor is never offline. Time offline
+  is not time stuck: the clock restarts when the internet comes back.
   `TestCheckInternetConnectivity`, `TestTorReportsNoNetwork` in
-  `tests/test_onionpress_health.py`.
+  `tests/test_onionpress_health.py`, `test_time_offline_does_not_count_towards_stuck`
+  in `tests/test_mac_daemon.py`.
 - T1 (b) (`e2e/test_t1_b_chaos.py`) pauses tor, flaps its networks, and
   (Linux VM only) takes the default route away and plays a captive
   portal: no republish, "offline" for the host faults and never for

@@ -340,29 +340,37 @@ class TestTorReportsNoNetwork(unittest.TestCase):
                             'SUMMARY="Done"\r\n250-network-liveness=down\r\n250 OK\r\n')
         self.assertEqual(hc.tor_reports_no_network(), "network-liveness down")
 
-    GUARDS_DOWN = ("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done\r\n"
-                   "250-network-liveness=up\r\n"
-                   "250+entry-guards=\r\n"
-                   "$AAAA~relay1 down 2026-11-10 00:56:10\r\n"
-                   "$BBBB~relay2 down 2026-11-10 00:56:12\r\n"
-                   "$CCCC~relay3 unlisted\r\n"
-                   ".\r\n250 OK\r\n")
+    # T1 (b)'s live captive portal, as Tor answered behind it and after.
+    BEHIND_PORTAL = ("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done "
+                     'SUMMARY="Done"\r\n250 OK\r\n250-network-liveness=up\r\n250 OK\r\n'
+                     "250-orconn-status=\r\n250 OK\r\n250 closing connection\r\n")
+    PORTAL_OFF = ("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done\r\n"
+                  "250-network-liveness=up\r\n250+orconn-status=\r\n"
+                  "$1E6039AC827568E054FD28F5F84FF7A41C07D4BD~spotemgottemjax CONNECTED\r\n"
+                  "$0420A9681DE8454B0B99C632A8D96989812045AC~mevolz2 CONNECTED\r\n"
+                  ".\r\n250 OK\r\n")
 
-    def test_every_guard_down_is_no_network(self):
-        """Behind a captive portal Tor stayed bootstrapped with liveness
-        up and only failed to find a first hop (T1 (b)'s live run)."""
-        hc, docker, _ = self._hc(self.GUARDS_DOWN)
-        self.assertEqual(hc.tor_reports_no_network(), "all 3 guards down")
-        self.assertIn("GETINFO entry-guards", docker.exec.call_args[0][1][2])
+    def test_no_relay_connection_is_no_network(self):
+        hc, docker, _ = self._hc(self.BEHIND_PORTAL)
+        self.assertEqual(hc.tor_reports_no_network(), "no relay connection")
+        self.assertIn("GETINFO orconn-status", docker.exec.call_args[0][1][2])
 
-    def test_one_guard_up_or_untried_is_not(self):
-        for status in ("up", "never-connected"):
-            hc, _, _ = self._hc(self.GUARDS_DOWN.replace("relay2 down 2026-11-10 00:56:12",
-                                                         f"relay2 {status}"))
-            self.assertEqual(hc.tor_reports_no_network(), "", status)
-        hc, _, _ = self._hc(self.GUARDS_DOWN.replace(" down 2026-11-10 00:56:10", " unlisted")
-                            .replace(" down 2026-11-10 00:56:12", " unusable"))
-        self.assertEqual(hc.tor_reports_no_network(), "", "nothing down is no evidence")
+    def test_a_connected_relay_is_not(self):
+        hc, _, _ = self._hc(self.PORTAL_OFF)
+        self.assertEqual(hc.tor_reports_no_network(), "")
+        hc, _, _ = self._hc(self.PORTAL_OFF.replace("mevolz2 CONNECTED", "mevolz2 LAUNCHED")
+                            .replace("spotemgottemjax CONNECTED", "spotemgottemjax FAILED"))
+        self.assertEqual(hc.tor_reports_no_network(), "no relay connection")
+
+    def test_no_orconn_answer_is_not(self):
+        """An older reply without the key says nothing."""
+        hc, _, _ = self._hc("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done\r\n"
+                            "250-network-liveness=up\r\n250 OK\r\n")
+        self.assertEqual(hc.tor_reports_no_network(), "")
+
+    def test_no_relay_connection_while_bootstrapping_is_not(self):
+        hc, _, _ = self._hc(self.BEHIND_PORTAL.replace("PROGRESS=100 TAG=done", "PROGRESS=45 TAG=loading"))
+        self.assertEqual(hc.tor_reports_no_network(), "")
 
     def test_liveness_up_after_bootstrap_is_not(self):
         hc, _, _ = self._hc("250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done\r\n"

@@ -278,35 +278,40 @@ TOR_NETWORK_REASONS = frozenset({
 
 def tor_no_network_reason(answer: str) -> str:
     """From control-port replies to `GETINFO status/bootstrap-phase`,
-    `GETINFO network-liveness` and `GETINFO entry-guards`, why Tor
+    `GETINFO network-liveness` and `GETINFO orconn-status`, why Tor
     reaches no relay, or "".
 
     "bootstrap N%: REASON" for a bootstrap below 100 % whose problem is
     in TOR_NETWORK_REASONS and that Tor recommends warning about (a
     single failure says RECOMMENDATION=ignore). Once bootstrapped,
-    "network-liveness down", or "all N guards down": no guard "up" and
-    at least one "down" (behind a captive portal Tor stays bootstrapped
-    with liveness up and only fails to find a first hop: T1 (b)'s live
-    run). Anything else, an empty answer included, is "".
+    "network-liveness down", or "no relay connection": orconn-status
+    answered and lists no CONNECTED relay. Behind a captive portal Tor
+    stays bootstrapped, liveness up and circuit-established 1, and only
+    its OR connections tell (T1 (b)'s live runs: none open behind the
+    portal, nine a minute after it; the guard list does not, as the
+    watchdog's DROPGUARDS leaves every guard "never-connected"). An
+    onion service always holds a connection to its guards. Anything
+    else, an empty answer included, is "".
     """
     phase = {}
     liveness = ""
-    guards = []
-    in_guards = False
+    orconns = None          # None: orconn-status did not answer
+    in_orconns = False
     for line in (answer or "").splitlines():
         line = line.strip()
-        if in_guards:
+        if in_orconns:
             if line == ".":
-                in_guards = False
+                in_orconns = False
             elif line.startswith("$"):
                 words = line.split()
-                guards.append(words[1] if len(words) > 1 else "")
+                orconns.append(words[1] if len(words) > 1 else "")
             continue
-        if "entry-guards=" in line:
-            in_guards = line.startswith("250+")
-            rest = line.split("entry-guards=", 1)[1].split()
-            if not in_guards and len(rest) > 1:
-                guards.append(rest[1])
+        if "orconn-status=" in line:
+            orconns = []
+            in_orconns = line.startswith("250+")
+            rest = line.split("orconn-status=", 1)[1].split()
+            if not in_orconns and len(rest) > 1:
+                orconns.append(rest[1])
         elif "status/bootstrap-phase=" in line:
             words = line.split("status/bootstrap-phase=", 1)[1].split()
             phase["severity"] = words[0] if words else ""
@@ -328,9 +333,8 @@ def tor_no_network_reason(answer: str) -> str:
         return ""
     if liveness == "down":
         return "network-liveness down"
-    if guards and "up" not in guards and "never-connected" not in guards \
-            and "down" in guards:
-        return f"all {len(guards)} guards down"
+    if orconns is not None and "CONNECTED" not in orconns:
+        return "no relay connection"
     return ""
 
 
@@ -1079,7 +1083,7 @@ class HealthChecker:
         a connection-class problem it RECOMMENDs warning about, or, once
         bootstrapped, `network-liveness` "down" (a circuit closed with no
         cell received since it was launched; any cell sets it "up"
-        again) or every entry guard "down" (tor_no_network_reason). This
+        again) or no OR connection open (tor_no_network_reason). This
         is about the host's network, never the site's reachability: the
         dual probe alone measures that. No answer (the
         stack stopped, tor paused or restarting) is "": a sick container
@@ -1088,7 +1092,7 @@ class HealthChecker:
         answer = self._control_session(
             "onionpress-tor",
             ["GETINFO status/bootstrap-phase", "GETINFO network-liveness",
-             "GETINFO entry-guards"])
+             "GETINFO orconn-status"])
         return tor_no_network_reason(answer)
 
     def network_reachable(self) -> bool:
