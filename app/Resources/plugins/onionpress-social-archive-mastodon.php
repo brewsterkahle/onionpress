@@ -43,11 +43,6 @@ const ONIONPRESS_MASTODON_LOCK        = 'onionpress_social_mastodon_lock';
 const ONIONPRESS_MASTODON_OPTS_OPT    = 'onionpress_social_mastodon_opts';
 const ONIONPRESS_MASTODON_CRON_HOOK   = 'onionpress_social_mastodon_sync';
 
-// Route everything through the bulk-outgoing Tor daemon in the onionheaven
-// container, per the "separate Tor in/out" architecture. onionpress-tor is
-// reserved for the hosted onion service.
-const ONIONPRESS_MASTODON_SOCKS_PROXY = 'onionheaven:9050';
-
 // Budget per tick. Most of the cost is media sideload (~3-5s per
 // attachment over Tor); a strict wall-clock ceiling keeps the tick
 // finishing cleanly regardless of how heavy the posts are. The page
@@ -67,7 +62,6 @@ const ONIONPRESS_MASTODON_DAEMON_LOCK      = 'onionpress_social_mastodon_daemon_
 const ONIONPRESS_MASTODON_DAEMON_MAX_SEC   = 1800; // 30 min per invocation, enough for ~45k statuses
 const ONIONPRESS_MASTODON_DAEMON_STALE_SEC = 300;  // heartbeat older than this = dead process
 const ONIONPRESS_MASTODON_DAEMON_IDLE_SEC  = 3;    // politeness pause between ticks (API rate-limit hygiene)
-const ONIONPRESS_MASTODON_HTTP_TIMEOUT    = 45;
 
 // Self-reply threading: replies to your own toots are imported as WP
 // comments on the parent's post (so a thread reads as post + comments,
@@ -203,10 +197,7 @@ function onionpress_mastodon_import_page() {
             // actually fires it right now. The admin page then re-
             // renders with a "running" indicator that auto-refreshes.
             delete_option( ONIONPRESS_MASTODON_DAEMON_LOCK );
-            delete_transient( 'doing_cron' );
-            wp_schedule_single_event( time(), ONIONPRESS_MASTODON_CRON_HOOK );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_social_run_now( ONIONPRESS_MASTODON_CRON_HOOK );
             $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_mastodon_reset'] ) ) {
             check_admin_referer( 'onionpress_mastodon_reset', 'onionpress_mastodon_reset_nonce' );
@@ -406,7 +397,7 @@ function onionpress_mastodon_handle_save_handle_post() {
     update_option( ONIONPRESS_MASTODON_OPTS_OPT, $opts );
 
     // Live lookup against the declared server.
-    $lookup = onionpress_mastodon_api_get(
+    $lookup = onionpress_social_tor_get(
         'https://' . $server . '/api/v1/accounts/lookup?acct=' . rawurlencode( $username )
     );
     if ( is_wp_error( $lookup ) ) {
@@ -756,92 +747,12 @@ function onionpress_mastodon_fetch_statuses( $server, $account_id, $params ) {
         rawurlencode( $account_id ),
         http_build_query( $params )
     );
-    $r = onionpress_mastodon_api_get( $url );
+    $r = onionpress_social_tor_get( $url );
     if ( is_wp_error( $r ) ) return $r;
     if ( (int) $r['code'] !== 200 ) {
         return new WP_Error( 'mastodon_http', 'HTTP ' . $r['code'] . ' from ' . $server );
     }
     return is_array( $r['json'] ) ? $r['json'] : array();
-}
-
-/**
- * Tor-over-SOCKS HTTP GET via the onionheaven daemon. Returns
- * ['code'=>int, 'body'=>string, 'json'=>array|null], or WP_Error on
- * transport failure. We can't use wp_remote_get here because it offers
- * no SOCKS option and we must never egress clearnet directly.
- */
-function onionpress_mastodon_api_get( $url ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return new WP_Error( 'no_curl', 'curl extension required for Mastodon import' );
-    }
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
-        CURLOPT_PROXY          => ONIONPRESS_MASTODON_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => ONIONPRESS_MASTODON_HTTP_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-        CURLOPT_HTTPHEADER     => array( 'Accept: application/json' ),
-    ) );
-    $body = curl_exec( $ch );
-    if ( $body === false ) {
-        $err = curl_error( $ch );
-        curl_close( $ch );
-        return new WP_Error( 'curl', $err ?: 'curl failure' );
-    }
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    curl_close( $ch );
-    $json = json_decode( $body, true );
-    return array( 'code' => $code, 'body' => $body, 'json' => is_array( $json ) ? $json : null );
-}
-
-/**
- * Download a file over Tor into a temp path. Used for media sideloads.
- * Returns the local file path or WP_Error.
- */
-function onionpress_mastodon_fetch_file( $url, $dest_path ) {
-    $fh = @fopen( $dest_path, 'wb' );
-    if ( ! $fh ) return new WP_Error( 'io', 'open temp failed' );
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_FILE           => $fh,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 5,
-        CURLOPT_PROXY          => ONIONPRESS_MASTODON_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => 120,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-    ) );
-    $ok = curl_exec( $ch );
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    $err = curl_error( $ch );
-    curl_close( $ch );
-    fclose( $fh );
-    if ( ! $ok || $code < 200 || $code >= 300 ) {
-        @unlink( $dest_path );
-        return new WP_Error( 'curl', 'HTTP ' . $code . ' ' . $err );
-    }
-    return $dest_path;
-}
-
-/**
- * Look up a post by its `_source_id` postmeta. Returns post ID or 0.
- * Used to find the parent post when threading a self-reply as a comment.
- */
-function onionpress_mastodon_find_post_by_source_id( $source_id ) {
-    $posts = get_posts( array(
-        'post_type'      => 'post',
-        'meta_key'       => '_source_id',
-        'meta_value'     => $source_id,
-        'post_status'    => 'any',
-        'posts_per_page' => 1,
-        'fields'         => 'ids',
-    ) );
-    return ! empty( $posts ) ? (int) $posts[0] : 0;
 }
 
 /**
@@ -869,7 +780,7 @@ function onionpress_mastodon_find_comment_by_source_id( $source_id ) {
  * Returns 0 when neither exists yet (parent not yet imported).
  */
 function onionpress_mastodon_find_attachable_post( $parent_source_id ) {
-    $pid = onionpress_mastodon_find_post_by_source_id( $parent_source_id );
+    $pid = onionpress_social_find_post_by_source_id( $parent_source_id );
     if ( $pid ) return $pid;
     $cid = onionpress_mastodon_find_comment_by_source_id( $parent_source_id );
     if ( $cid ) {
@@ -892,7 +803,7 @@ function onionpress_mastodon_fetch_status_by_id( $server, $status_id ) {
         return is_array( $mock ) ? $mock : null;
     }
     if ( $server === '' || $status_id === '' ) return null;
-    $r = onionpress_mastodon_api_get(
+    $r = onionpress_social_tor_get(
         'https://' . $server . '/api/v1/statuses/' . rawurlencode( $status_id )
     );
     if ( is_wp_error( $r ) ) return null;
@@ -1391,75 +1302,24 @@ function onionpress_mastodon_render_content( $status ) {
  * thumbnail.
  */
 function onionpress_mastodon_sideload_media( $post_id, $status_id, $media ) {
-    require_once ABSPATH . 'wp-admin/includes/image.php';
-    require_once ABSPATH . 'wp-admin/includes/file.php';
-    require_once ABSPATH . 'wp-admin/includes/media.php';
-
-    $upload = wp_upload_dir();
-    $tags   = array();
+    $tags = array();
     foreach ( $media as $m ) {
         $url  = (string) ( $m['url'] ?? '' );
         $type = (string) ( $m['type'] ?? '' );
         if ( $url === '' ) continue;
 
-        $ext = strtolower( pathinfo( parse_url( $url, PHP_URL_PATH ) ?? '', PATHINFO_EXTENSION ) );
-        // The server picks the URL, and the file goes straight into uploads
-        // without wp_handle_sideload()'s checks: keep only an extension
-        // WordPress accepts for media, never .php and the like.
-        if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) || ! wp_check_filetype( 'x.' . $ext )['ext'] ) {
-            // Guess an extension from MIME type.
-            $ext = ( $type === 'video' || $type === 'gifv' ) ? 'mp4'
-                 : ( $type === 'audio' ? 'mp3' : 'jpg' );
-        }
-        $basename  = $status_id . '-' . wp_generate_password( 6, false ) . '.' . $ext;
-        $tmp_path  = sys_get_temp_dir() . '/' . $basename;
-        $fetched   = onionpress_mastodon_fetch_file( $url, $tmp_path );
-        if ( is_wp_error( $fetched ) ) continue;
+        // The extension when the URL's is not a media type WordPress takes.
+        $fallback  = ( $type === 'video' || $type === 'gifv' ) ? 'mp4'
+                   : ( $type === 'audio' ? 'mp3' : 'jpg' );
+        $attach_id = onionpress_social_sideload_url( $url, $post_id, $status_id, $fallback );
+        if ( ! $attach_id ) continue;
 
-        $dest_name = wp_unique_filename( $upload['path'], $basename );
-        $dest_path = $upload['path'] . '/' . $dest_name;
-        if ( ! @rename( $tmp_path, $dest_path ) && ! @copy( $tmp_path, $dest_path ) ) {
-            @unlink( $tmp_path );
-            continue;
-        }
-        @unlink( $tmp_path );
-
-        $filetype = wp_check_filetype( $dest_name );
-        $attach_id = wp_insert_attachment( array(
-            'post_mime_type' => $filetype['type'] ?? 'application/octet-stream',
-            'post_title'     => sanitize_title( pathinfo( $dest_name, PATHINFO_FILENAME ) ),
-            'post_content'   => '',
-            'post_status'    => 'inherit',
-        ), $dest_path, $post_id );
-        if ( is_wp_error( $attach_id ) ) continue;
-
-        $meta = wp_generate_attachment_metadata( $attach_id, $dest_path );
-        wp_update_attachment_metadata( $attach_id, $meta );
-
-        $mime = $filetype['type'] ?? '';
-        if ( empty( $tags ) && strpos( $mime, 'image/' ) === 0 ) {
+        if ( empty( $tags ) && strpos( (string) get_post_mime_type( $attach_id ), 'image/' ) === 0 ) {
             set_post_thumbnail( $post_id, $attach_id );
         }
-
-        if ( strpos( $mime, 'image/' ) === 0 ) {
-            $img = wp_get_attachment_image(
-                $attach_id, 'large', false,
-                array( 'loading' => 'lazy', 'style' => 'max-width:100%;height:auto;' )
-            );
-            $tags[] = preg_replace( '~https?://[^/\s"\']+/~', '/', $img );
-        } elseif ( strpos( $mime, 'video/' ) === 0 || $type === 'gifv' ) {
-            $url_rel = wp_make_link_relative( wp_get_attachment_url( $attach_id ) );
-            $loop = ( $type === 'gifv' ) ? ' autoplay loop muted playsinline' : '';
-            $tags[] = sprintf(
-                '<video controls preload="metadata" style="max-width:100%%;"%s><source src="%s" type="%s"></video>',
-                $loop, esc_url( $url_rel ), esc_attr( $mime )
-            );
-        } elseif ( strpos( $mime, 'audio/' ) === 0 ) {
-            $url_rel = wp_make_link_relative( wp_get_attachment_url( $attach_id ) );
-            $tags[] = sprintf(
-                '<audio controls preload="metadata" style="max-width:100%%;"><source src="%s" type="%s"></audio>',
-                esc_url( $url_rel ), esc_attr( $mime )
-            );
+        $tag = onionpress_social_media_tag( $attach_id, $type === 'gifv' );
+        if ( $tag !== '' ) {
+            $tags[] = $tag;
         }
     }
 

@@ -159,22 +159,48 @@ class TestImportersWriteOnlyMedia(unittest.TestCase):
         return _read(os.path.join(PLUGINS_DIR, name))
 
     def test_remote_media_extension_must_be_a_wordpress_media_type(self):
+        # One download-into-uploads path for the blog and Mastodon
+        # importers since #409: onionpress_social_sideload_url().
+        shared = self._plugin("onionpress-social-archive.php")
+        body = _php_function(shared, "onionpress_social_sideload_url")
+        check = "! wp_check_filetype( 'x.' . $ext )['ext']"
+        self.assertIn(check, body)
+        self.assertLess(body.index(check), body.index("$basename"))
+        self.assertLess(body.index(check), body.index("onionpress_social_store_upload("))
         for plugin, func in (
-                ("onionpress-social-archive-blog.php", "onionpress_blog_sideload_url"),
+                ("onionpress-social-archive-blog.php", "onionpress_blog_sideload_media"),
                 ("onionpress-social-archive-mastodon.php", "onionpress_mastodon_sideload_media")):
             with self.subTest(func=func):
                 body = _php_function(self._plugin(plugin), func)
-                check = "! wp_check_filetype( 'x.' . $ext )['ext']"
-                self.assertIn(check, body)
-                self.assertLess(body.index(check), body.index("$basename"))
-                self.assertLess(body.index(check), body.index("rename("))
+                self.assertIn("onionpress_social_sideload_url(", body)
+                self.assertNotIn("onionpress_social_store_upload(", body)
+                self.assertNotIn("rename(", body)
 
     def test_archive_media_name_must_be_a_wordpress_media_type(self):
         body = _php_function(self._plugin("onionpress-social-archive-twitter.php"),
                              "onionpress_twitter_sideload_media")
         check = "if ( ! wp_check_filetype( $f )['ext'] ) continue;"
         self.assertIn(check, body)
-        self.assertLess(body.index(check), body.index("copy( $src, $dest_path )"))
+        self.assertLess(body.index(check),
+                        body.index("onionpress_social_store_upload( $src, $f, $post_id, false )"))
+
+    def test_only_the_checked_paths_store_uploads(self):
+        """onionpress_social_store_upload() checks no type itself: every
+        caller is one of the two above."""
+        callers = set()
+        for dirpath, _, filenames in os.walk(PLUGINS_DIR):
+            for name in filenames:
+                if not name.endswith(".php"):
+                    continue
+                src = _read(os.path.join(dirpath, name))
+                # Each top-level function runs to the next one.
+                for chunk in re.split(r"^(?=function )", src, flags=re.M)[1:]:
+                    name = re.match(r"function (\w+)\(", chunk).group(1)
+                    if name != "onionpress_social_store_upload" \
+                            and "onionpress_social_store_upload(" in chunk:
+                        callers.add(name)
+        self.assertEqual(callers, {"onionpress_social_sideload_url",
+                                   "onionpress_twitter_sideload_media"})
 
     def test_no_other_plugin_writes_into_uploads_directly(self):
         # A new writer must be reviewed (and added above), or go through
@@ -184,9 +210,7 @@ class TestImportersWriteOnlyMedia(unittest.TestCase):
             for name in filenames:
                 if name.endswith(".php") and "wp_upload_dir(" in _read(os.path.join(dirpath, name)):
                     writers.add(name)
-        self.assertEqual(writers, {"onionpress-social-archive-blog.php",
-                                   "onionpress-social-archive-mastodon.php",
-                                   "onionpress-social-archive-twitter.php"})
+        self.assertEqual(writers, {"onionpress-social-archive.php"})
 
 
 if __name__ == "__main__":

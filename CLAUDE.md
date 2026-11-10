@@ -732,6 +732,16 @@
   `post_title` / `post_excerpt` to the helper (an attachment's
   `sanitize_title` aside); a new importer's titles go through it.
 
+## The Importers Share One Transport (issue #409)
+- **No importer has curl of its own**: every fetch is
+  `onionpress_social_tor_get` / `_fetch_file` (`onionpress-social-archive.php`:
+  socks5h through onionheaven, http(s) only, redirects included), every
+  `_source_id` lookup `onionpress_social_find_post_by_source_id`, every
+  download into uploads `onionpress_social_sideload_url` (the type check)
+  over `onionpress_social_store_upload` (whose only other caller, Twitter,
+  checks each name). `tests/test_social_importer_shared_helpers.py`,
+  `tests/test_uploads_no_php.py`.
+
 ## Importer ZIP Uploads Are Held to Limits (issue #473)
 - The Twitter and Reddit importers take a ZIP from any site administrator
   and used `extractTo` on every member with an allowed extension: no cap
@@ -764,6 +774,10 @@
   locked, time-budgeted, backs off and keeps a failing follow's items.
   wp-cron's loopback goes to `http://localhost/`.
   `tests/test_blogroll_refresh.py`.
+- **A "run it now" kick is `spawn_cron()`** (#409; the importers'
+  `onionpress_social_run_now`), whose loopback that filter sends to
+  localhost: no PHP names `wp-cron.php` in code (`site_url()` is the
+  request's host). `tests/test_cron_kicks_reach_localhost.py`.
 
 ## WordPress Resolves No Name Outside Docker
 - A DNS lookup in the wordpress container is a leak. onionpress-tor-proxy

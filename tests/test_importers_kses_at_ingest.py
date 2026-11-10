@@ -241,7 +241,10 @@ class TestTitlesAndExcerptsArePlainText(unittest.TestCase):
         attachment's sanitize_title(), or built in a function that calls
         the helper itself or a renderer whose body calls it."""
         seen = 0
-        for name, text in self._importers():
+        # The shared plugin too: its upload helper names the importers'
+        # attachments (#409).
+        shared = ("onionpress-social-archive.php", _read("onionpress-social-archive.php"))
+        for name, text in [*self._importers(), shared]:
             for m in re.finditer(r"'post_(?:title|excerpt)'\s*=>\s*([^\n]+)", text):
                 seen += 1
                 value = m.group(1)
@@ -359,7 +362,7 @@ function wp_kses_post( $s ) { return $s; }
 function get_option( $k, $d = array() ) { return $GLOBALS['opt']; }
 function apply_filters( $tag, $value ) { return $value; }
 function is_wp_error( $x ) { return false; }
-function onionpress_reddit_api_get( $url ) { return $GLOBALS['api']; }
+function onionpress_social_tor_get( $url ) { return $GLOBALS['api']; }
 const ONIONPRESS_REDDIT_API_HOST = 'www.reddit.com';
 const ONIONPRESS_REDDIT_TITLE_CACHE_OPT = 'x';
 """
