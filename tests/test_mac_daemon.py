@@ -939,6 +939,192 @@ class TestLaunchdAgent(unittest.TestCase):
 
 
 
+class TestNoGuiSession(unittest.TestCase):
+    """Issue #233: over SSH with no GUI login launchd's gui domain refuses
+    the agent; `daemon start` runs the daemon without launchd, one per
+    data dir (the serve lock), and `daemon status` / `daemon stop` know
+    it. No real launchctl: a refused bootstrap is simulated."""
+
+    REFUSED = "Bootstrap failed: 125: Domain does not support specified action"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="op-daemon-nogui-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        for name, value in (("_on_linux", False), ("default_data_dir", self.dir),
+                            ("_gui_domain", "gui/501")):
+            patcher = mock.patch.object(op_daemon_client, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.plist = os.path.join(self.dir, "org.onionpress.daemon.plist")
+        self.launcher = os.path.join(self.dir, "onionpress")
+        with open(self.launcher, "w") as f:
+            f.write("#!/bin/sh\n")
+        self.lines = []
+        self.calls = []
+
+    def launchctl(self, args, timeout=20):
+        self.calls.append(args)
+        if args[0] == "bootstrap":
+            return subprocess.CompletedProcess(args, 125, "", self.REFUSED)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    def hold_lock(self):
+        fd = op_daemon.acquire_daemon_lock(self.dir)
+        self.assertIsNotNone(fd)
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def test_the_lock_is_one_holder_per_data_dir(self):
+        self.assertFalse(op_daemon.daemon_lock_held(self.dir))
+        fd = op_daemon.acquire_daemon_lock(self.dir)
+        self.assertTrue(op_daemon.daemon_lock_held(self.dir))
+        self.assertIsNone(op_daemon.acquire_daemon_lock(self.dir))
+        self.assertEqual(os.stat(op_daemon_client.lock_path(self.dir)).st_mode & 0o777, 0o600)
+        os.close(fd)
+        self.assertFalse(op_daemon.daemon_lock_held(self.dir))
+
+    def test_a_refused_bootstrap_starts_the_daemon_without_launchd(self):
+        started = {}
+
+        def popen(argv, **kw):
+            started.update(kw, argv=argv)
+            self.hold_lock()            # the daemon takes its lock
+            return mock.Mock(pid=4242, poll=mock.Mock(return_value=None))
+        with mock.patch.object(op_daemon_client, "_launchctl", self.launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)), \
+                mock.patch.object(op_daemon_client.subprocess, "Popen", popen), \
+                mock.patch.dict(os.environ, {"SSH_CONNECTION": "10.0.0.1 22 10.0.0.2 22",
+                                             "DOCKER_HOST": "unix:///x",
+                                             "ONIONPRESS_PORT_OFFSET": "20000",
+                                             "PATH": "/usr/bin:/bin"}):
+            ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist,
+                                       port_offset="10000")
+        self.assertTrue(ok)
+        self.assertEqual(self.calls, [["bootstrap", "gui/501", self.plist]])
+        # What the plist runs, where it logs, in a session of its own
+        self.assertEqual(started["argv"], [self.launcher, "daemon"])
+        self.assertTrue(started["start_new_session"])
+        self.assertIs(started["stdin"], subprocess.DEVNULL)
+        self.assertEqual(started["stdout"].name,
+                         os.path.join(self.dir, "logs", "daemon-stdout.log"))
+        self.assertEqual(started["stderr"].name,
+                         os.path.join(self.dir, "logs", "daemon-stderr.log"))
+        env = started["env"]
+        self.assertEqual(env["ONIONPRESS_DAEMON_DETACHED"], "1")
+        self.assertNotIn("ONIONPRESS_DAEMON_LAUNCHD", env)
+        self.assertEqual(env["ONIONPRESS_PORT_OFFSET"], "10000")    # the plist's, not the shell's
+        self.assertEqual(env["HOME"], os.path.expanduser("~"))
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertNotIn("SSH_CONNECTION", env)
+        self.assertNotIn("DOCKER_HOST", env)
+        self.assertTrue(any("without launchd" in line for line in self.lines), self.lines)
+        # The plist is still written: a later GUI login's agent loads it
+        self.assertTrue(os.path.exists(self.plist))
+
+    def test_a_detached_daemon_that_exits_is_a_failed_start(self):
+        proc = mock.Mock(pid=4242, poll=mock.Mock(return_value=1))
+        with mock.patch.object(op_daemon_client, "_launchctl", self.launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)), \
+                mock.patch.object(op_daemon_client.subprocess, "Popen", return_value=proc):
+            ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
+        self.assertFalse(ok)
+        self.assertTrue(any("exited (rc 1" in line for line in self.lines), self.lines)
+
+    def test_a_held_lock_is_a_running_daemon(self):
+        self.hold_lock()
+        with mock.patch.object(op_daemon_client, "_launchctl", self.launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (True, None)), \
+                mock.patch.object(op_daemon_client.subprocess, "Popen") as popen:
+            ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
+        self.assertTrue(ok)
+        self.assertEqual(self.calls, [])         # no kickstart into a lock-held exit
+        popen.assert_not_called()
+
+    def test_a_real_detached_start_outlives_its_session(self):
+        # A stand-in launcher that does what `daemon serve` does first:
+        # take the lock, write the pid, then wait to be stopped.
+        script = (f"#!{sys.executable}\n"
+                  "import fcntl, json, os, time\n"
+                  f"d = {self.dir!r}\n"
+                  "fd = os.open(os.path.join(d, 'daemon.lock'), os.O_RDWR | os.O_CREAT, 0o600)\n"
+                  "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                  "open(os.path.join(d, 'daemon.pid'), 'w').write(str(os.getpid()))\n"
+                  "json.dump(dict(os.environ), open(os.path.join(d, 'env.json'), 'w'))\n"
+                  "time.sleep(60)\n")
+        with open(self.launcher, "w") as f:
+            f.write(script)
+        os.chmod(self.launcher, 0o700)
+        with mock.patch.object(op_daemon_client, "_launchctl", self.launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)):
+            ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
+        pid = op_daemon.daemon_pid(self.dir)
+        if pid:
+            self.addCleanup(lambda: op_daemon_client.pid_alive(pid) and os.kill(pid, 9))
+        self.assertTrue(ok, self.lines)
+        self.assertTrue(pid)
+        self.assertNotEqual(os.getsid(pid), os.getsid(0))
+        # Here the daemon is this test's child (a CLI's exits, and launchd
+        # reaps it): reap it, or a zombie would read as alive.
+        threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
+        with open(os.path.join(self.dir, "env.json")) as f:
+            self.assertEqual(json.load(f)["ONIONPRESS_DAEMON_DETACHED"], "1")
+        # status and stop know it; the agent is not loaded (no GUI session)
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)):
+            doc = op_daemon.agent_status(self.dir)
+            self.assertEqual(doc["pid"], pid)
+            self.assertTrue(doc["without_launchd"])
+            self.assertTrue(op_daemon.stop_agent(self.dir, self.lines.append, self.plist,
+                                                 wait=10, offline=False))
+        self.assertFalse(op_daemon.daemon_lock_held(self.dir))
+
+    def test_serve_exits_0_while_another_daemon_holds_the_lock(self):
+        paths = resolve_paths(data_dir=self.dir, app_bundle="")
+        self.hold_lock()
+        with mock.patch.object(op_daemon, "detect_os", return_value=OS.MACOS), \
+                mock.patch.object(op_daemon, "Daemon") as daemon:
+            rc = op_daemon.run_daemon_command("serve", paths, self.lines.append)
+        self.assertEqual(rc, 0)         # launchd's KeepAlive leaves an exit 0 down
+        daemon.assert_not_called()      # no log opened by a second daemon
+        self.assertTrue(any("not starting a second" in line for line in self.lines))
+
+    def test_serve_holds_the_lock_while_it_runs(self):
+        paths = resolve_paths(data_dir=self.dir, app_bundle="")
+        held = []
+        for os_name, want in ((OS.MACOS, True), (OS.LINUX, False)):
+            with self.subTest(os_name=os_name), \
+                    mock.patch.object(op_daemon, "detect_os", return_value=os_name), \
+                    mock.patch.object(op_daemon, "Daemon") as daemon:
+                daemon.return_value.run.side_effect = \
+                    lambda: held.append(op_daemon.daemon_lock_held(self.dir))
+                self.assertEqual(op_daemon.run_daemon_command("serve", paths, self.lines.append), 0)
+                self.assertEqual(held[-1], want)     # Linux's systemd unit: no lock
+                self.assertFalse(op_daemon.daemon_lock_held(self.dir))
+
+    def test_stop_terms_a_daemon_launchd_does_not_run(self):
+        # A GUI login loaded the agent (whose own start found the lock and
+        # exited); the daemon is the one started without launchd.
+        with open(op_daemon.pid_path(self.dir), "w") as f:
+            f.write(str(os.getpid()))
+        with mock.patch.object(op_daemon_client, "_launchctl", self.launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (True, None)), \
+                mock.patch.object(op_daemon_client.os, "kill") as kill:
+            op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=False)
+        self.assertEqual(self.calls, [["bootout", "gui/501/org.onionpress.daemon"]])
+        kill.assert_any_call(os.getpid(), op_daemon.signal.SIGTERM)
+
+    def test_status_says_without_launchd(self):
+        paths = resolve_paths(data_dir=self.dir, app_bundle="")
+        with open(op_daemon.pid_path(self.dir), "w") as f:
+            f.write(str(os.getpid()))
+        out = io.StringIO()
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (False, None)):
+            self.assertTrue(op_daemon.agent_status(self.dir)["without_launchd"])
+            op_daemon.run_daemon_command("status", paths, self.lines.append, out=out)
+        self.assertIn(f"running without launchd (pid {os.getpid()}", out.getvalue())
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda *a: (True, 77)):
+            self.assertFalse(op_daemon.agent_status(self.dir)["without_launchd"])
+
+
 class TestLabelPerDataDir(unittest.TestCase):
     """Issue #505: launchd's gui domain is per user, so a second install on
     the account (a test HOME, a dev build) gets its own label; the
@@ -1140,8 +1326,8 @@ class TestMenubarIsAView(unittest.TestCase):
         tree = ast.parse(_read("src/onionpress/daemon_client.py"))
         self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
         imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-        self.assertEqual(imported, {"hashlib", "json", "os", "plistlib", "pwd", "signal",
-                                    "subprocess", "time"})
+        self.assertEqual(imported, {"fcntl", "hashlib", "json", "os", "plistlib", "pwd",
+                                    "signal", "subprocess", "time"})
 
     def test_daemon_reexports_the_client(self):
         from onionpress import daemon_client
