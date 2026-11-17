@@ -81,6 +81,22 @@ images ship with it.
 - As before: take a backup and note the registry and name counts before
   updating, compare them afterwards, and never downgrade.
 
+## 2.6.2 — 2026-11-17
+
+A one-fix release for the Mac menu bar. Same container images as 2.6.1.
+
+### Highlights
+- **The menu bar shows the site's real state again.** In 2.6.1 the menu
+  bar read the daemon's state every few seconds but never kept it, so the
+  onion stayed gray and the menu said "Stopped" (with Stop and Restart
+  grayed out) while the site was up and reachable. It now turns purple
+  when the onion service is reachable, as before.
+- **Launch no longer waits three minutes.** The same missing state made
+  every launch wait the full 3 minutes for the container runtime and log
+  "Container runtime not ready after 3 minutes", even though the daemon
+  had reported it ready within seconds. The port-conflict warning at
+  launch works again too.
+
 ## 2.6.1 — 2026-10-31
 
 Fixes from the first live checks of 2.6.0 on Ubuntu 24.04 with rootless
