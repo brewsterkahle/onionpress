@@ -479,6 +479,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         self.setup_alert = None  # Reference to NSAlert for programmatic dismissal
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation
         self._wp_installed = None  # None = unknown, True/False = checked (the daemon's)
+        self._ready_waits_for_install = False
         self._last_bootstrap_pct = 0       # Last observed Tor bootstrap percentage
         self.healthcheck_address = None    # Healthcheck .onion address
         # True if this instance is the OnionHeaven hub. Identity, so it is
@@ -679,7 +680,18 @@ class OnionPressApp(PortAttributes, rumps.App):
             elif pct > 0:
                 self.update_splash_status(f"Tor bootstrap: {pct}%")
 
-        if self.is_ready and not was_ready:
+        # Ready is the onion service answering, which the start arranges
+        # before setup: a WordPress that is not installed yet gets no
+        # completed setup window and no browser (its only page there is
+        # the installer, refused to every Tor visitor). The ready steps
+        # wait for the install instead (ui_client.ready_steps_due).
+        run_ready, waiting = ui_client.ready_steps_due(
+            self.is_ready, was_ready, self._ready_waits_for_install, self._wp_installed)
+        if waiting and not self._ready_waits_for_install:
+            self.log("Onion service reachable, but WordPress is not installed: "
+                     "not opening the browser until setup has run")
+        self._ready_waits_for_install = waiting
+        if run_ready:
             self._on_ready()
         if was_running and not self.is_running:
             # Only dismiss the setup dialog when actually stopping (not during startup)
@@ -1686,14 +1698,23 @@ class OnionPressApp(PortAttributes, rumps.App):
         total_images = len(images_found)
         setup_start = time.time()
         setup_timeout = 600  # 10 minute max
+        timed_out = False
 
         while not launcher_done.is_set() or not step4_done:
             # Check for timeout
             if time.time() - setup_start > setup_timeout:
+                timed_out = True
                 if sw:
                     sw.set_status("Setup timed out — check log for details")
                     sw.add_log("ERROR: Setup timed out after 10 minutes")
                 self.log("First-time setup timed out after 10 minutes")
+                if not self._state_fresh:
+                    # The milestones are the daemon's state: without it
+                    # nothing here could advance, whatever the start did.
+                    self.log("First-time setup: the OnionPress daemon never reported "
+                             "(see the `daemon:` lines in onionpress.log)")
+                    if sw:
+                        sw.add_log("ERROR: The OnionPress background service did not start")
                 break
 
             # Check for launcher failure
@@ -1787,9 +1808,18 @@ class OnionPressApp(PortAttributes, rumps.App):
 
             time.sleep(3)
 
+        # A setup that timed out or failed ends here, with its message in
+        # the window: no step it never reached is ticked, and WordPress is
+        # not installed unless step 4 ran. The daemon leaves .setup_complete
+        # unwritten for an uninstalled WordPress, so the next launch shows
+        # the setup window again.
+        if timed_out or launcher_failed[0]:
+            self.update_menu()
+            return
+
         # If launcher succeeded but we missed some steps (e.g. fast cached restart),
         # mark them complete
-        if not launcher_failed[0] and sw:
+        if sw:
             if not step1_done:
                 sw.complete_step(1)
             if not step2_done:

@@ -287,6 +287,25 @@ def agent_loaded_pid(data_dir=""):
     return True, None
 
 
+def agent_loaded_program(data_dir=""):
+    """The program launchd holds for the loaded agent, from the same
+    `launchctl print`: '' when the agent is not loaded or the answer names
+    none. launchd reads a plist only when it is bootstrapped, so this can
+    differ from the plist on disk (start_agent)."""
+    r = _launchctl(["print", f"{_gui_domain()}/{agent_label(data_dir)}"])
+    if r.returncode != 0:
+        return ""
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("program = "):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _same_file(a, b):
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
 def install_agent(launcher_script, data_dir, log, path="", port_offset=None):
     """Write the plist (rewritten when its program or logs changed: an
     update moves nothing, since the bundle path stays, but a bundle run
@@ -345,7 +364,13 @@ def _start_unit(data_dir, log):
 def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
     """Install the plist, bootstrap it (or kickstart a loaded one that is
     not running). True when the agent is running afterwards. On Linux:
-    the user unit (_start_unit)."""
+    the user unit (_start_unit).
+
+    A loaded agent that is not running and whose program is another
+    bundle's launcher is booted out and bootstrapped from the plist just
+    written: launchd keeps the definition it loaded (at login, from a
+    bundle since moved or deleted), and a kickstart of it runs the old
+    path, which never starts when that bundle is gone."""
     if _on_linux():
         return _start_unit(data_dir, log)
     path = install_agent(launcher_script, data_dir, log, path, port_offset)
@@ -355,6 +380,16 @@ def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
     loaded, pid = agent_loaded_pid(data_dir)
     if loaded and pid:
         return True
+    if loaded:
+        program = agent_loaded_program(data_dir)
+        if program and not _same_file(program, launcher_script):
+            log(f"daemon: launchd holds the agent for another bundle ({program}); "
+                "loading it again from this one")
+            r = _launchctl(["bootout", target])
+            if r.returncode != 0:
+                log(f"daemon: launchctl bootout failed (rc {r.returncode}): "
+                    f"{(r.stderr or r.stdout).strip()}")
+            loaded = False
     if loaded:
         r = _launchctl(["kickstart", target])
     else:

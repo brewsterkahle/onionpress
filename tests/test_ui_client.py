@@ -898,6 +898,60 @@ def _launcher_argv_calls(rel, launcher_names):
     return found
 
 
+class TestReadySteps(unittest.TestCase):
+    """ui_client.ready_steps_due: a UI's ready steps (the setup window's
+    completion, the first run's browser) run for a ready site, once, and
+    never for a WordPress that is not installed."""
+
+    def test_the_pass_that_turns_ready(self):
+        self.assertEqual(ui_client.ready_steps_due(True, False, False, True), (True, False))
+        self.assertEqual(ui_client.ready_steps_due(True, False, False, None), (True, False))
+
+    def test_once(self):
+        self.assertEqual(ui_client.ready_steps_due(True, True, False, True), (False, False))
+        self.assertEqual(ui_client.ready_steps_due(True, True, False, False), (False, False))
+
+    def test_not_ready(self):
+        for wp in (True, False, None):
+            self.assertEqual(ui_client.ready_steps_due(False, True, True, wp), (False, False))
+
+    def test_an_uninstalled_wordpress_waits_for_its_install(self):
+        run, waiting = ui_client.ready_steps_due(True, False, False, False)
+        self.assertEqual((run, waiting), (False, True))
+        # Still not installed on the next passes: still waiting.
+        self.assertEqual(ui_client.ready_steps_due(True, True, waiting, False), (False, True))
+        # Setup ran: the steps run on that pass, then never again.
+        self.assertEqual(ui_client.ready_steps_due(True, True, waiting, True), (True, False))
+        self.assertEqual(ui_client.ready_steps_due(True, True, False, True), (False, False))
+
+    def test_the_wait_ends_with_the_site(self):
+        self.assertEqual(ui_client.ready_steps_due(False, True, True, False), (False, False))
+        self.assertEqual(ui_client.ready_steps_due(True, False, False, False), (False, True))
+
+    def test_the_menubar_asks_it(self):
+        src = _read("src/menubar.py")
+        body = src[src.index("    def _apply_state("):]
+        body = body[:body.index("\n    def ", 10)]
+        self.assertIn("ui_client.ready_steps_due(", body)
+        self.assertEqual(src.count("self._on_ready()"), 1)
+        self.assertIn("if run_ready:\n            self._on_ready()", body)
+
+    def test_a_timed_out_first_run_ticks_no_step(self):
+        """The setup window's loop ends on a timeout as on a failed start:
+        before the block that ticks the steps it "missed" and says the
+        address is being published (found live: with no daemon state no
+        milestone came, WordPress was never installed, and the window
+        went on as if it had been)."""
+        src = _read("src/menubar.py")
+        body = src[src.index("    def _run_first_time_setup("):]
+        body = body[:body.index("\n    def ", 10)]
+        stop = body.index("if timed_out or launcher_failed[0]:")
+        self.assertIn("return", body[stop:stop + 120])
+        self.assertLess(stop, body.index("If launcher succeeded but we missed"))
+        self.assertLess(body.index("timed_out = True"), stop)
+        self.assertIn("timed_out = True", body[body.index("setup_timeout = 600"):stop])
+
+
 class TestStatusView(unittest.TestCase):
     """ui_client.status_view: the one view both UIs show of the daemon's
     state, the menubar's six categories and its freshness check."""

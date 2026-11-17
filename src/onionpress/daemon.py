@@ -304,6 +304,7 @@ class Daemon(PortAttributes):
         self.proxy_server = None
         self.proxy_thread = None
         self._wp_installed = None
+        self._setup_marked = False
         self._has_internet = True
         self._last_bootstrap_pct = 0
         self._bootstrap_stall_count = 0
@@ -1150,13 +1151,7 @@ class Daemon(PortAttributes):
             elapsed = int(time.time() - self.startup_time)
             self.log(f"✓ System fully operational (launched in {elapsed}s)")
             self.last_status_logged = current_status
-            try:
-                setup_marker = self._marker(".setup_complete")
-                if not os.path.exists(setup_marker):
-                    with open(setup_marker, "w") as f:
-                        f.write("1")
-            except OSError:
-                pass
+            self._mark_setup_complete_once_installed()
             self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
             if not self._s3_keys_reconcile_started:
                 self._s3_keys_reconcile_started = True
@@ -1164,6 +1159,7 @@ class Daemon(PortAttributes):
             self.publish_state()
         elif ready_now:
             self.is_ready = True
+            self._mark_setup_complete_once_installed()
             self._bootstrap_stall_count = 0
             self._yellow_since = None
             self._consecutive_fail_count = 0
@@ -1286,6 +1282,32 @@ class Daemon(PortAttributes):
 
     def check_wp_installed(self):
         return status_writer.wp_installed(self._docker)
+
+    def _mark_setup_complete_once_installed(self):
+        """`.setup_complete` for a ready site whose WordPress is installed
+        (an install from before the marker, a setup that could not write
+        it). Never for an uninstalled WordPress: the start brings Tor up
+        before setup, so "reachable" alone is true of a site nobody has
+        set up, and with the marker the menubar shows no setup window
+        again. Asked on every ready pass until it is written; an answer
+        that is not a yes writes nothing."""
+        if self._setup_marked:
+            return
+        setup_marker = self._marker(".setup_complete")
+        if os.path.exists(setup_marker):
+            self._setup_marked = True
+            return
+        installed = self._wp_installed
+        if installed is None:
+            installed = self.check_wp_installed()
+        if installed is not True:
+            return
+        try:
+            with open(setup_marker, "w") as f:
+                f.write("1")
+            self._setup_marked = True
+        except OSError:
+            pass
 
     # -- the probe (the menubar's check_tor_reachability) ----------------
 
