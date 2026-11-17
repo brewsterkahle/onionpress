@@ -44,11 +44,6 @@ const ONIONPRESS_BLUESKY_LOCK         = 'onionpress_social_bluesky_lock';
 const ONIONPRESS_BLUESKY_OPTS_OPT     = 'onionpress_social_bluesky_opts';
 const ONIONPRESS_BLUESKY_CRON_HOOK    = 'onionpress_social_bluesky_sync';
 
-// Route everything through the bulk-outgoing Tor daemon per the
-// "separate Tor in/out" rule. onionpress-tor stays focused on the
-// hosted onion service.
-const ONIONPRESS_BLUESKY_SOCKS_PROXY  = 'onionheaven:9050';
-
 // Public AppView — unauthenticated reads. No instance to configure,
 // unlike Mastodon.
 const ONIONPRESS_BLUESKY_API_HOST     = 'public.api.bsky.app';
@@ -57,8 +52,6 @@ const ONIONPRESS_BLUESKY_API_HOST     = 'public.api.bsky.app';
 const ONIONPRESS_BLUESKY_TICK_BUDGET_SEC = 25;
 const ONIONPRESS_BLUESKY_PAGES_PER_TICK  = 8;
 const ONIONPRESS_BLUESKY_PER_PAGE        = 100;
-const ONIONPRESS_BLUESKY_HTTP_TIMEOUT    = 45;
-
 // Daemon-style outer loop with token-lock heartbeat, same shape as the
 // Mastodon importer.
 const ONIONPRESS_BLUESKY_DAEMON_LOCK      = 'onionpress_social_bluesky_daemon_lock';
@@ -174,10 +167,7 @@ function onionpress_bluesky_import_page() {
             // Fire-and-forget — kick the daemon via a loopback wp-cron
             // call so the admin request doesn't block for 30 min.
             delete_option( ONIONPRESS_BLUESKY_DAEMON_LOCK );
-            delete_transient( 'doing_cron' );
-            wp_schedule_single_event( time(), ONIONPRESS_BLUESKY_CRON_HOOK );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_social_run_now( ONIONPRESS_BLUESKY_CRON_HOOK );
             $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_bluesky_reset'] ) ) {
             check_admin_referer( 'onionpress_bluesky_reset', 'onionpress_bluesky_reset_nonce' );
@@ -668,7 +658,7 @@ function onionpress_bluesky_resolve_handle( $handle ) {
         if ( is_wp_error( $mock ) ) return $mock;
         return (string) $mock;
     }
-    $r = onionpress_bluesky_api_get(
+    $r = onionpress_social_tor_get(
         'https://' . ONIONPRESS_BLUESKY_API_HOST . '/xrpc/com.atproto.identity.resolveHandle?handle=' . rawurlencode( $handle )
     );
     if ( is_wp_error( $r ) ) return $r;
@@ -681,7 +671,7 @@ function onionpress_bluesky_resolve_handle( $handle ) {
 function onionpress_bluesky_fetch_profile( $did ) {
     $mock = apply_filters( 'onionpress_bluesky_fetch_profile_mock', null, $did );
     if ( $mock !== null ) return $mock;
-    $r = onionpress_bluesky_api_get(
+    $r = onionpress_social_tor_get(
         'https://' . ONIONPRESS_BLUESKY_API_HOST . '/xrpc/app.bsky.actor.getProfile?actor=' . rawurlencode( $did )
     );
     if ( is_wp_error( $r ) ) return $r;
@@ -714,66 +704,12 @@ function onionpress_bluesky_fetch_feed( $did, $cursor = '' ) {
     }
 
     $url = 'https://' . ONIONPRESS_BLUESKY_API_HOST . '/xrpc/app.bsky.feed.getAuthorFeed?' . http_build_query( $params );
-    $r = onionpress_bluesky_api_get( $url );
+    $r = onionpress_social_tor_get( $url );
     if ( is_wp_error( $r ) ) return $r;
     if ( (int) $r['code'] !== 200 ) {
         return new WP_Error( 'bluesky_http', 'HTTP ' . $r['code'] . ' from public.api.bsky.app' );
     }
     return is_array( $r['json'] ) ? $r['json'] : array( 'feed' => array() );
-}
-
-function onionpress_bluesky_api_get( $url ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return new WP_Error( 'no_curl', 'curl extension required for Bluesky import' );
-    }
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
-        CURLOPT_PROXY          => ONIONPRESS_BLUESKY_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => ONIONPRESS_BLUESKY_HTTP_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-        CURLOPT_HTTPHEADER     => array( 'Accept: application/json' ),
-    ) );
-    $body = curl_exec( $ch );
-    if ( $body === false ) {
-        $err = curl_error( $ch );
-        curl_close( $ch );
-        return new WP_Error( 'curl', $err ?: 'curl failure' );
-    }
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    curl_close( $ch );
-    $json = json_decode( $body, true );
-    return array( 'code' => $code, 'body' => $body, 'json' => is_array( $json ) ? $json : null );
-}
-
-function onionpress_bluesky_fetch_file( $url, $dest_path ) {
-    $fh = @fopen( $dest_path, 'wb' );
-    if ( ! $fh ) return new WP_Error( 'io', 'open temp failed' );
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_FILE           => $fh,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 5,
-        CURLOPT_PROXY          => ONIONPRESS_BLUESKY_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => 120,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-    ) );
-    $ok = curl_exec( $ch );
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    $err = curl_error( $ch );
-    curl_close( $ch );
-    fclose( $fh );
-    if ( ! $ok || $code < 200 || $code >= 300 ) {
-        @unlink( $dest_path );
-        return new WP_Error( 'curl', 'HTTP ' . $code . ' ' . $err );
-    }
-    return $dest_path;
 }
 
 // ──────────────────────── import + rendering ────────────────────────
@@ -802,21 +738,6 @@ function onionpress_bluesky_feed_item_uri( $item ) {
  * Import one feed-view item. Returns 'imported' | 'skipped' | 'errors'.
  */
 /**
- * Look up a post by its `_source_id` postmeta. Returns post ID or 0.
- */
-function onionpress_bluesky_find_post_by_source_id( $source_id ) {
-    $posts = get_posts( array(
-        'post_type'      => 'post',
-        'meta_key'       => '_source_id',
-        'meta_value'     => $source_id,
-        'post_status'    => 'any',
-        'posts_per_page' => 1,
-        'fields'         => 'ids',
-    ) );
-    return ! empty( $posts ) ? (int) $posts[0] : 0;
-}
-
-/**
  * Look up a comment by its `_source_id` commentmeta. Used for dedup
  * and for nesting a reply under another reply that's already been
  * folded into a thread.
@@ -838,7 +759,7 @@ function onionpress_bluesky_find_comment_by_source_id( $source_id ) {
  * yet imported.
  */
 function onionpress_bluesky_find_attachable_post( $parent_source_id ) {
-    $pid = onionpress_bluesky_find_post_by_source_id( $parent_source_id );
+    $pid = onionpress_social_find_post_by_source_id( $parent_source_id );
     if ( $pid ) return $pid;
     $cid = onionpress_bluesky_find_comment_by_source_id( $parent_source_id );
     if ( $cid ) {
@@ -867,7 +788,7 @@ function onionpress_bluesky_fetch_post_by_uri( $uri ) {
     if ( $uri === '' ) return null;
     $url = 'https://' . ONIONPRESS_BLUESKY_API_HOST
          . '/xrpc/app.bsky.feed.getPosts?uris=' . rawurlencode( $uri );
-    $r = onionpress_bluesky_api_get( $url );
+    $r = onionpress_social_tor_get( $url );
     if ( is_wp_error( $r ) ) return null;
     if ( (int) $r['code'] !== 200 ) return null;
     $posts = (array) ( $r['json']['posts'] ?? array() );
@@ -1524,7 +1445,7 @@ function onionpress_bluesky_sideload_media( $post_id, $at_uri, $images ) {
         }
         $tmp = wp_tempnam( 'bsky-' . $i . '.' . $ext );
         if ( ! $tmp ) continue;
-        $dl = onionpress_bluesky_fetch_file( $src, $tmp );
+        $dl = onionpress_social_fetch_file( $src, $tmp );
         if ( is_wp_error( $dl ) ) continue;
 
         $file_array = array(

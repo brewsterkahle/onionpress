@@ -777,6 +777,27 @@ class StatusView(NamedTuple):
     actions: frozenset
 
 
+def ready_steps_due(is_ready, was_ready, waiting, wp_installed):
+    """(run, waiting): whether a UI runs its ready steps now (the setup
+    window's completion, the first run's browser) and whether they wait
+    for WordPress's install.
+
+    The daemon's ready is the onion service answering, and the start
+    brings Tor up before setup: a site whose WordPress is not installed
+    (*wp_installed* is False; None is unknown and waits for nothing) has
+    only the installer to show, which the image refuses to every Tor
+    visitor. Its ready steps run on the first pass that no longer says
+    False, not on the pass that turned ready. *was_ready* is the pass
+    before, *waiting* this function's last answer."""
+    if not is_ready:
+        return False, False
+    if was_ready and not waiting:
+        return False, False
+    if wp_installed is False:
+        return False, True
+    return True, False
+
+
 def status_view(state: Optional[dict], now: float, *, daemon_seen: bool = True,
                 start_failed: bool = False, onionname: Optional[str] = None) -> StatusView:
     """The view of *state*, daemon-state.json's document

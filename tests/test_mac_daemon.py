@@ -220,6 +220,9 @@ class FakeHealth:
     def check_internet_connectivity(self):
         return self.internet
 
+    def network_reachable(self):
+        return self.internet
+
     def check_vm_wedge(self):
         return None
 
@@ -311,9 +314,57 @@ class _DaemonCase(unittest.TestCase):
             time.sleep(0.02)
 
 
+class TestSetupCompleteNeedsAnInstalledWordPress(_DaemonCase):
+    """The start brings Tor up before setup, so a ready site can be one
+    nobody has set up. The daemon's `.setup_complete` is for an installed
+    WordPress only: with the marker the menubar shows no setup window
+    again (found live: a first run whose setup window timed out was left
+    marked complete, and Tor Browser opened on the refused installer)."""
+
+    def _marker(self):
+        return os.path.join(self.dir, ".setup_complete")
+
+    def test_not_written_while_wordpress_is_not_installed(self):
+        self.docker.answers["wp core is-installed"] = (1, "")
+        self.tick()
+        self.assertTrue(self.state()["is_ready"])
+        self.assertFalse(os.path.exists(self._marker()))
+        self.tick()
+        self.assertFalse(os.path.exists(self._marker()))
+
+    def test_written_on_the_ready_pass_that_finds_it_installed(self):
+        self.docker.answers["wp core is-installed"] = (1, "")
+        self.tick()
+        self.assertFalse(os.path.exists(self._marker()))
+        # Setup ran: the site was ready all along, no new transition.
+        self.docker.answers["wp core is-installed"] = (0, "")
+        self.tick()
+        self.tick()
+        self.assertTrue(self.state()["is_ready"])
+        self.assertTrue(os.path.exists(self._marker()))
+
+    def test_an_unknown_answer_writes_nothing(self):
+        self.d._wp_installed = None
+        self.d.check_wp_installed = lambda: None
+        self.d._mark_setup_complete_once_installed()
+        self.assertFalse(os.path.exists(self._marker()))
+        self.d.check_wp_installed = lambda: True
+        self.d._mark_setup_complete_once_installed()
+        self.assertTrue(os.path.exists(self._marker()))
+
+    def test_the_one_writer_in_the_daemon(self):
+        src = _read("src/onionpress/daemon.py")
+        self.assertEqual(src.count('self._marker(".setup_complete")'), 1)
+        body = src[src.index("def _mark_setup_complete_once_installed"):]
+        body = body[:body.index("\n    def ", 10)]
+        self.assertIn('self._marker(".setup_complete")', body)
+        self.assertIn("if installed is not True:", body)
+
+
 class TestStatusPass(_DaemonCase):
 
     def test_a_running_ready_stack_lands_in_the_state_file(self):
+        self.docker.answers["wp core is-installed"] = ""       # an installed site
         self.tick()
         s = self.state()
         self.assertEqual(s["pid"], os.getpid())
@@ -430,6 +481,19 @@ class TestStatusPass(_DaemonCase):
         self.assertIsNotNone(s["yellow_since"])
         self.assertEqual(s["probe"]["code"], "000:rc=28")
         self.assertIsNotNone(self.d._recovery.trigger.failing_since)
+
+    def test_time_offline_does_not_count_towards_stuck(self):
+        """#139: after a long outage the daemon read "stuck" (Slow to
+        connect) as soon as the network came back."""
+        self.tick()
+        self.health.internet = False
+        self.tick()
+        self.assertEqual(self.state()["display_state"], "offline")
+        self.d._yellow_since -= 3600
+        self.health.internet = True
+        self.health.external = (False, "000:rc=28")
+        self.tick()
+        self.assertEqual(self.state()["display_state"], "starting")
 
     def test_the_daemon_runs_the_shared_recovery_step(self):
         """Issue #480: one #266 driver. The daemon's trigger is a
@@ -857,7 +921,87 @@ class TestLaunchdAgent(unittest.TestCase):
                 mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
-        self.assertEqual(calls, [["kickstart", "gui/501/org.onionpress.daemon"]])
+        # (launchd's `print` is asked which program it holds: none named here)
+        self.assertEqual([c for c in calls if c[0] != "print"],
+                         [["kickstart", "gui/501/org.onionpress.daemon"]])
+
+    def _launchd(self, program, calls, bootstrap_rc=0):
+        """A launchd holding the agent loaded, not running, for *program*
+        ('' : its print names none); bootout unloads it, bootstrap loads
+        and runs it."""
+        held = {"loaded": True, "pid": None, "program": program}
+
+        def launchctl(args, timeout=20):
+            calls.append(args)
+            if args[0] == "print":
+                if not held["loaded"]:
+                    return subprocess.CompletedProcess(args, 113, "", "Could not find service")
+                out = "gui/501/org.onionpress.daemon = {\n\tstate = spawn scheduled\n"
+                if held["program"]:
+                    out += f"\tprogram = {held['program']}\n"
+                if held["pid"]:
+                    out += f"\tpid = {held['pid']}\n"
+                return subprocess.CompletedProcess(args, 0, out + "}\n", "")
+            if args[0] == "bootout":
+                held["loaded"] = False
+            elif args[0] == "bootstrap":
+                if bootstrap_rc:
+                    return subprocess.CompletedProcess(args, bootstrap_rc, "", "Bootstrap failed: 5")
+                held.update(loaded=True, pid=4242, program=self.launcher)
+            elif args[0] == "kickstart":
+                held["pid"] = 7
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return launchctl
+
+    def _start(self, launchctl):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"), \
+                mock.patch.object(op_daemon_client.time, "sleep", lambda s: None):
+            return op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
+
+    def test_a_job_loaded_for_another_bundle_is_loaded_again(self):
+        """launchd reads a plist only at bootstrap: an agent it loaded at
+        login from a bundle since deleted keeps that program, and a
+        kickstart of it never starts (found live: every `daemon start`
+        timed out for 20 minutes beside a correct plist on disk)."""
+        calls = []
+        ok = self._start(self._launchd("/Applications/OnionPress.app/Contents/MacOS/onionpress", calls))
+        self.assertTrue(ok)
+        verbs = [c for c in calls if c[0] != "print"]
+        self.assertEqual(verbs, [["bootout", "gui/501/org.onionpress.daemon"],
+                                 ["bootstrap", "gui/501", self.plist]])
+        self.assertTrue(any("another bundle" in line and "/Applications/OnionPress.app" in line
+                            for line in self.lines), self.lines)
+
+    def test_a_job_loaded_for_this_bundle_is_kickstarted(self):
+        for program in (self.launcher, ""):
+            with self.subTest(program=program):
+                calls = []
+                self.assertTrue(self._start(self._launchd(program, calls)))
+                self.assertEqual([c for c in calls if c[0] != "print"],
+                                 [["kickstart", "gui/501/org.onionpress.daemon"]])
+
+    def test_a_link_to_this_bundle_is_this_bundle(self):
+        link = os.path.join(self.dir, "linked-launcher")
+        os.symlink(self.launcher, link)
+        calls = []
+        self.assertTrue(self._start(self._launchd(link, calls)))
+        self.assertEqual([c for c in calls if c[0] != "print"],
+                         [["kickstart", "gui/501/org.onionpress.daemon"]])
+
+    def test_a_refused_reload_is_reported(self):
+        calls = []
+        ok = self._start(self._launchd("/gone/onionpress", calls, bootstrap_rc=5))
+        self.assertFalse(ok)
+        self.assertTrue(any("launchctl failed (rc 5)" in line for line in self.lines), self.lines)
+
+    def test_loaded_program(self):
+        calls = []
+        with mock.patch.object(op_daemon_client, "_launchctl", self._launchd("/a b/onionpress", calls)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
+            self.assertEqual(op_daemon_client.agent_loaded_program(self.dir), "/a b/onionpress")
+            op_daemon_client._launchctl(["bootout", "x"])
+            self.assertEqual(op_daemon_client.agent_loaded_program(self.dir), "")
 
     def test_stop_boots_out_and_marks_a_quit(self):
         calls = []
