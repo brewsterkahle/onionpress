@@ -6,9 +6,11 @@ report (docs/E2E-TESTING.md, e2e/harness/)."""
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
@@ -262,6 +264,65 @@ class SafetyTest(unittest.TestCase):
             safety.check_daemon_agent(theirs, 0, root, label)
         with self.assertRaises(safety.UnsafeTarget):
             safety.node_agent_label(daemon_client.default_data_dir())
+
+    def _dmg_node(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        node = MacNode("mac-1", None, root, root=root, real_home=root,
+                       app_source=("dmg", "/builds/onionpress.dmg"), port_offset=31000)
+        os.makedirs(node.dir)
+        return node
+
+    def test_a_dmg_is_attached_as_the_nodes_own_copy(self):
+        """An image somebody has open (Finder, to install it) is not
+        attached twice: the attach answers with their mount and nothing
+        is at --mountPoint (found live: `ditto: Cannot get the real path
+        for source`, and the eject that followed named the node's empty
+        folder). The node attaches a copy of the image, at its own mount
+        point, and ejects only that."""
+        from harness.nodes import mac as mac_module
+        node = self._dmg_node()
+        mnt, image = os.path.join(node.dir, "dmg"), os.path.join(node.dir, "onionpress.dmg")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(list(argv))
+            if argv[0] == "cp":
+                open(argv[-1], "w").close()
+            elif argv[:3] == ["diskutil", "image", "attach"]:
+                os.makedirs(os.path.join(mnt, "OnionPress.app"))
+            return mock.Mock(ok=True, stdout="", stderr="")
+        with mock.patch.object(mac_module, "run", run):
+            node._copy_app()
+        self.assertEqual(calls[0], ["cp", "-c", "/builds/onionpress.dmg", image])
+        attach = calls[1]
+        self.assertEqual(attach[:3], ["diskutil", "image", "attach"])
+        self.assertEqual(attach[-1], image)
+        self.assertEqual(attach[attach.index("--mountPoint") + 1], mnt)
+        self.assertIn(["ditto", os.path.join(mnt, "OnionPress.app"), node.app], calls)
+        self.assertIn(["diskutil", "eject", mnt], calls)
+        self.assertFalse([c for c in calls if "/builds/onionpress.dmg" in c[1:] and c[0] != "cp"], calls)
+        self.assertFalse([c for c in calls if any("/Volumes" in a for a in c)], calls)
+        self.assertFalse(os.path.exists(image))
+
+    def test_a_dmg_that_mounts_elsewhere_is_said_and_its_mount_left_alone(self):
+        from harness.nodes import mac as mac_module
+        node = self._dmg_node()
+        mnt = os.path.join(node.dir, "dmg")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(list(argv))
+            if argv[0] == "cp":
+                open(argv[-1], "w").close()
+            out = "/dev/disk5s1\tApple_APFS_Volume\t/Volumes/OnionPress\n"
+            return mock.Mock(ok=True, stdout=out if "attach" in argv else "", stderr="")
+        with mock.patch.object(mac_module, "run", run):
+            with self.assertRaisesRegex(RuntimeError, "no OnionPress.app is at .*/Volumes/OnionPress"):
+                node._copy_app()
+        self.assertFalse([c for c in calls if c[0] == "ditto"])
+        self.assertEqual([c for c in calls if "eject" in c or "detach" in c],
+                         [["diskutil", "eject", mnt]])
 
     def test_daemon_label_is_the_products(self):
         with open(os.path.join(PROJECT_DIR, "src", "onionpress", "daemon_client.py"), encoding="utf-8") as f:
