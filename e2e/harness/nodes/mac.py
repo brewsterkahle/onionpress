@@ -155,19 +155,36 @@ class MacNode(Node):
         elif kind == "dmg":
             mnt = os.path.join(self.dir, "dmg")
             os.makedirs(mnt, exist_ok=True)
+            # A copy of the image, the node's own (a clone where the
+            # filesystem has them): an image somebody has open already
+            # (Finder, to install it) is not attached a second time, the
+            # attach answers with that mount (/Volumes/OnionPress) and
+            # nothing is at --mountPoint. The copy is another image file,
+            # mounted where asked and ejected without touching theirs.
+            image = os.path.join(self.dir, "onionpress.dmg")
+            run(["cp", "-c", path, image], timeout=600, log=self.log, check=True)
             # diskutil image: hdiutil attach is deprecated (macOS 27), and
             # the DMG build moved to diskutil too (PR #290).
             r = run(["diskutil", "image", "attach", "--mountOptions", "nobrowse", "--readOnly",
-                     "--mountPoint", mnt, path], timeout=300, log=self.log)
+                     "--mountPoint", mnt, image], timeout=300, log=self.log)
             if not r.ok:
                 run(["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen",
-                     "-mountpoint", mnt, path], timeout=300, log=self.log, check=True)
+                     "-mountpoint", mnt, image], timeout=300, log=self.log, check=True)
             try:
-                run(["ditto", os.path.join(mnt, "OnionPress.app"), self.app],
-                    timeout=600, log=self.log, check=True)
+                source = os.path.join(mnt, "OnionPress.app")
+                if not os.path.isdir(source):
+                    raise RuntimeError(
+                        f"{path} is attached, but no OnionPress.app is at {mnt}: "
+                        f"{(r.stdout or '').strip() or 'the attach named no mount'}")
+                run(["ditto", source, self.app], timeout=600, log=self.log, check=True)
             finally:
+                # Only ever the node's own mount point.
                 if not run(["diskutil", "eject", mnt], timeout=120, log=self.log).ok:
                     run(["hdiutil", "detach", "-force", mnt], timeout=120, log=self.log)
+                try:
+                    os.unlink(image)
+                except OSError:
+                    pass
         else:
             raise ValueError(f"unknown Mac build source {kind}")
         run(["xattr", "-dr", "com.apple.quarantine", self.app], timeout=120, log=self.log)
