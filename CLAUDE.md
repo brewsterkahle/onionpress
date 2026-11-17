@@ -514,6 +514,19 @@
   processes never write one RotatingLog.
 - `.setup_complete` is written by every completed setup path
   (`setup_logic.mark_setup_complete`). `tests/test_setup_complete_marker.py`.
+- **Ready is not set up**: the start brings Tor up before setup, so the
+  daemon writes `.setup_complete` only for an installed WordPress
+  (`_mark_setup_complete_once_installed`, asked on every ready pass), and
+  a UI's ready steps (the setup window's completion, the first run's
+  browser) wait for the install (`ui_client.ready_steps_due`). A first run
+  that timed out ends like a failed start, ticking no step.
+  `TestSetupCompleteNeedsAnInstalledWordPress` in `tests/test_mac_daemon.py`,
+  `TestReadySteps` in `tests/test_ui_client.py`.
+- **`start_agent` loads the agent again when launchd holds it for another
+  bundle** (`agent_loaded_program`: launchd reads a plist only at
+  bootstrap, and a kickstart of a deleted bundle's job never starts):
+  bootout, then bootstrap, only while it is not running.
+  `TestLaunchdAgent` in `tests/test_mac_daemon.py`.
 - Quit takes the site down unless `QUIT_KEEPS_SITE_RUNNING=yes`. Update and
   uninstall stop the daemon first (on both platforms).
 - **A key import or restore stops no daemon** (#407, as the Mac always
