@@ -459,7 +459,10 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_UNZIP, "no unzip CLI")
     def test_the_check_after_extraction_catches_what_unzip_creates(self):
-        staging, _ = _staging_with_links(self.tmp, {"wp-content": "{home}"},
+        # A link that stays inside the tree: every unzip makes it. (One
+        # that leaves it is the next test's: macOS 27's unzip refuses
+        # those itself.)
+        staging, _ = _staging_with_links(self.tmp, {"wp-content": "database"},
                                          name="evil")
         legacy = _zip_tree(staging, os.path.join(self.tmp, "evil.zip"), PW)
         dest = os.path.join(self.tmp, "dest")
@@ -471,6 +474,28 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
                 backup.extract_archive(legacy, PW, dest, lambda m: None)
         # unzip did make the link; the check refused it.
         self.assertTrue(os.path.islink(os.path.join(dest, "wp-content")))
+
+    @unittest.skipUnless(HAVE_UNZIP, "no unzip CLI")
+    def test_a_link_out_of_the_tree_is_refused_or_never_made(self):
+        """With the member check out of the way, a link to a folder
+        outside the tree ends one of two ways, by the unzip at hand:
+        unzip makes it and the check after extraction refuses the
+        archive, or unzip refuses it itself ("symlink error", rc 2:
+        macOS 27's), the extraction falls back to zipfile, which writes a
+        link member as a plain file. Never an accepted link."""
+        staging, home = _staging_with_links(self.tmp, {"wp-content": "{home}"},
+                                            name="evil")
+        legacy = _zip_tree(staging, os.path.join(self.tmp, "evil.zip"), PW)
+        dest = os.path.join(self.tmp, "dest")
+        os.makedirs(dest)
+        with mock.patch.object(backup_archive, "validate_archive_members"):
+            try:
+                backup.extract_archive(legacy, PW, dest, lambda m: None)
+            except ValueError as e:
+                self.assertIn("symbolic link", str(e))
+            else:
+                self.assertFalse(os.path.islink(os.path.join(dest, "wp-content")))
+        self.assertEqual(sorted(os.listdir(home)), [".ssh", "secret.txt"])
 
 
 class TestLauncherPathsRefuseLinks(unittest.TestCase):
