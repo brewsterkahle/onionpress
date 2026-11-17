@@ -56,6 +56,22 @@ images ship with it.
   release line, Share Now and the archive.org login go through the host.
 - The tor image serves its healthcheck and redirect from Python with
   connection limits, no longer from shell scripts (#559).
+- **Offline now reads "Offline"** (#139). A network that is connected
+  but leads nowhere (Wi-Fi with no route, a captive portal) showed
+  "Connecting to Tor…" and then "Slow to connect — try Restart". The
+  daemon now reads the routing table and asks Tor whether it reaches any
+  relay, and the time spent offline no longer counts towards "slow to
+  connect".
+- **Sync now starts the sync** (#409). The Mastodon, Bluesky and blog
+  importers' Sync now, the blog's Start archiving and the Wayback kick
+  asked for wp-cron at an address nothing answered inside the container;
+  the import waited for the next visit to the site.
+- Mac: a first run no longer stalls when launchd still holds the daemon
+  of an app that was moved or deleted, and setup is no longer marked
+  complete before WordPress is installed (#578).
+- Mac: the browser extension's helper (its native messaging host) can
+  start from the installed app (#318). It could not before, so the
+  extension always assumed the first account's port.
 - `onionpress status` asks Tor itself whether it has bootstrapped; it
   could say `"tor_bootstrapped": false` about a site that was up (#568).
 - A restore keeps the site on its own port, instead of moving it to
@@ -78,6 +94,12 @@ images ship with it.
 ### OnionHeaven hub and OnionHome operators
 - The tor image's healthcheck answers a plain `OK` on 127.0.0.1 only and
   no longer names its content address (#559); nothing read the old body.
+- **A takeover is released only by the site's own signed `/online`**
+  (#455). The worker's audit of the healthcheck address is logged
+  (`unsigned_answer`, `confirmed_dead`) and releases nothing: anything
+  holding the healthcheck key, or a cached page, could end a failover
+  of a site that was down. A live site is released by its next
+  heartbeat, within a minute. Nodes need no change.
 - As before: take a backup and note the registry and name counts before
   updating, compare them afterwards, and never downgrade.
 
