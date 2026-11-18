@@ -49,6 +49,9 @@ class _BindSocket:
                 self.busy[addr[1]] = left - 1
             raise OSError(48, "Address already in use")
 
+    def setsockopt(self, *a):
+        pass
+
     def close(self):
         pass
 
@@ -82,14 +85,14 @@ class TestWaitForPreviousPort(_Case):
     def test_waits_for_the_previous_instance_s_port_then_removes_the_sentinel(self):
         self.write_sentinel("10000")
         bound = self.wait(busy={18080: 2})
-        self.assertEqual(bound, [("127.0.0.1", 18080)] * 3)
+        self.assertEqual(bound, [("127.0.0.1", 18080)] * 3 + [("0.0.0.0", 18080)])
         self.assertEqual(self.sleeps, [0.5, 0.5])
         self.assertEqual(self.logged, ["Waiting for the previous instance's port 18080 to free"])
         self.assertFalse(os.path.exists(self.sentinel))
 
     def test_a_free_port_is_not_waited_for(self):
         self.write_sentinel("0\n")
-        self.assertEqual(self.wait(), [("127.0.0.1", 8080)])
+        self.assertEqual(self.wait(), [("127.0.0.1", 8080), ("0.0.0.0", 8080)])
         self.assertEqual(self.sleeps, [])
         self.assertEqual(self.logged, [])
 
@@ -147,7 +150,8 @@ class TestResolveAtStart(_Case):
         self.assertEqual(pc, ports.PortConfig.from_offset(10000))
         read.assert_called_once_with(docker=docker)
         det.assert_not_called()
-        self.assertEqual(bound, [("127.0.0.1", 8080)], "the sentinel was waited on first")
+        self.assertEqual(bound, [("127.0.0.1", 8080), ("0.0.0.0", 8080)],
+                         "the sentinel was waited on first")
         self.assertFalse(os.path.exists(self.sentinel))
 
     def test_then_the_probe(self):
@@ -158,6 +162,55 @@ class TestResolveAtStart(_Case):
     def test_a_unicode_digit_is_not_a_preset(self):
         _pc, read, _det, _d, _b = self.resolve("\u0663")
         read.assert_called_once()
+
+
+class TestThePortProbe(unittest.TestCase):
+    """`_port_is_free` on real sockets: a listener on either address is
+    seen, and what a stopped listener leaves behind is not (a local
+    request less than a minute before a stop and start moved a Linux site
+    from 8080 to 18080: the plain bind was refused by TIME_WAIT sockets
+    for longer than `wait_for_previous_port` waits)."""
+
+    def listener(self, host):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # As Docker's listeners (Go's net.Listen) set it.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, 0))
+        s.listen()
+        self.addCleanup(s.close)
+        return s, s.getsockname()[1]
+
+    def test_a_listener_on_either_address_is_seen(self):
+        for host in ("127.0.0.1", "0.0.0.0"):
+            with self.subTest(host=host):
+                _s, port = self.listener(host)
+                self.assertFalse(ports._port_is_free(port))
+
+    def test_a_stopped_listeners_time_wait_is_not_a_holder(self):
+        for host in ("127.0.0.1", "0.0.0.0"):
+            with self.subTest(host=host):
+                s, port = self.listener(host)
+                client = socket.create_connection(("127.0.0.1", port))
+                served, _ = s.accept()
+                served.close()          # the listener's side closes first:
+                client.recv(1)          # its socket is the one in TIME_WAIT
+                client.close()
+                s.close()
+                plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    plain.bind(("127.0.0.1", port))
+                    self.skipTest("this system left no TIME_WAIT socket")
+                except OSError:
+                    pass
+                finally:
+                    plain.close()
+                self.assertTrue(ports._port_is_free(port))
+
+    def test_detection_and_the_wait_use_the_one_probe(self):
+        with open(ports.__file__) as f:
+            src = f.read()
+        self.assertEqual(src.count(".bind("), 1)
+        self.assertIn("SO_REUSEADDR", src)
 
 
 class TestDetectPortOffsetLogs(unittest.TestCase):
