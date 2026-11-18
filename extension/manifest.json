@@ -3,6 +3,7 @@
   "name": "OnionPress",
   "version": "1.2.0",
   "description": "Browse .onion sites in any browser. Requires OnionPress to be running.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsVhIilIIDJi0wN26efKxycsxBzUpn33rZzNb+FDPNFD5PX9pNj3d3B2J/Lqzi42iCt/xu64aJH2jtL01RPf6F+ch3ZIb2hLt48bIgOscBNtJmDVwKnEdMjVOi7Hh/Bcos7+nG2CWQIw+fEiX2Ip1uEYTXfphR4oV4gh742a/Kbf67/2JsRCEn+bK9PpR9AdjzICr6or7EsaO+FsQ0KlM6NPKTmCCbEIlwCRvwM86BGEHAIGCm8k+gxOiQ1OKQupVOttSrtl884O9BrUZGXR8w//fQIoAfqTTwVoO8sa1pqBJdxsmFGDGyquLvwNNn7k3/vALeN7J9T5ibsrvf19kQQIDAQAB",
   "permissions": [
     "proxy",
     "nativeMessaging",

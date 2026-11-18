@@ -1433,6 +1433,11 @@
   package's `.py` inside a bundle (no Python on a Mac runs it); a bundle
   without the wrapper gets no manifests. Not live-tested on a Mac.
   `tests/test_native_host_bundle.py`.
+- **Chrome's manifest names one extension ID, never a wildcard** (Chrome
+  allows none in `allowed_origins`): `extension/manifest.json`'s `key`
+  fixes the ID, `install_native_messaging.CHROME_EXTENSION_ID` is the ID
+  that key gives. Only the public key is kept. `TestChromeExtensionId` in
+  `tests/test_install_native_messaging.py`.
 
 ## Cloudflare Tunnel Runs on Both Platforms (issue #352)
 - `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`.
