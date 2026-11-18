@@ -123,7 +123,11 @@ class TestRunDaemonCommand(unittest.TestCase):
         return rc, out.getvalue()
 
     def test_serve_is_the_default(self):
-        with mock.patch.object(op_daemon, "Daemon") as D:
+        # A Mac's serve takes the data dir's lock (issue #233): a real dir.
+        self.paths.data_dir = tempfile.mkdtemp(prefix="op-daemon-serve-")
+        self.addCleanup(shutil.rmtree, self.paths.data_dir, True)
+        with mock.patch.object(op_daemon, "Daemon") as D, \
+                mock.patch.object(op_daemon, "detect_os", return_value=op_daemon.OS.MACOS):
             self.assertEqual(self.cmd(None, version="1.2", launcher_script="/l")[0], 0)
         D.assert_called_once_with(self.paths, version="1.2", launcher_script="/l")
         D.return_value.run.assert_called_once()
