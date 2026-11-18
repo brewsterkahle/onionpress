@@ -69,6 +69,10 @@ images ship with it.
 - Mac: a first run no longer stalls when launchd still holds the daemon
   of an app that was moved or deleted, and setup is no longer marked
   complete before WordPress is installed (#578).
+- Browser extension: an onion site's redirects and cookies now reach
+  the browser, so "open my site" through the extension arrives logged in
+  and other onion sites' logins work (#323). A redirect that leaves
+  .onion is refused.
 - Mac: the browser extension's helper (its native messaging host) can
   start from the installed app (#318). It could not before, so the
   extension always assumed the first account's port.
