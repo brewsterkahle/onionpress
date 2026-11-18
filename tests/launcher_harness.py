@@ -170,6 +170,10 @@ class Launcher:
             "HOME": self.home,
             "TMPDIR": self.tmp,
             "LANG": "C",
+            # The launchers fall back to /run/user/$UID, where a developer's
+            # live rootless Docker would answer (its child_pid adds a NOTE
+            # to every Linux start trace).
+            "XDG_RUNTIME_DIR": os.path.join(self.tmp, "run"),
             "ONIONPRESS_PORT_OFFSET": "0",
             "OP_TEST_STUBS": self.stubs,
             "OP_CALLS": self.calls_file,
