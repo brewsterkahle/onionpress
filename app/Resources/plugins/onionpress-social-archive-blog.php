@@ -46,11 +46,6 @@ const ONIONPRESS_BLOG_DAEMON_LOCK        = 'onionpress_social_blog_daemon_lock';
 const ONIONPRESS_BLOG_CRON_HOOK          = 'onionpress_social_blog_sync';
 const ONIONPRESS_BLOG_CRON_SCHEDULE      = 'onionpress_blog_30min';
 
-// Route everything through the bulk-outgoing Tor daemon. brewster.kahle.org
-// is clearnet, but SOCKS5_HOSTNAME resolves clearnet names fine and this
-// keeps the project rule "never make direct clearnet requests" intact.
-const ONIONPRESS_BLOG_SOCKS_PROXY = 'onionheaven:9050';
-
 // Per-tick budget. Per-page is intentionally small (20) so a single
 // tick can normally complete a full page within the 25-second wall-
 // clock budget — even when each post sideloads multiple images over
@@ -68,7 +63,6 @@ const ONIONPRESS_BLOG_PER_PAGE        = 20;
 const ONIONPRESS_BLOG_DAEMON_MAX_SEC   = 1800; // 30 min per invocation
 const ONIONPRESS_BLOG_DAEMON_STALE_SEC = 300;  // heartbeat older than this = dead
 const ONIONPRESS_BLOG_DAEMON_IDLE_SEC  = 3;    // politeness pause between ticks
-const ONIONPRESS_BLOG_HTTP_TIMEOUT     = 45;
 
 // Edits pass: re-check the source's recently-modified posts every Nth
 // tick to mirror edits. At 30-min cron, every 4th tick = once every 2h —
@@ -266,10 +260,7 @@ function onionpress_blog_import_page() {
         } elseif ( isset( $_POST['onionpress_blog_sync_now'] ) ) {
             check_admin_referer( 'onionpress_blog_sync_now', 'onionpress_blog_sync_nonce' );
             delete_option( ONIONPRESS_BLOG_DAEMON_LOCK );
-            delete_transient( 'doing_cron' );
-            wp_schedule_single_event( time(), ONIONPRESS_BLOG_CRON_HOOK );
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-            wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+            onionpress_social_run_now( ONIONPRESS_BLOG_CRON_HOOK );
             $notice = array( 'level' => 'success', 'message' => 'Sync started. Progress below — this page will refresh automatically.' );
         } elseif ( isset( $_POST['onionpress_blog_reset'] ) ) {
             check_admin_referer( 'onionpress_blog_reset', 'onionpress_blog_reset_nonce' );
@@ -501,7 +492,7 @@ function onionpress_blog_handle_save_url_post() {
     $base_url = $parsed['base_url'];
 
     // Probe the REST API root to catch typos and disabled-REST sites early.
-    $probe = onionpress_blog_api_get( $base_url . '/wp-json/' );
+    $probe = onionpress_social_tor_get( $base_url . '/wp-json/', 5 );
     if ( is_wp_error( $probe ) ) {
         return array( 'level' => 'error', 'message' => 'Could not reach <code>' . esc_html( $host ) . '</code> over Tor: ' . esc_html( $probe->get_error_message() ) );
     }
@@ -535,10 +526,7 @@ function onionpress_blog_handle_save_url_post() {
     // the lock, schedule an immediate single event, fire off a non-
     // blocking loopback POST to wp-cron.php to make WP actually run it.
     delete_option( ONIONPRESS_BLOG_DAEMON_LOCK );
-    delete_transient( 'doing_cron' );
-    wp_schedule_single_event( time(), ONIONPRESS_BLOG_CRON_HOOK );
-    $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
-    wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+    onionpress_social_run_now( ONIONPRESS_BLOG_CRON_HOOK );
 
     return array(
         'level'   => 'success',
@@ -799,7 +787,7 @@ function onionpress_blog_fetch_posts( $page_num ) {
     $mock = apply_filters( 'onionpress_blog_fetch_posts_mock', null, $page_num );
     if ( $mock !== null ) return $mock;
 
-    $r = onionpress_blog_api_get( $url );
+    $r = onionpress_social_tor_get( $url, 5 );
     if ( is_wp_error( $r ) ) return $r;
     if ( (int) $r['code'] === 400 ) {
         // Inspect body for the standard WP error code.
@@ -823,101 +811,7 @@ function onionpress_blog_fetch_posts( $page_num ) {
     return is_array( $r['json'] ) ? $r['json'] : array();
 }
 
-/**
- * Tor-over-SOCKS HTTP GET via the onionheaven daemon. Same shape as the
- * Mastodon importer's helper: ['code', 'body', 'json', 'headers'] on
- * success, WP_Error on transport failure. Response headers are returned
- * as a lower-cased name => value array so callers can read
- * X-WP-Total / X-WP-TotalPages on REST endpoints.
- */
-function onionpress_blog_api_get( $url ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return new WP_Error( 'no_curl', 'curl extension required for blog import' );
-    }
-    $headers = array();
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 5,
-        CURLOPT_PROXY          => ONIONPRESS_BLOG_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => ONIONPRESS_BLOG_HTTP_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-        CURLOPT_HTTPHEADER     => array( 'Accept: application/json' ),
-        CURLOPT_HEADERFUNCTION => function ( $ch, $line ) use ( &$headers ) {
-            $len = strlen( $line );
-            $parts = explode( ':', $line, 2 );
-            if ( count( $parts ) === 2 ) {
-                $headers[ strtolower( trim( $parts[0] ) ) ] = trim( $parts[1] );
-            }
-            return $len;
-        },
-    ) );
-    $body = curl_exec( $ch );
-    if ( $body === false ) {
-        $err = curl_error( $ch );
-        curl_close( $ch );
-        return new WP_Error( 'curl', $err ?: 'curl failure' );
-    }
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    curl_close( $ch );
-    $json = json_decode( $body, true );
-    return array(
-        'code'    => $code,
-        'body'    => $body,
-        'json'    => is_array( $json ) ? $json : null,
-        'headers' => $headers,
-    );
-}
-
-/**
- * Download a file over Tor into a temp path. Returns the local file
- * path or WP_Error.
- */
-function onionpress_blog_fetch_file( $url, $dest_path ) {
-    $fh = @fopen( $dest_path, 'wb' );
-    if ( ! $fh ) return new WP_Error( 'io', 'open temp failed' );
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_FILE           => $fh,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 5,
-        CURLOPT_PROXY          => ONIONPRESS_BLOG_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => 120,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-    ) );
-    $ok = curl_exec( $ch );
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    $err  = curl_error( $ch );
-    curl_close( $ch );
-    fclose( $fh );
-    if ( ! $ok || $code < 200 || $code >= 300 ) {
-        @unlink( $dest_path );
-        return new WP_Error( 'curl', 'HTTP ' . $code . ' ' . $err );
-    }
-    return $dest_path;
-}
-
 // --- Post mapping -------------------------------------------------------
-
-/**
- * Lookup a local post by its `_source_id`. Returns post ID or 0.
- */
-function onionpress_blog_find_post_by_source_id( $source_id ) {
-    $posts = get_posts( array(
-        'post_type'      => 'post',
-        'meta_key'       => '_source_id',
-        'meta_value'     => $source_id,
-        'post_status'    => 'any',
-        'posts_per_page' => 1,
-        'fields'         => 'ids',
-    ) );
-    return ! empty( $posts ) ? (int) $posts[0] : 0;
-}
 
 /**
  * Import or update one /wp/v2/posts JSON object. Returns
@@ -937,7 +831,7 @@ function onionpress_blog_import_post( $post ) {
     $modified_gmt_raw = (string) ( $post['modified_gmt'] ?? $post['date_gmt'] ?? '' );
     $modified_ts      = $modified_gmt_raw ? strtotime( $modified_gmt_raw . ' UTC' ) : 0;
 
-    $existing_id = onionpress_blog_find_post_by_source_id( $source_id );
+    $existing_id = onionpress_social_find_post_by_source_id( $source_id );
     if ( $existing_id ) {
         $stored_modified = (string) get_post_meta( $existing_id, '_source_modified', true );
         $stored_ts       = $stored_modified ? strtotime( $stored_modified . ' UTC' ) : 0;
@@ -1103,14 +997,10 @@ function onionpress_blog_apply_tags( $post_id, $post ) {
  * <img src> URLs to local paths after each successful sideload.
  */
 function onionpress_blog_sideload_media( $post_id, $post ) {
-    require_once ABSPATH . 'wp-admin/includes/image.php';
-    require_once ABSPATH . 'wp-admin/includes/file.php';
-    require_once ABSPATH . 'wp-admin/includes/media.php';
-
     // Featured image first so it doubles as the thumbnail.
     $featured_url = onionpress_blog_featured_media_url( $post );
     if ( $featured_url !== '' ) {
-        $attach_id = onionpress_blog_sideload_url( $featured_url, $post_id );
+        $attach_id = onionpress_social_sideload_url( $featured_url, $post_id, 'blog-' . $post_id, 'jpg' );
         if ( $attach_id ) {
             set_post_thumbnail( $post_id, $attach_id );
         }
@@ -1127,7 +1017,7 @@ function onionpress_blog_sideload_media( $post_id, $post ) {
         foreach ( array_unique( $m[1] ) as $src ) {
             if ( ! preg_match( '~^https?://~i', $src ) ) continue; // already relative
             if ( isset( $map[ $src ] ) ) continue;
-            $attach_id = onionpress_blog_sideload_url( $src, $post_id );
+            $attach_id = onionpress_social_sideload_url( $src, $post_id, 'blog-' . $post_id, 'jpg' );
             if ( ! $attach_id ) continue;
             $local = (string) wp_get_attachment_url( $attach_id );
             if ( $local !== '' ) {
@@ -1157,46 +1047,6 @@ function onionpress_blog_featured_media_url( $post ) {
     return preg_match( '~^https?://~i', $url ) ? $url : '';
 }
 
-/**
- * Download a single URL via Tor and register it as a WP attachment
- * tied to $post_id. Returns the attachment ID or 0.
- */
-function onionpress_blog_sideload_url( $url, $post_id ) {
-    $ext = strtolower( pathinfo( parse_url( $url, PHP_URL_PATH ) ?? '', PATHINFO_EXTENSION ) );
-    // The source blog picks the URL, and the file goes straight into
-    // uploads without wp_handle_sideload()'s checks: keep only an
-    // extension WordPress accepts for media, never .php and the like.
-    if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) || ! wp_check_filetype( 'x.' . $ext )['ext'] ) {
-        $ext = 'jpg';
-    }
-    $basename = 'blog-' . $post_id . '-' . wp_generate_password( 6, false ) . '.' . $ext;
-    $tmp_path = sys_get_temp_dir() . '/' . $basename;
-    $fetched  = onionpress_blog_fetch_file( $url, $tmp_path );
-    if ( is_wp_error( $fetched ) ) return 0;
-
-    $upload    = wp_upload_dir();
-    $dest_name = wp_unique_filename( $upload['path'], $basename );
-    $dest_path = $upload['path'] . '/' . $dest_name;
-    if ( ! @rename( $tmp_path, $dest_path ) && ! @copy( $tmp_path, $dest_path ) ) {
-        @unlink( $tmp_path );
-        return 0;
-    }
-    @unlink( $tmp_path );
-
-    $filetype = wp_check_filetype( $dest_name );
-    $attach_id = wp_insert_attachment( array(
-        'post_mime_type' => $filetype['type'] ?? 'application/octet-stream',
-        'post_title'     => sanitize_title( pathinfo( $dest_name, PATHINFO_FILENAME ) ),
-        'post_content'   => '',
-        'post_status'    => 'inherit',
-    ), $dest_path, $post_id );
-    if ( is_wp_error( $attach_id ) || ! $attach_id ) return 0;
-
-    $meta = wp_generate_attachment_metadata( $attach_id, $dest_path );
-    wp_update_attachment_metadata( $attach_id, $meta );
-    return (int) $attach_id;
-}
-
 // --- Edits pass ---------------------------------------------------------
 
 /**
@@ -1223,7 +1073,7 @@ function onionpress_blog_run_edits_pass( $host, $deadline ) {
     if ( $mock !== null ) {
         $list = is_array( $mock ) ? $mock : array();
     } else {
-        $r = onionpress_blog_api_get( $url );
+        $r = onionpress_social_tor_get( $url, 5 );
         if ( is_wp_error( $r ) || (int) $r['code'] !== 200 || ! is_array( $r['json'] ) ) {
             return 0;
         }
@@ -1237,7 +1087,7 @@ function onionpress_blog_run_edits_pass( $host, $deadline ) {
         $src_mod = (string) ( $row['modified_gmt'] ?? '' );
         if ( $src_id === '' || $src_mod === '' ) continue;
         $source_id   = 'blog:' . $host . ':' . $src_id;
-        $existing_id = onionpress_blog_find_post_by_source_id( $source_id );
+        $existing_id = onionpress_social_find_post_by_source_id( $source_id );
         if ( ! $existing_id ) continue; // not imported yet; backfill/forward will catch it
         $stored = (string) get_post_meta( $existing_id, '_source_modified', true );
         $src_ts    = strtotime( $src_mod . ' UTC' );
@@ -1249,7 +1099,7 @@ function onionpress_blog_run_edits_pass( $host, $deadline ) {
         }
         // Fetch the full post and update locally.
         $full_url = onionpress_blog_rest_url( '/wp/v2/posts/' . rawurlencode( $src_id ), array( '_embed' => 'true' ) );
-        $rr = onionpress_blog_api_get( $full_url );
+        $rr = onionpress_social_tor_get( $full_url, 5 );
         if ( is_wp_error( $rr ) || (int) $rr['code'] !== 200 || ! is_array( $rr['json'] ) ) continue;
         $r2 = onionpress_blog_update_post( $existing_id, $rr['json'] );
         if ( $r2 === 'updated' ) $updated++;

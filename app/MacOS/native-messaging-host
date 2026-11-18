@@ -1,0 +1,32 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# OnionPress: Copyright (C) 2026 Internet Archive and OnionPress contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# The browser extension's native messaging host (issue #318): what the
+# manifests install_native_messaging writes name as "path". The browser runs
+# it with the user's environment and no Python of the app's; a Mac ships no
+# usable python3, so the host module runs on the MenubarApp's own Python,
+# with the launcher's bundled_python environment (PYTHONSAFEPATH: `-m`
+# would otherwise put the browser's current directory first on sys.path,
+# issue #470). The browser's arguments (Chrome: the caller's origin;
+# Firefox: the manifest's path and the extension's id) are not passed on:
+# the host reads only its messages on stdin.
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+RESOURCES_DIR="$(dirname "$SCRIPT_DIR")/Resources"
+PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources" PYTHONSAFEPATH=1 \
+    exec "$RESOURCES_DIR/MenubarApp/Contents/MacOS/python" -m onionpress.native_messaging_host

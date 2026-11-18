@@ -589,6 +589,56 @@ class TestCookiesAndRedirects(unittest.TestCase):
             resp, body = self.proxy.request("GET", f"http://{ONION}/made", {"Host": ONION})
         self.assertEqual((resp.status, body, resp.getheader("Location")), (201, b"made", None))
 
+    def test_a_sites_redirect_to_its_own_https_is_followed_by_the_proxy(self):
+        """The proxy carries no https: handed to the browser, the redirect
+        comes back as the http URL that made it, and loops."""
+        token = onion_proxy.PROXY_PAGE_TOKEN
+
+        def site(url):
+            if url.startswith("http://"):
+                return 301, {"location": "https://" + url[len("http://"):],
+                             "set-cookie": ["hop=1; path=/"]}, b""
+            return 200, {"content-type": "text/plain", "set-cookie": ["s=2; path=/"]}, b"secure"
+
+        for path, host in ((f"http://{ONION}/a?b=1", ONION),
+                           (f"/proxy/{token}/{ONION}/a?b=1", None)):
+            with self.subTest(path=path):
+                self.fetched.clear()
+                with self._serving(site):
+                    resp, body = self.proxy.request(
+                        "GET", path, {"Host": host, "Cookie": "c=1"} if host else {})
+                self.assertEqual((resp.status, body), (200, b"secure"))
+                self.assertIsNone(resp.getheader("Location"))
+                self.assertEqual(len(resp.msg.get_all("Set-Cookie")), 2)
+                self.assertEqual([url for url, _ in self.fetched],
+                                 [f"http://{ONION}/a?b=1", f"https://{ONION}/a?b=1"])
+        # The cookie goes with the hop (same host).
+        with self._serving(site):
+            self.proxy.request("GET", f"http://{ONION}/c", {"Host": ONION, "Cookie": "c=1"})
+        self.assertEqual(self.fetched[-1], (f"https://{ONION}/c", "c=1"))
+        # A site that never stops is a 502 after HTTPS_HOPS, not a loop.
+        self.fetched.clear()
+        with self._serving(lambda url: (301, {"location": f"https://{ONION}/x"}, b"")
+                           if url.startswith("http://") else
+                           (301, {"location": f"http://{ONION}/x"}, b"")):
+            resp, _ = self.proxy.request("GET", f"http://{ONION}/x", {"Host": ONION})
+        # https -> http goes to the browser (redirect_target), one hop here.
+        self.assertEqual((resp.status, resp.getheader("Location")),
+                         (301, f"http://{ONION}/x"))
+        self.assertEqual(len(self.fetched), 2)
+
+    def test_same_host_https(self):
+        f = onion_proxy.same_host_https
+        base = f"http://{ONION}/dir/page"
+        self.assertEqual(f(f"https://{ONION}/", base), f"https://{ONION}/")
+        self.assertEqual(f(f"https://{ONION}:443/x?y=1#z", base), f"https://{ONION}/x?y=1")
+        for location in (f"https://{self.OTHER}/", f"http://{ONION}/", "/x", "https://example.com/",
+                         f"https://{ONION}:8443/", f"https://u@{ONION}/", f"https://{ONION}/a b",
+                         "//example.com/"):
+            self.assertIsNone(f(location, base), location)
+        # Only the upgrade: an https page's own redirects go to the browser.
+        self.assertIsNone(f(f"https://{ONION}/en/", f"https://{ONION}/"))
+
     def test_redirect_targets(self):
         token = onion_proxy.PROXY_PAGE_TOKEN
         base = f"http://{ONION}/dir/page?q=1"

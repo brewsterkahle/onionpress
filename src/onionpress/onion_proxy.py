@@ -570,6 +570,35 @@ def redirect_target(location, base_url, proxied):
     return f"http://{host}{f':{port}' if port else ''}{path}"
 
 
+# A site's redirect from http to its own https URL is followed here, this
+# many times at most: the proxy carries no https, so redirect_target would
+# send the browser back to the http URL that redirected, for ever.
+HTTPS_HOPS = 3
+
+
+def same_host_https(location, base_url):
+    """The https URL an onion site's *location* names when it is the http
+    site at *base_url* redirecting to its own host over https (default
+    port, no userinfo), else None. That hop is fetched by the proxy
+    (OnionProxyHandler._fetch_following_https); every other redirect goes
+    to the browser through redirect_target."""
+    if any(ord(c) <= 0x20 or ord(c) == 0x7f for c in location):
+        return None
+    try:
+        base = urlparse(base_url)
+        parsed = urlparse(urljoin(base_url, location))
+        port = parsed.port
+    except ValueError:
+        return None
+    if (base.scheme != "http" or parsed.scheme != "https" or port not in (None, 443)
+            or parsed.username or parsed.password):
+        return None
+    host, is_onion, ok = _onion_host(parsed.hostname)
+    if not (is_onion and ok) or host != (base.hostname or "").lower():
+        return None
+    return f"https://{host}{parsed.path or '/'}" + (f"?{parsed.query}" if parsed.query else "")
+
+
 class OnionProxyHandler(BaseHTTPRequestHandler):
     """HTTP forward proxy: .onion via Tor, clearnet direct."""
 
@@ -775,7 +804,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         # Fetch through Tor
         try:
-            status, resp_headers, body = self._fetch_via_php(
+            status, resp_headers, body = self._fetch_following_https(
                 target_url, post_data=post_data, content_type=content_type,
                 head_only=head_only, cookie=cookie
             )
@@ -877,6 +906,26 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self._send_response(502, {'content-type': 'text/html; charset=utf-8',
                                   'cache-control': 'no-store'},
                             body, head_only)
+
+    def _fetch_following_https(self, url, **kw):
+        """_fetch_via_php, with the site's redirect to its own https URL
+        (same_host_https) followed here, HTTPS_HOPS times at most. Every
+        hop's Set-Cookie is kept; only a 307 or 308 keeps a POST's body."""
+        cookies = []
+        for _ in range(HTTPS_HOPS + 1):
+            status, resp_headers, body = self._fetch_via_php(url, **kw)
+            hop = resp_headers.get('set-cookie', ())
+            cookies += [hop] if isinstance(hop, str) else list(hop)
+            location = resp_headers.get('location')
+            url = (same_host_https(location, url)
+                   if location is not None and 300 <= status < 400 else None)
+            if url is None:
+                if cookies:
+                    resp_headers['set-cookie'] = cookies
+                return status, resp_headers, body
+            if status not in (307, 308):
+                kw = dict(kw, post_data=None, content_type=None)
+        raise OSError("the onion site keeps redirecting to https")
 
     def _fetch_via_php(self, url, post_data=None, content_type=None, head_only=False,
                        cookie=''):

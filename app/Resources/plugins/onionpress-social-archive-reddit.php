@@ -32,12 +32,9 @@ const ONIONPRESS_REDDIT_DEEPLINK_URL = 'https://www.reddit.com/settings/data-req
 // feed into the same import_submission/import_comment functions, so
 // dedup on _source_id makes them safely combinable.
 const ONIONPRESS_REDDIT_CRON_HOOK       = 'onionpress_social_reddit_sync';
-// Route through the bulk-outgoing Tor daemon ([[feedback-separate-tor-in-out]]).
-const ONIONPRESS_REDDIT_SOCKS_PROXY     = 'onionheaven:9050';
 // Reddit's official .onion mirror — Tor read-friendly, low captcha risk
 // vs. the clearnet host even with a Tor exit.
 const ONIONPRESS_REDDIT_API_HOST        = 'www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion';
-const ONIONPRESS_REDDIT_HTTP_TIMEOUT    = 45;
 const ONIONPRESS_REDDIT_PAGES_PER_TICK  = 5;   // per feed; ~500 items max per tick
 const ONIONPRESS_REDDIT_PER_PAGE        = 100; // Reddit's listing cap per page
 const ONIONPRESS_REDDIT_TICK_BUDGET_SEC = 25;
@@ -398,7 +395,7 @@ function onionpress_reddit_import_submission( $row ) {
         return 'errors';
     }
     $source_id = 'reddit:t3_' . $rid;
-    if ( onionpress_reddit_find_post_by_source_id( $source_id ) ) {
+    if ( onionpress_social_find_post_by_source_id( $source_id ) ) {
         return 'skipped';
     }
 
@@ -465,7 +462,7 @@ function onionpress_reddit_import_comment( $row ) {
         return 'errors';
     }
     $source_id = 'reddit:t1_' . $rid;
-    if ( onionpress_reddit_find_post_by_source_id( $source_id ) ) {
+    if ( onionpress_social_find_post_by_source_id( $source_id ) ) {
         return 'skipped';
     }
 
@@ -576,18 +573,6 @@ function onionpress_reddit_insert_post( $title, $content, $post_date_gmt, $meta,
     }
 
     return 'imported';
-}
-
-function onionpress_reddit_find_post_by_source_id( $source_id ) {
-    $posts = get_posts( array(
-        'post_type'      => 'post',
-        'meta_key'       => '_source_id',
-        'meta_value'     => $source_id,
-        'post_status'    => 'any',
-        'posts_per_page' => 1,
-        'fields'         => 'ids',
-    ) );
-    return ! empty( $posts ) ? (int) $posts[0] : 0;
 }
 
 /**
@@ -1003,40 +988,12 @@ function onionpress_reddit_fetch_listing( $handle, $feed, $cursor ) {
         return $mock;
     }
 
-    $r = onionpress_reddit_api_get( $url );
+    $r = onionpress_social_tor_get( $url );
     if ( is_wp_error( $r ) ) return $r;
     if ( (int) $r['code'] !== 200 ) {
         return new WP_Error( 'reddit_http', 'HTTP ' . $r['code'] . ' from ' . ONIONPRESS_REDDIT_API_HOST );
     }
     return is_array( $r['json'] ) ? $r['json'] : array( 'data' => array( 'children' => array() ) );
-}
-
-function onionpress_reddit_api_get( $url ) {
-    if ( ! function_exists( 'curl_init' ) ) {
-        return new WP_Error( 'no_curl', 'curl extension required for Reddit sync' );
-    }
-    $ch = curl_init( $url );
-    curl_setopt_array( $ch, array(
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
-        CURLOPT_PROXY          => ONIONPRESS_REDDIT_SOCKS_PROXY,
-        CURLOPT_PROXYTYPE      => CURLPROXY_SOCKS5_HOSTNAME,
-        CURLOPT_TIMEOUT        => ONIONPRESS_REDDIT_HTTP_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => 30,
-        CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
-        CURLOPT_HTTPHEADER     => array( 'Accept: application/json' ),
-    ) );
-    $body = curl_exec( $ch );
-    if ( $body === false ) {
-        $err = curl_error( $ch );
-        curl_close( $ch );
-        return new WP_Error( 'curl', $err ?: 'curl failure' );
-    }
-    $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-    curl_close( $ch );
-    $json = json_decode( $body, true );
-    return array( 'code' => $code, 'body' => $body, 'json' => is_array( $json ) ? $json : null );
 }
 
 /**
@@ -1227,7 +1184,7 @@ function onionpress_reddit_fetch_thread_titles( $link_ids ) {
     $mock = apply_filters( 'onionpress_reddit_fetch_thread_titles_mock', null, $link_ids );
     if ( $mock !== null ) return $mock;
 
-    $r = onionpress_reddit_api_get( $url );
+    $r = onionpress_social_tor_get( $url );
     if ( is_wp_error( $r ) ) return $r;
     if ( (int) $r['code'] !== 200 ) {
         return new WP_Error( 'reddit_http', 'HTTP ' . $r['code'] . ' from /api/info' );

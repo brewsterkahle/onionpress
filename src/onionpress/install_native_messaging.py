@@ -47,14 +47,22 @@ def _find_app_bundle():
     return None
 
 
+# The host in a built app (issue #318): app/MacOS/native-messaging-host, a
+# wrapper that runs onionpress.native_messaging_host on the MenubarApp's
+# Python. The module's own file can never be the path in a bundle: it is a
+# #!/usr/bin/env python3 script, sits in py2app's zip, and a Mac ships no
+# usable python3.
+BUNDLE_HOST = ("Contents", "MacOS", "native-messaging-host")
+
+
 def _host_script_path():
-    """Return the path to the native messaging host script inside the app bundle."""
+    """The path the browsers' manifests name: the bundle's wrapper, None in
+    a bundle without one (an app built before it shipped), and outside a
+    bundle (development) this package's native_messaging_host.py."""
     bundle = _find_app_bundle()
     if bundle:
-        app_path = os.path.join(bundle, "Contents", "Resources", "native-messaging-host.py")
-        if os.path.exists(app_path):
-            return app_path
-    # Fallback for development: use src/ relative to this script
+        host = os.path.join(bundle, *BUNDLE_HOST)
+        return host if os.path.isfile(host) else None
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "native_messaging_host.py")
 
 
@@ -93,13 +101,20 @@ def install(chrome_extension_id=None, log_func=None):
     """
     host_path = _host_script_path()
     installed = []
+    if host_path is None:
+        if log_func:
+            log_func("No native messaging host in this app bundle; "
+                     "browser extension manifests not installed")
+        return installed
 
-    # Ensure the host script is executable
-    try:
-        st = os.stat(host_path)
-        os.chmod(host_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except Exception:
-        pass
+    # A development checkout's script may not be executable; nothing in a
+    # bundle is written (the build makes its wrapper executable).
+    if _find_app_bundle() is None:
+        try:
+            st = os.stat(host_path)
+            os.chmod(host_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except Exception:
+            pass
 
     for browser, directory in BROWSER_DIRS.items():
         try:
