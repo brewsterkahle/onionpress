@@ -127,9 +127,13 @@ def process_releases(conn):
     return count
 
 
-# audit_result for a row whose healthcheck_address is not an onion address:
-# never fetched, and (like confirmed_dead) never a release.
+# audit_result values. No audit result is ever a release (issue #455): only
+# the site's signed /online releases a takeover.
+# A healthcheck_address that is not an onion address: never fetched.
 AUDIT_INVALID_ADDRESS = "invalid_healthcheck_address"
+# Something answered at the healthcheck address; nothing proves it was the site.
+AUDIT_UNSIGNED_ANSWER = "unsigned_answer"
+AUDIT_CONFIRMED_DEAD = "confirmed_dead"
 
 
 def _check_healthcheck(healthcheck_address):
@@ -137,9 +141,10 @@ def _check_healthcheck(healthcheck_address):
 
     Only one v3 onion address, whole, is fetched (onion_address_ok). The
     value comes from the registry, which onionpress-tor and every takeover
-    worker can write as root, and an answer here releases a takeover: a
-    clearnet host (through a Tor exit), a host:port, userinfo or curl's
-    {}/[] URL globbing would let whoever wrote the row decide that answer.
+    worker can write as root: a clearnet host (through a Tor exit), a
+    host:port, userinfo or curl's {}/[] URL globbing would let whoever wrote
+    the row decide the answer. The answer is only logged and recorded; it
+    releases nothing.
     """
     if not onion_address_ok(healthcheck_address, "audit the healthcheck address"):
         return False
@@ -187,40 +192,24 @@ def process_audits(conn):
         return 1
 
     if _check_healthcheck(ha):
-        # False positive — site is actually alive
-        log(f"takeover-worker: FALSE POSITIVE: {ha} (content: {ca}) responded — releasing")
-        conn.execute(
-            "UPDATE registry SET audit_result = 'false_positive', audit_at = ?, "
-            "audit_pending = NULL "
-            "WHERE content_address = ? AND healthcheck_address = ?",
-            (now_str, ca, ha)
-        )
-        db_commit_with_retry(conn)
-        # Release via the local queue manager and update DB
-        ok = _release_local(ca)
-        if ok:
-            conn.execute(
-                "UPDATE registry SET status = 'online', last_released = ?, "
-                "takeover_pending = NULL, release_pending = NULL "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (now_str, ca, ha)
-            )
-            # Decrement assigned_count
-            conn.execute(
-                "UPDATE takeover_containers SET assigned_count = MAX(0, assigned_count - 1) "
-                "WHERE container_name = ?",
-                (CONTAINER_NAME,)
-            )
-            db_commit_with_retry(conn)
+        # An answer at the healthcheck address proves nothing about who
+        # gave it (issue #455): an old backup or the old machine holding
+        # the healthcheck key, or a cached or proxied page, answers too.
+        # So the audit never releases. The site's own /online, signed with
+        # its content key and sent every minute by every client, is what
+        # releases a takeover (release_function in web-server.py).
+        log(f"takeover-worker: {ha} (content: {ca}) answered the audit, "
+            f"unsigned — the takeover stays until the site's signed /online")
+        result = AUDIT_UNSIGNED_ANSWER
     else:
-        # Confirmed dead — clear audit_pending
-        conn.execute(
-            "UPDATE registry SET audit_result = 'confirmed_dead', audit_at = ?, "
-            "audit_pending = NULL "
-            "WHERE content_address = ? AND healthcheck_address = ?",
-            (now_str, ca, ha)
-        )
-        db_commit_with_retry(conn)
+        result = AUDIT_CONFIRMED_DEAD
+    conn.execute(
+        "UPDATE registry SET audit_result = ?, audit_at = ?, "
+        "audit_pending = NULL "
+        "WHERE content_address = ? AND healthcheck_address = ?",
+        (result, now_str, ca, ha)
+    )
+    db_commit_with_retry(conn)
 
     return 1
 

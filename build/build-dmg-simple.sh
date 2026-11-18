@@ -40,8 +40,11 @@ cp "$PROJECT_DIR/app/Info.plist" "$APP_PATH/Contents/"
 cp "$PROJECT_DIR/app/MacOS/onionpress" "$APP_PATH/Contents/MacOS/"
 cp "$PROJECT_DIR/app/MacOS/launcher.sh" "$APP_PATH/Contents/MacOS/"
 cp "$PROJECT_DIR/app/MacOS/torcurl" "$APP_PATH/Contents/MacOS/"
+# The browser extension's native messaging host (issue #318): the path the
+# browsers' manifests name, run on the MenubarApp's Python.
+cp "$PROJECT_DIR/app/MacOS/native-messaging-host" "$APP_PATH/Contents/MacOS/"
 chmod +x "$APP_PATH/Contents/MacOS/onionpress" "$APP_PATH/Contents/MacOS/launcher.sh" \
-         "$APP_PATH/Contents/MacOS/torcurl"
+         "$APP_PATH/Contents/MacOS/torcurl" "$APP_PATH/Contents/MacOS/native-messaging-host"
 
 # Compile Swift launcher from source
 echo "  Compiling launcher from launcher-wrapper.swift..."

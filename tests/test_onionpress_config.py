@@ -335,9 +335,11 @@ class TestPortDetection(unittest.TestCase):
 
         class FakeSocket(real_socket_cls):
             def bind(self, addr):
+                # Every other port is free here whatever this machine
+                # runs: a real bind found a live OnionPress on 18080 and
+                # gave offset 20000.
                 if addr[1] == 8080:
                     raise OSError("address in use (simulated foreign holder)")
-                return super().bind(addr)
 
         with mock.patch("onionpress.ports.socket.socket", FakeSocket):
             pc = detect_port_offset()

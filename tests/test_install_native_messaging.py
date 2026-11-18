@@ -40,22 +40,34 @@ class TestHostScriptPath(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def test_inside_a_bundle(self):
+    def test_inside_a_bundle_it_is_the_bundles_wrapper(self):
         bundle = os.path.join(self.tmp, "OnionPress.app")
         pkg = os.path.join(bundle, "Contents", "Resources", "lib", "python3.14", "onionpress")
         os.makedirs(os.path.join(bundle, "Contents", "MacOS"))
         os.makedirs(pkg)
-        host = os.path.join(bundle, "Contents", "Resources", "native-messaging-host.py")
+        host = os.path.join(bundle, "Contents", "MacOS", "native-messaging-host")
         open(host, "w").close()
         with mock.patch.object(inm, "__file__", os.path.join(pkg, "install_native_messaging.py")):
             self.assertEqual(inm._find_app_bundle(), bundle)
             self.assertEqual(inm._host_script_path(), host)
 
-    def test_a_bundle_without_the_host_falls_back_to_the_package(self):
+    def test_a_bundle_without_the_wrapper_has_no_host(self):
+        # Never the package's .py inside a bundle: nothing on a Mac runs it.
         bundle = os.path.join(self.tmp, "OnionPress.app")
         pkg = os.path.join(bundle, "Contents", "Resources", "onionpress")
         os.makedirs(os.path.join(bundle, "Contents", "MacOS"))
         os.makedirs(pkg)
+        open(os.path.join(pkg, "native_messaging_host.py"), "w").close()
+        log = []
+        with mock.patch.object(inm, "__file__", os.path.join(pkg, "install_native_messaging.py")), \
+                mock.patch.object(inm, "BROWSER_DIRS", {"chrome": os.path.join(self.tmp, "nmh")}):
+            self.assertIsNone(inm._host_script_path())
+            self.assertEqual(inm.install(log_func=log.append), [])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "nmh")))
+        self.assertTrue(any("No native messaging host" in m for m in log))
+
+    def test_outside_a_bundle_it_is_the_packages_script(self):
+        pkg = os.path.join(self.tmp, "src", "onionpress")
         with mock.patch.object(inm, "__file__", os.path.join(pkg, "install_native_messaging.py")):
             self.assertEqual(inm._host_script_path(),
                              os.path.join(pkg, "native_messaging_host.py"))

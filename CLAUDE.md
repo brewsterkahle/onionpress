@@ -250,6 +250,25 @@
   DOCKER_HOST before the first `docker` call (a preset one kept; the unit
   sets no DOCKER_HOST, and must not: a system-Docker install has none).
   `TestPlatformSeams` in `tests/test_linux_daemon.py`.
+- **"Offline" is the host's network, never the stack** (#139): the
+  route check reads the routing table on both platforms (Linux `/proc`,
+  where a reject or `lo` entry is no route: IPv6 always lists one as a
+  default; Mac `route -n get default`: no interface scan, no
+  SCNetworkReachability, no packet, so no Local Network prompt); the
+  daemon's has-internet is `HealthChecker.network_reachable`: that and
+  Tor's control port not saying it reaches no relay
+  (`tor_no_network_reason`: a warned connection-class bootstrap
+  problem, `network-liveness` down, or no OR connection open: a
+  captive portal). No answer from Tor is never offline. Time offline
+  is not time stuck: the clock restarts when the internet comes back.
+  `TestCheckInternetConnectivity`, `TestTorReportsNoNetwork` in
+  `tests/test_onionpress_health.py`, `test_time_offline_does_not_count_towards_stuck`
+  in `tests/test_mac_daemon.py`.
+- T1 (b) (`e2e/test_t1_b_chaos.py`) pauses tor, flaps its networks, and
+  (Linux VM only) takes the default route away and plays a captive
+  portal: no republish, "offline" for the host faults and never for
+  tor paused, never "stuck", available again at the same address.
+  `ChaosTest` in `tests/test_e2e_harness.py`.
 - The watchdog is started only through entrypoint.sh's `supervise_watchdog`
   (a function, not a `*tor-watchdog*` script: hosts signal
   `pgrep -f '[t]or-watchdog'`). `tests/test_tor_watchdog_supervised.py`.
@@ -522,6 +541,19 @@
   processes never write one RotatingLog.
 - `.setup_complete` is written by every completed setup path
   (`setup_logic.mark_setup_complete`). `tests/test_setup_complete_marker.py`.
+- **Ready is not set up**: the start brings Tor up before setup, so the
+  daemon writes `.setup_complete` only for an installed WordPress
+  (`_mark_setup_complete_once_installed`, asked on every ready pass), and
+  a UI's ready steps (the setup window's completion, the first run's
+  browser) wait for the install (`ui_client.ready_steps_due`). A first run
+  that timed out ends like a failed start, ticking no step.
+  `TestSetupCompleteNeedsAnInstalledWordPress` in `tests/test_mac_daemon.py`,
+  `TestReadySteps` in `tests/test_ui_client.py`.
+- **`start_agent` loads the agent again when launchd holds it for another
+  bundle** (`agent_loaded_program`: launchd reads a plist only at
+  bootstrap, and a kickstart of a deleted bundle's job never starts):
+  bootout, then bootstrap, only while it is not running.
+  `TestLaunchdAgent` in `tests/test_mac_daemon.py`.
 - Quit takes the site down unless `QUIT_KEEPS_SITE_RUNNING=yes`. Update and
   uninstall stop the daemon first (on both platforms).
 - **A key import or restore stops no daemon** (#407, as the Mac always
@@ -740,6 +772,16 @@
   `post_title` / `post_excerpt` to the helper (an attachment's
   `sanitize_title` aside); a new importer's titles go through it.
 
+## The Importers Share One Transport (issue #409)
+- **No importer has curl of its own**: every fetch is
+  `onionpress_social_tor_get` / `_fetch_file` (`onionpress-social-archive.php`:
+  socks5h through onionheaven, http(s) only, redirects included), every
+  `_source_id` lookup `onionpress_social_find_post_by_source_id`, every
+  download into uploads `onionpress_social_sideload_url` (the type check)
+  over `onionpress_social_store_upload` (whose only other caller, Twitter,
+  checks each name). `tests/test_social_importer_shared_helpers.py`,
+  `tests/test_uploads_no_php.py`.
+
 ## Importer ZIP Uploads Are Held to Limits (issue #473)
 - The Twitter and Reddit importers take a ZIP from any site administrator
   and used `extractTo` on every member with an allowed extension: no cap
@@ -772,6 +814,10 @@
   locked, time-budgeted, backs off and keeps a failing follow's items.
   wp-cron's loopback goes to `http://localhost/`.
   `tests/test_blogroll_refresh.py`.
+- **A "run it now" kick is `spawn_cron()`** (#409; the importers'
+  `onionpress_social_run_now`), whose loopback that filter sends to
+  localhost: no PHP names `wp-cron.php` in code (`site_url()` is the
+  request's host). `tests/test_cron_kicks_reach_localhost.py`.
 
 ## WordPress Resolves No Name Outside Docker
 - A DNS lookup in the wordpress container is a leak. onionpress-tor-proxy
@@ -1087,6 +1133,10 @@
 - The queue manager socket is 0600 from bind(); every client is root.
   `healthcheck_address` is fetched only if it is one v3 address.
   `tests/test_takeover_worker_hardening.py`.
+- **No audit releases a takeover** (#455): an answer at the healthcheck
+  address is unsigned, so it is only logged (`unsigned_answer`); the one
+  release is the site's own signed `/online`. `AuditNeverReleasesTest` in
+  `tests/test_takeover_worker_hardening.py`.
 
 ## OnionHome Name Registry Volume
 - `onionnames.db` lives on `onionpress-onionnames-data`, mounted by
@@ -1367,9 +1417,30 @@
   `_setup_post_same_origin` also needs `Sec-Fetch-Site: same-origin` when
   it is sent. Absolute-form responses get no CSP: that page is the
   onion's own origin.
-- Fallback pages only link the Wayback Machine, never redirect. Not
-  live-tested on a Mac; the native host likely does not start from a
-  py2app build.
+- **An onion site's `Location` and `Set-Cookie` reach the browser, and its
+  cookies go back** (#323 item 3, auto-login): `onion-forward.php` follows
+  no redirect and hands both back; `redirect_target` keeps only a v3 onion
+  over http(s), as absolute `http://` (forward form) or the tokened
+  `/proxy/` path, else a 3xx is a 502, never followed. The one hop the
+  proxy follows itself is a site's redirect to its own https URL
+  (`same_host_https`, at most `HTTPS_HOPS`): the proxy carries no https,
+  so the browser would be sent back to the URL that redirected. Forward
+  form: cookies
+  pass unchanged (the browser scopes them to the onion). `/proxy/` form:
+  `proxied_set_cookie` prefixes the name per host, puts Path under
+  `/proxy/<token>/<host>`, drops Domain/Secure, `SameSite=Lax`; only that
+  host's prefixed cookies go back (`proxied_request_cookies`). Nothing with
+  a cookie is cached either way. `TestCookiesAndRedirects` in
+  `tests/test_browser_extension.py`.
+- Fallback pages only link the Wayback Machine, never redirect.
+- **The native messaging host in a built app is
+  `Contents/MacOS/native-messaging-host`** (`app/MacOS/`, copied by
+  `build-dmg-simple.sh` and `rebuild-menubar.sh`): it runs
+  `onionpress.native_messaging_host` on the MenubarApp's Python with the
+  launcher's `bundled_python` environment. The manifests never name the
+  package's `.py` inside a bundle (no Python on a Mac runs it); a bundle
+  without the wrapper gets no manifests. Not live-tested on a Mac.
+  `tests/test_native_host_bundle.py`.
 
 ## Cloudflare Tunnel Runs on Both Platforms (issue #352)
 - `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`.
