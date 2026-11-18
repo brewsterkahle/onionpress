@@ -1409,6 +1409,21 @@
   `_setup_post_same_origin` also needs `Sec-Fetch-Site: same-origin` when
   it is sent. Absolute-form responses get no CSP: that page is the
   onion's own origin.
+- **An onion site's `Location` and `Set-Cookie` reach the browser, and its
+  cookies go back** (#323 item 3, auto-login): `onion-forward.php` follows
+  no redirect and hands both back; `redirect_target` keeps only a v3 onion
+  over http(s), as absolute `http://` (forward form) or the tokened
+  `/proxy/` path, else a 3xx is a 502, never followed. The one hop the
+  proxy follows itself is a site's redirect to its own https URL
+  (`same_host_https`, at most `HTTPS_HOPS`): the proxy carries no https,
+  so the browser would be sent back to the URL that redirected. Forward
+  form: cookies
+  pass unchanged (the browser scopes them to the onion). `/proxy/` form:
+  `proxied_set_cookie` prefixes the name per host, puts Path under
+  `/proxy/<token>/<host>`, drops Domain/Secure, `SameSite=Lax`; only that
+  host's prefixed cookies go back (`proxied_request_cookies`). Nothing with
+  a cookie is cached either way. `TestCookiesAndRedirects` in
+  `tests/test_browser_extension.py`.
 - Fallback pages only link the Wayback Machine, never redirect.
 - **The native messaging host in a built app is
   `Contents/MacOS/native-messaging-host`** (`app/MacOS/`, copied by
