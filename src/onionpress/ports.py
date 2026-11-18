@@ -147,17 +147,13 @@ def detect_port_offset(log: Callable[[str], None] | None = None) -> PortConfig:
         busy = None
         for p in (pc.wp_port, pc.socks_port, pc.proxy_port):
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                free = _port_is_free(p)
             except OSError:
                 # Can't even create a socket — give up
                 return PortConfig.from_offset(0)
-            try:
-                s.bind(("127.0.0.1", p))
-            except OSError:
+            if not free:
                 busy = p
-                s.close()
                 break
-            s.close()
         if busy is None:
             return pc
         if log:
@@ -190,14 +186,27 @@ def resolve_port_offset(docker, log: Callable[[str], None] | None = None) -> Por
 
 
 def _port_is_free(port: int) -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    """Whether nothing listens on *port*: the one bind probe.
+
+    The probe sets SO_REUSEADDR, as Docker's own listeners (rootlesskit,
+    docker-proxy, Colima's ssh forward) do, so it answers what their bind
+    will: a plain bind is also refused by the TIME_WAIT sockets a stopped
+    listener's last connections leave (60 s on Linux, more than the wait
+    below), and a local request shortly before a stop and start then moved
+    the site to the next offset. With the option a specific address binds
+    beside a wildcard listener on macOS, so both are tried; a listener on
+    either refuses one of them on both platforms. Raises OSError only when
+    no socket can be made."""
+    for host in ("127.0.0.1", "0.0.0.0"):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+        except OSError:
+            return False
+        finally:
+            s.close()
+    return True
 
 
 def wait_for_previous_port(data_dir: str, *, log: Callable[[str], None] | None = None,

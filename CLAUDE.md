@@ -1368,7 +1368,10 @@
   their own data dir, VM and containers. Extra users offset host ports by
   +10000 each (18080/19050/19077…); container-internal ports never.
 - **Detect ports with a socket bind test, never `lsof`** (it sees only the
-  current user's processes). **`ports.resolve_at_start` is the one rule**
+  current user's processes). The one probe is `ports._port_is_free`:
+  SO_REUSEADDR, on 127.0.0.1 and 0.0.0.0, so a stopped listener's
+  TIME_WAIT sockets are not a holder (`TestThePortProbe` in
+  `tests/test_launcher_env.py`). **`ports.resolve_at_start` is the one rule**
   (#405): a preset `ONIONPRESS_PORT_OFFSET` as it is (#507: a bind probe
   beside this install's own running stack moved a restore to the next
   offset), else the previous instance's port waited for
