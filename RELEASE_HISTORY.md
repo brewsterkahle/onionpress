@@ -80,6 +80,17 @@ images ship with it.
   could say `"tor_bootstrapped": false` about a site that was up (#568).
 - A restore keeps the site on its own port, instead of moving it to
   18080 because its own running site held 8080 (#507).
+- A stop and start soon after someone used the site at localhost no
+  longer moves it to port 18080 (#584). The check for a free port took
+  the last connections of the site it had just stopped for another
+  program.
+- Mac: `onionpress start` over SSH, with nobody logged in at the screen,
+  now runs the daemon too (#233). Before, the site came up with no
+  reachability check, recovery or heartbeat. `onionpress daemon status`
+  says "running without launchd" for it.
+- Chrome and Brave accept the extension's helper: the extension now has
+  one fixed ID, which the app names (#318). Reload the unpacked
+  extension after updating.
 - Mac: the app starts its VM through the same code as `onionpress
   start` (#545). A new install's VM gets 2 GB of memory (was 1 GB), and
   every start gets the VM recovery and disk check.
