@@ -24,6 +24,7 @@ Static checks: the scripts need macOS or a release to run for real.
 import glob
 import os
 import re
+import sys
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -83,6 +84,42 @@ class DebIsRootOwned(unittest.TestCase):
             self.assertIn('"${ROOT_OWNED[@]}"', line)
         self.assertIn("--owner=root:0 --group=root:0", self.code)  # GNU tar
         self.assertIn("--uid 0 --gid 0 --uname root --gname root", self.code)  # bsdtar
+
+    def test_manual_assembly_writes_no_pax_headers(self):
+        # bsdtar writes a file's xattrs (com.apple.provenance) as PAX 'x'
+        # headers, and dpkg refuses the package: "unsupported PAX tar
+        # header type 'x'" (the 2.7.0 test build). COPYFILE_DISABLE only
+        # stops the `._` members.
+        for flag in ("--no-xattrs", "--no-acls", "--no-fflags", "--no-mac-metadata",
+                     "--format gnutar"):
+            self.assertIn(flag, self.code, f"{LINUX_BUILD}'s bsdtar needs {flag}")
+
+    @unittest.skipUnless(sys.platform == "darwin", "bsdtar and xattrs are a Mac's")
+    def test_bsdtar_with_those_flags_writes_plain_headers(self):
+        import subprocess
+        import tarfile
+        import tempfile
+        work = tempfile.mkdtemp(prefix="op-debtar-")
+        self.addCleanup(__import__("shutil").rmtree, work, True)
+        src = os.path.join(work, "root")
+        os.makedirs(src)
+        f = os.path.join(src, "file")
+        with open(f, "w") as fh:
+            fh.write("x")
+        subprocess.run(["xattr", "-w", "com.apple.provenance", "test", f], check=True)
+        out = os.path.join(work, "data.tar.gz")
+        subprocess.run(["tar", "--uid", "0", "--gid", "0", "--uname", "root", "--gname", "root",
+                        "--no-xattrs", "--no-acls", "--no-fflags", "--no-mac-metadata",
+                        "--format", "gnutar", "-czf", out, "."],
+                       cwd=src, check=True, env={**os.environ, "COPYFILE_DISABLE": "1"})
+        import gzip
+        with gzip.open(out) as g:
+            first = g.read(512)
+        self.assertEqual(first[257:265], b"ustar  \0", "not GNU tar's header")
+        with tarfile.open(out) as t:
+            for m in t.getmembers():
+                self.assertEqual(m.pax_headers, {}, m.name)
+                self.assertEqual((m.uid, m.gid), (0, 0), m.name)
 
 
 class ReleaseAppIsUniversal(unittest.TestCase):

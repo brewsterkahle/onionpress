@@ -372,7 +372,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.6.1"
+        self.version = "2.7.0"
 
         # The environment of this process's children: the launcher (which
         # sets its own) runs the bundled docker against this install's VM.
