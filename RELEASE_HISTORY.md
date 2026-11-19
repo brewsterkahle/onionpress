@@ -9,7 +9,7 @@ has none.
 Each section's heading is `## X.Y.Z — YYYY-MM-DD`. Full lists of changes are
 on each [GitHub release](https://github.com/brewsterkahle/onionpress/releases).
 
-## 2.7.0 — 2026-11-06
+## 2.7.0 — 2026-11-18
 
 Linux now runs the same background daemon as the Mac, and both apps hand
 all their work to the one `onionpress` command. Fresh tor and WordPress
