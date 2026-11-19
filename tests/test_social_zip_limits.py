@@ -29,9 +29,13 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from php_ext import php_with  # noqa: E402
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLUGINS = os.path.join(PROJECT_ROOT, "app/Resources/plugins")
@@ -200,7 +204,7 @@ def _member(zf, name, data=b"x", mode=None, method=zipfile.ZIP_DEFLATED):
     zf.writestr(info, data)
 
 
-@unittest.skipUnless(shutil.which("php"), "php not installed")
+@unittest.skipUnless(*php_with("zip"))
 class TestExtractionRuns(unittest.TestCase):
     """The plugin's checks and extractor under php, on archives built
     here."""

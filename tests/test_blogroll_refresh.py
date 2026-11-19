@@ -29,8 +29,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from php_ext import PHP, php_with  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGINS = os.path.join(ROOT, "app", "Resources", "plugins")
@@ -38,7 +42,6 @@ BLOGROLL = os.path.join(PLUGINS, "onionpress-blogroll.php")
 TOR_PROXY = os.path.join(PLUGINS, "onionpress-tor-proxy.php")
 SETTINGS = os.path.join(PLUGINS, "onionpress-settings.php")
 THEME = os.path.join(ROOT, "app", "Resources", "themes", "onionpress")
-PHP = shutil.which("php")
 
 
 def _read(path):
@@ -346,7 +349,7 @@ FEED_B = f"http://{B}/feed/"
 FEED_C = f"http://{C}/feed/"
 
 
-@unittest.skipUnless(PHP, "php not installed")
+@unittest.skipUnless(*php_with("curl"))
 class TestUnderPhp(unittest.TestCase):
 
     def _run(self, steps, **state):

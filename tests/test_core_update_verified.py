@@ -17,10 +17,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 import zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from php_ext import PHP, php_with  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WP_DIR = os.path.join(ROOT, "app", "Resources", "docker", "wordpress")
@@ -28,7 +32,6 @@ HELPER = os.path.join(WP_DIR, "onionpress-core-update.php")
 AUDIT = os.path.join(WP_DIR, "onionpress-security-audit.sh")
 DOCKERFILE = os.path.join(WP_DIR, "Dockerfile")
 
-PHP = shutil.which("php")
 
 
 def _read(path):
@@ -41,14 +44,6 @@ def _function(src, name):
     assert m, f"no function {name}"
     end = src.index("\n}\n", m.end())
     return src[m.start():end + 3]
-
-
-def _php_has_zip():
-    if not PHP:
-        return False
-    r = subprocess.run([PHP, "-r", 'exit(class_exists("ZipArchive") ? 0 : 1);'],
-                       capture_output=True)
-    return r.returncode == 0
 
 
 class TestWiring(unittest.TestCase):
@@ -119,7 +114,7 @@ class TestPackageUrl(unittest.TestCase):
         self.assertEqual(json.loads(r.stdout), urls)
 
 
-@unittest.skipUnless(_php_has_zip(), "php with the zip extension not installed")
+@unittest.skipUnless(*php_with("zip"))
 class TestZipVerification(unittest.TestCase):
     """op_verify_core_zip on packages built here: the release, a changed
     file, a missing core file, an extra file in wp-includes, and extra
