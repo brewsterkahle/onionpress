@@ -1,8 +1,9 @@
 """T1 (a) — the hardening holds on live containers (docs/E2E-TESTING.md §6,
 "Security properties on live containers").
 
-Read-only: nothing here changes the node, so it runs first among T1's
-modules and needs no Tor waits. Each check stands alone (not
+Read-only but for two single-use login tokens (one redeemed by the
+owner's own request): nothing here changes what the node serves, so it
+runs first among T1's modules and needs no Tor waits. Each check stands alone (not
 incremental): one rule broken says nothing about the others.
 
 - WordPress resolves no name outside Docker (`dns: 127.0.0.1`), and
@@ -18,13 +19,22 @@ incremental): one rule broken says nothing about the others.
 - Only autoheal-proxy and onionheaven-farm mount the Docker socket,
   read-only.
 - The data dir is the user's alone (issue #397).
+- WordPress's xmlrpc.php is refused; the PHP hardening ini is in effect.
+- An auto-login token minted for the owner's browser logs nobody in from
+  the tor container, where every onion visitor arrives from.
+- A plain node puts no hub API (port 8083) on its address (issue #393).
 """
 
 import json
+import os
+import sys
 
 import pytest
 
-from harness import hardening
+from harness import PROJECT_DIR, hardening
+
+sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+from onionpress import auto_login, wp_files  # noqa: E402  (the product's own token and wp-cli rules)
 
 pytestmark = [pytest.mark.tier("t1"), pytest.mark.platform("any")]
 
@@ -127,3 +137,57 @@ def test_data_dir_is_the_users(ready_node, rel, mode):
     r = ready_node.exec(["find", path, "-prune", "-perm", mode])
     listing = ready_node.exec(["ls", "-ld", path]).out.strip()
     assert r.ok and r.out.strip() == path, f"{rel} is not {mode}: {listing}"
+
+
+def test_xmlrpc_refused(ready_node):
+    """onionpress-xmlrpc-block.conf: denied to the owner and to Tor alike."""
+    resp = ready_node.http_local("/xmlrpc.php", method="POST", data="<methodCall/>",
+                                 headers=("Content-Type: text/xml",))
+    assert resp.status == 403, f"xmlrpc.php answered the owner {resp.status}"
+    resp = ready_node.http_from_tor("/xmlrpc.php")
+    assert resp.status == 403, f"xmlrpc.php answered the tor container {resp.status}"
+
+
+def test_php_hardening_in_effect(ready_node):
+    """onionpress-php-hardening.ini (PHP2Shell): session upload progress
+    off, read from the conf.d Apache's PHP loads too."""
+    r = ready_node.docker(["exec", "onionpress-wordpress", "php", "-r",
+                           'echo var_export((bool) ini_get("session.upload_progress.enabled"), true);'])
+    assert r.ok, r.describe()
+    assert r.out.strip() == "false", f"session.upload_progress.enabled is on ({r.out.strip()!r})"
+
+
+def _mint_login_token(node, scope):
+    """A token as `onionpress dashboard` mints it (auto_login.MINT_PHP)."""
+    token = auto_login.new_token()
+    r = node.docker(wp_files.wp_cli_args("eval", auto_login.MINT_PHP, stdin=True),
+                    input=f"{token}\n{scope}\n", timeout=60)
+    assert r.ok, f"could not mint a login token: {r.describe()}"
+    return token
+
+
+def _logged_in(resp):
+    return any("wordpress_logged_in" in c for c in resp.cookies())
+
+
+def test_auto_login_refused_from_tor(ready_node):
+    """A "local" token logs in the owner's browser on the published port
+    (the positive control) and nobody arriving from the tor container,
+    even naming localhost as its Host."""
+    node = ready_node
+    token = _mint_login_token(node, "local")
+    resp = node.http_from_tor(f"/?op_login={token}", headers=("Host: localhost",))
+    assert not _logged_in(resp), "a local auto-login token logged in a request from the tor container"
+    token = _mint_login_token(node, "local")
+    resp = node.http_local(f"/?op_login={token}")
+    assert _logged_in(resp), \
+        f"the owner's own token did not log in ({resp.status}), so the refusal above proves nothing"
+
+
+def test_no_hub_api_on_a_plain_node(ready_node):
+    """The onion service carries the site only: 8083 is mapped onto the
+    address only on a hub or OnionHome (entrypoint.sh, issue #393)."""
+    r = ready_node.docker(["exec", "onionpress-tor", "cat", "/etc/tor/onion-services.json"])
+    assert r.ok, r.describe()
+    services = {s.get("name"): s.get("ports") for s in json.loads(r.out)}
+    assert services.get("wordpress") == ["80,127.0.0.1:8080"], f"the site's service maps {services.get('wordpress')}"

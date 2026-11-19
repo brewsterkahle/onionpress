@@ -15,7 +15,10 @@ checks into "Now automated" and drop it from its section.
   - fresh install, first start, headless `onionpress setup`, admin login
   - the site served locally and over Tor
   - `status` and `address` agree with what Tor serves
-  - stop/start and `onionpress restart` keep the address and the key
+  - stop/start and `onionpress restart` keep the address, the key and
+    WordPress's published port (#507)
+  - `daemon-state.json` is fresh, says running, and names the address
+    and the port docker publishes
   - `install.php` / `setup-config.php` refused from the tor container
     before setup and over Tor after it (#464)
   - no hub registration, and the onionname not registered with
@@ -28,6 +31,18 @@ checks into "Now automated" and drop it from its section.
   - every container's capabilities match the census
   - only autoheal-proxy and onionheaven-farm mount the Docker socket
   - `~/.onionpress` is 0700, and `config` and `secrets` are 0600
+  - `xmlrpc.php` refused; `session.upload_progress` off (PHP2Shell ini)
+  - a local auto-login token logs in on the published port and not from
+    the tor container
+  - a plain node maps only port 80 onto its address, no hub API (#393)
+- **T1(c)** (`e2e/test_t1_c_daemon.py`), the daemon and the watchdog:
+  - `onionpress daemon status` agrees with `daemon-state.json`
+  - Linux: the daemon logs the same `DOCKER_HOST` as `launcher-env`
+    (#503, rootless Docker)
+  - Linux: `kill -9` the daemon → its unit starts a new one, one daemon
+    process afterwards
+  - `daemon offline` is acknowledged
+  - a killed `tor-watchdog.py` is restarted by `supervise_watchdog`
 
 **e2e runs on this plan's commit (2026-11-03, Ubuntu 24.04 guest, rootless
 Docker, `.deb` built from `f2c746a9`, T0 + T1):**
@@ -48,17 +63,17 @@ Docker, `.deb` built from `f2c746a9`, T0 + T1):**
   tor or wordpress image is untested end to end until it is published
   (see §14).
 - The e2e nodes use only the CLI, never a GUI.
-- There is no T1(b)+, T2 or T3 yet: keys, backup/restore, federation,
+- There is no T1(d)+, T2 or T3 yet: keys, backup/restore, federation,
   upgrades and host events are all still manual.
 
 What `docs/E2E-TESTING.md` §8 plans to automate, against this plan:
 
 | Section here | Planned e2e | What stays manual after it lands |
 |---|---|---|
-| §12a Settings page | T1 (b), the page's requests | the page in a browser, the notices, the test archive.org login |
-| §9 onionnames | T1 (c), onionnames | registration against a test OnionHome |
-| §6 key import, §14 damaged keys | T1 (d), keys | the native dialogs, the Settings page import |
-| §5 backup and restore | T1 (e), backup and restore | Mac ↔ Linux, the UIs' dialogs, the page's restore |
+| §12a Settings page | T1 (d), the page's requests | the page in a browser, the notices, the test archive.org login |
+| §9 onionnames | T1 (e), onionnames | registration against a test OnionHome |
+| §6 key import, §14 damaged keys | T1 (f), keys | the native dialogs, the Settings page import |
+| §5 backup and restore | T1 (g), backup and restore | Mac ↔ Linux, the UIs' dialogs, the page's restore |
 | §12 WordPress side | step 4, Playwright | Tor Browser, judging the pages by eye |
 | §9 OnionHeaven | step 5, T2 federation | the probe never asking the hub while opted out (#544) |
 | §1 upgrade, §8 update | step 6, T3 | the Mac's Check for Updates dialog |
@@ -217,11 +232,10 @@ T0 covers the headless path. This is the GUI path and the first-run details.
 
 This is new in this release, and none of it has been run on a real machine.
 
-- [ ] `onionpress daemon status` and the tray agree with
-      `~/.onionpress/daemon-state.json`.
-- [ ] `kill -9` the daemon. systemd restarts it (`Restart=always`). The
-      tray shows "Reconnecting" in between, never "Stopped". Only one
-      daemon process runs afterwards.
+- [ ] The tray agrees with `~/.onionpress/daemon-state.json` (e2e
+      checks `daemon status` against it).
+- [ ] `kill -9` the daemon: the tray shows "Reconnecting" in between,
+      never "Stopped" (e2e checks the restart and the one process).
 - [ ] **#557: the tray's view now comes from `ui_client.status_view`.**
       Stop the daemon unit for more than 90 s
       (`systemctl --user stop onionpress-daemon`):
@@ -242,11 +256,9 @@ This is new in this release, and none of it has been run on a real machine.
       doesn't look broken while it waits.
 - [ ] `onionpress stop`: the log shows `daemon offline` before the
       containers stop. `onionpress restart` does the same.
-- [ ] Rootless `DOCKER_HOST`: run `onionpress launcher-env` and
-      `systemctl --user show onionpress-daemon -p Environment`. The daemon
-      reaches the same socket as the launcher (#503). With system Docker
-      (a Debian install with the user in the `docker` group), it still
-      works without `DOCKER_HOST`.
+- [ ] System Docker (a Debian install with the user in the `docker`
+      group): the daemon works without `DOCKER_HOST` (#503; e2e covers
+      rootless only).
 
 ## 4. The menubar and the tray on one client (#526, P1)
 
@@ -396,8 +408,6 @@ below are the ones that go through `ui_client`'s check/confirm loop.
 - [ ] Mac: an install with a non-default data dir gets its own launchd
       label (`org.onionpress.daemon.<hex>`) and doesn't touch the default
       one's daemon.
-- [ ] Restart while the stack is running: the port stays the same and
-      doesn't move to the next offset (#507).
 
 ## 11. Recovery and host events (P2)
 
@@ -406,7 +416,6 @@ below are the ones that go through `ui_client`'s check/confirm loop.
 - [ ] Mac: hard-stop the VM (`colima stop --force`, or kill the qemu/vz
       process), then start from the menu. The fsck path runs and the site
       comes up.
-- [ ] Kill the tor container's watchdog. It is restarted.
 - [ ] Block Tor for 15+ minutes (pull the network). `RepublishTrigger`
       fires once, within its rate limits, and the address doesn't change.
 - [ ] Soak: leave both platforms running overnight. Next morning, check

@@ -15,9 +15,9 @@ from unittest import mock
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
 
-from harness import chaos, hardening, platforms, proc, safety, scenario  # noqa: E402
-from harness.nodes.base import parse_curl_include, wp_port_from_status  # noqa: E402
-from harness.nodes.linux_vm import LinuxVMNode, guest_template  # noqa: E402
+from harness import chaos, daemon, hardening, platforms, proc, safety, scenario  # noqa: E402
+from harness.nodes.base import parse_curl_include, published_port, wp_port_from_status  # noqa: E402
+from harness.nodes.linux_vm import AS_USER_SH, LinuxVMNode, guest_template  # noqa: E402
 from harness.nodes.mac import MacNode, pick_port_offset  # noqa: E402
 from harness.report import NOT_APPLICABLE, Outcome, RunReport, merge  # noqa: E402
 
@@ -478,6 +478,22 @@ class NodeHelpersTest(unittest.TestCase):
             node.read_file = lambda rel: '{"wp_port": 18080}' if rel == ".onionpress/status.json" else ""
             self.assertEqual(node.wp_port, 18080)
 
+    def test_the_published_port_is_one_port_or_none(self):
+        self.assertEqual(published_port("0.0.0.0:18080\n[::]:18080\n"), 18080)
+        self.assertEqual(published_port("127.0.0.1:8080"), 8080)
+        for text in ("", "Error: No public port '80/tcp' published", "0.0.0.0:8080\n[::]:8081",
+                     "0.0.0.0:x"):
+            with self.subTest(text):
+                self.assertEqual(published_port(text), 0)
+
+    def test_as_user_passes_the_argv_through_unparsed(self):
+        # `sudo -i` joins the argv for the login shell and escapes every
+        # character but `$`: PHP for `wp eval` and `sh -c` scripts arrived
+        # expanded (2026-11-04).
+        code = "\n".join(line for line in AS_USER_SH.splitlines() if not line.startswith("#"))
+        self.assertNotRegex(code, r"sudo\s+-i")
+        self.assertIn('''bash -lc 'cd ~ && exec "$@"' as-user "$@"''', AS_USER_SH)
+
 
 
 def _container(name, service, *, cap_add=(), cap_drop=("ALL",),
@@ -873,6 +889,58 @@ class ChaosTest(unittest.TestCase):
             test = "test_" + name.replace("-", "_")
             self.assertIn(test, marks, f"{name} has no test in T1 (b)")
             self.assertEqual("pytest.mark.platform('linux')" in marks[test], fault.host, test)
+
+
+class DaemonReadingsTest(unittest.TestCase):
+    """T1 (c)'s readings of the daemon and the watchdog (e2e/test_t1_c_daemon.py)."""
+
+    def test_the_freshness_bound_is_the_views(self):
+        sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
+        from onionpress import daemon_client
+        self.assertEqual(daemon.STATE_FRESH, daemon_client.STALE_AFTER_SECONDS)
+
+    def test_pid_file_and_state_age(self):
+        self.assertEqual(daemon.pid_of("4242\n"), 4242)
+        for text in ("", "x", "-1", None):
+            self.assertEqual(daemon.pid_of(text), 0)
+        self.assertEqual(daemon.state_age({"updated_at": 990.5}, 1000), 9.5)
+        self.assertEqual(daemon.state_age({}, 1000), 1000)
+        self.assertEqual(daemon.state_age({"updated_at": "soon"}, 1000), 1000)
+
+    def test_the_daemon_is_the_python_whose_parent_is_none_of_them(self):
+        # The first live run counted the daemon's own `run_cli` helper as
+        # a second daemon (2026-11-04).
+        parents = {100: 1, 200: 100, 300: 200, 400: 7}
+        self.assertEqual(daemon.top_level([100, 200, 300], parents.get), [100])
+        self.assertEqual(daemon.top_level([100, 400], parents.get), [100, 400])
+        self.assertEqual(daemon.top_level([], parents.get), [])
+        self.assertEqual(daemon.parent_pid("Name:\tpython3\nPPid:\t812\nTracerPid:\t0\n"), 812)
+        self.assertEqual(daemon.parent_pid(""), 0)
+
+    def test_the_docker_host_is_the_latest_starts(self):
+        log = ("[2026-11-04 16:53:14] Docker: unix:///run/user/1000/docker.sock\n"
+               "[2026-11-04 16:53:15] Docker version: 26.1.5\n"
+               "[2026-11-04 17:01:07] Docker: unix:///var/run/docker.sock\n")
+        self.assertEqual(daemon.daemon_docker_host(log), "unix:///var/run/docker.sock")
+        self.assertEqual(daemon.daemon_docker_host("nothing here"), "")
+        env = daemon.launcher_env("ONIONPRESS_PORT_OFFSET=0\nDOCKER_HOST=unix:///a=b\nnoise\n")
+        self.assertEqual(env["DOCKER_HOST"], "unix:///a=b")
+        self.assertNotIn("noise", env)
+
+    def test_the_watchdog_listing_does_not_find_itself(self):
+        self.assertNotIn("tor-watchdog.py", daemon.WATCHDOG_PIDS_SH)
+        self.assertEqual(daemon.pids_of("12\n345\n\nx\n"), {12, 345})
+
+    def test_the_ancestry_stops_at_init_and_on_a_mac(self):
+        class Node:
+            platform = "linux"
+
+            def exec(self, argv, timeout=0):
+                pid = int(argv[1].split("/")[2])
+                return proc.Result(argv, 0, f"PPid:\t{ {500: 40, 40: 1}.get(pid, 0) }\n", "", 0)
+        self.assertEqual(daemon.ancestry(Node(), 500), [500, 40, 1])
+        Node.platform = "macos"
+        self.assertEqual(daemon.ancestry(Node(), 500), [500])
 
 
 if __name__ == "__main__":
