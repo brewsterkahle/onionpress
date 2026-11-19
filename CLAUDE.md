@@ -286,6 +286,9 @@
 ## Test suite
 - `make test-unit` (`unittest discover`, uv, Python 3.14, PyNaCl). **No
   pytest**: every test file holds `unittest.TestCase` classes.
+- **A PHP-run test needing an extension skips through
+  `tests/php_ext.php_with("zip")`** (reason names it), never fails on a
+  bare php-cli. `tests/test_php_ext.py`.
 - **On a Mac running OnionPress, set
   `DOCKER_HOST=unix:///var/empty/no-docker-for-tests.sock`** so
   docker-backed tests skip instead of touching the live site.
