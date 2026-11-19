@@ -13,7 +13,8 @@ on each [GitHub release](https://github.com/brewsterkahle/onionpress/releases).
 
 Linux now runs the same background daemon as the Mac, and both apps hand
 all their work to the one `onionpress` command. Fresh tor and WordPress
-images ship with it.
+images ship with it, and MariaDB 13.0.2 and autoheal are re-pinned to
+their current builds.
 
 ### What to do
 - **Linux, if you first installed with 2.6.0 or 2.6.1: take a new backup
