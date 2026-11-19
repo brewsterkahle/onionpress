@@ -123,7 +123,11 @@ class TestRunDaemonCommand(unittest.TestCase):
         return rc, out.getvalue()
 
     def test_serve_is_the_default(self):
-        with mock.patch.object(op_daemon, "Daemon") as D:
+        # A Mac's serve takes the data dir's lock (issue #233): a real dir.
+        self.paths.data_dir = tempfile.mkdtemp(prefix="op-daemon-serve-")
+        self.addCleanup(shutil.rmtree, self.paths.data_dir, True)
+        with mock.patch.object(op_daemon, "Daemon") as D, \
+                mock.patch.object(op_daemon, "detect_os", return_value=op_daemon.OS.MACOS):
             self.assertEqual(self.cmd(None, version="1.2", launcher_script="/l")[0], 0)
         D.assert_called_once_with(self.paths, version="1.2", launcher_script="/l")
         D.return_value.run.assert_called_once()
@@ -427,9 +431,12 @@ class _BindSocket:
     def settimeout(self, t):
         pass
 
+    def setsockopt(self, *a):
+        pass
+
     def bind(self, addr):
         self.bound.append(addr)
-        assert addr[0] == "127.0.0.1"
+        assert addr[0] in ("127.0.0.1", "0.0.0.0")
         left = self.busy.get(addr[1], 0)
         if left is None or left > 0:
             if left:
@@ -494,7 +501,7 @@ class TestResolvePorts(_PathsCase):
         with open(self.sentinel, "w") as f:
             f.write("10000")
         bound = self.resolve(op_config.PortConfig.from_offset(10000), busy={18080: 2})
-        self.assertEqual(bound, [("127.0.0.1", 18080)] * 3)
+        self.assertEqual(bound, [("127.0.0.1", 18080)] * 3 + [("0.0.0.0", 18080)])
         self.assertEqual(self.sleeps, [0.5, 0.5])
         self.assertFalse(os.path.exists(self.sentinel))
 

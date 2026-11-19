@@ -518,6 +518,14 @@
   `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
   The launcher's `stop` runs `daemon offline` before stopping containers;
   `quit` runs `daemon stop` first.
+- **A Mac with no GUI session still gets its daemon** (#233, SSH only):
+  when launchctl refuses the agent, `daemon start` runs the plist's
+  program, environment and logs in a session of its own
+  (`daemon_client.start_detached`); `daemon status` says "without
+  launchd", `daemon stop` TERMs it. A Mac's `daemon serve` takes the data
+  dir's `daemon.lock` before opening a log, and exits 0 when another daemon
+  holds it (launchd leaves it down). Linux's unit takes no lock.
+  `TestNoGuiSession` in `tests/test_mac_daemon.py`.
 - **Labels are per data dir** (#505: launchd's gui domain is per user, and
   a second install on the account took the real daemon for its own):
   `daemon_client.data_dir_label` keeps `org.onionpress.daemon` /
@@ -1360,7 +1368,10 @@
   their own data dir, VM and containers. Extra users offset host ports by
   +10000 each (18080/19050/19077…); container-internal ports never.
 - **Detect ports with a socket bind test, never `lsof`** (it sees only the
-  current user's processes). **`ports.resolve_at_start` is the one rule**
+  current user's processes). The one probe is `ports._port_is_free`:
+  SO_REUSEADDR, on 127.0.0.1 and 0.0.0.0, so a stopped listener's
+  TIME_WAIT sockets are not a holder (`TestThePortProbe` in
+  `tests/test_launcher_env.py`). **`ports.resolve_at_start` is the one rule**
   (#405): a preset `ONIONPRESS_PORT_OFFSET` as it is (#507: a bind probe
   beside this install's own running stack moved a restore to the next
   offset), else the previous instance's port waited for
@@ -1433,6 +1444,11 @@
   package's `.py` inside a bundle (no Python on a Mac runs it); a bundle
   without the wrapper gets no manifests. Not live-tested on a Mac.
   `tests/test_native_host_bundle.py`.
+- **Chrome's manifest names one extension ID, never a wildcard** (Chrome
+  allows none in `allowed_origins`): `extension/manifest.json`'s `key`
+  fixes the ID, `install_native_messaging.CHROME_EXTENSION_ID` is the ID
+  that key gives. Only the public key is kept. `TestChromeExtensionId` in
+  `tests/test_install_native_messaging.py`.
 
 ## Cloudflare Tunnel Runs on Both Platforms (issue #352)
 - `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`.

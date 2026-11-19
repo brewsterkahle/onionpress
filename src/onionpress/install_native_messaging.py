@@ -15,10 +15,12 @@ import stat
 HOST_NAME = "press.onion.onionpress"
 EXTENSION_ID = "press.onion.onionpress"  # Firefox extension ID
 
-# Chrome extension ID will be determined after publishing to Chrome Web Store.
-# During development, use the unpacked extension ID shown in chrome://extensions.
-# This placeholder is updated at install time if a real ID is known.
-CHROME_EXTENSION_ORIGIN = "chrome-extension://*/"
+# The Chrome/Brave extension's ID, fixed by the "key" in extension/manifest.json
+# (the first 32 hex digits of its sha256, 0-f as a-p; test-enforced). Chrome
+# allows no wildcard in allowed_origins (issue #318): without one fixed ID an
+# unpacked extension's ID followed its folder and no manifest could name it.
+# Only the public key is kept: an unpacked extension needs nothing else.
+CHROME_EXTENSION_ID = "gdekagniehdgebolachfnjkcieblkgmc"
 
 # Directories where each browser looks for native messaging host manifests (macOS)
 BROWSER_DIRS = {
@@ -68,7 +70,7 @@ def _host_script_path():
 
 def _chrome_manifest(host_path, chrome_extension_id=None):
     """Build a Chrome/Brave native messaging host manifest."""
-    origin = f"chrome-extension://{chrome_extension_id}/" if chrome_extension_id else CHROME_EXTENSION_ORIGIN
+    origin = f"chrome-extension://{chrome_extension_id or CHROME_EXTENSION_ID}/"
     return {
         "name": HOST_NAME,
         "description": "OnionPress – browse .onion sites in any browser",
@@ -93,7 +95,8 @@ def install(chrome_extension_id=None, log_func=None):
     """Install native messaging manifests for all supported browsers.
 
     Args:
-        chrome_extension_id: Optional Chrome Web Store extension ID.
+        chrome_extension_id: Optional Chrome Web Store extension ID, in
+            place of the unpacked extension's CHROME_EXTENSION_ID.
         log_func: Optional logging function (e.g., app.log).
 
     Returns:

@@ -4,6 +4,8 @@ the menubar registers the browser extension's native messaging host
 manifest for Chrome, Brave and Firefox at first launch. The browser
 folders are redirected into a temporary directory here."""
 
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -18,12 +20,12 @@ from onionpress import install_native_messaging as inm  # noqa: E402
 
 
 class TestManifests(unittest.TestCase):
-    def test_chrome_without_a_store_id_allows_any_extension(self):
+    def test_chrome_without_a_store_id_names_the_unpacked_extension(self):
         m = inm._chrome_manifest("/x/host.py")
         self.assertEqual(m["name"], inm.HOST_NAME)
         self.assertEqual(m["path"], "/x/host.py")
         self.assertEqual(m["type"], "stdio")
-        self.assertEqual(m["allowed_origins"], ["chrome-extension://*/"])
+        self.assertEqual(m["allowed_origins"], [f"chrome-extension://{inm.CHROME_EXTENSION_ID}/"])
 
     def test_chrome_with_a_store_id(self):
         m = inm._chrome_manifest("/x/host.py", "abcdefghijklmnop")
@@ -33,6 +35,38 @@ class TestManifests(unittest.TestCase):
         m = inm._firefox_manifest("/x/host.py")
         self.assertEqual(m["allowed_extensions"], [f"{inm.EXTENSION_ID}@onionpress"])
         self.assertNotIn("allowed_origins", m)
+
+
+class TestChromeExtensionId(unittest.TestCase):
+    """Chrome and Brave allow no wildcard in allowed_origins (issue #318),
+    so the extension's ID is fixed by its manifest's "key" and the installer
+    names exactly that ID."""
+
+    def _manifest(self, rel):
+        with open(os.path.join(os.path.dirname(__file__), "..", rel)) as f:
+            return json.load(f)
+
+    def test_the_id_is_the_one_the_manifests_key_gives(self):
+        der = base64.b64decode(self._manifest("extension/manifest.json")["key"], validate=True)
+        # A SubjectPublicKeyInfo (SEQUENCE) holding rsaEncryption's OID.
+        self.assertEqual(der[0], 0x30)
+        self.assertIn(bytes.fromhex("2a864886f70d010101"), der[:32])
+        digest = hashlib.sha256(der).hexdigest()[:32]
+        self.assertEqual(inm.CHROME_EXTENSION_ID,
+                         "".join(chr(ord("a") + int(c, 16)) for c in digest))
+
+    def test_every_chrome_origin_is_exact(self):
+        for store_id in (None, "abcdefghijklmnopabcdefghijklmnop"):
+            origins = inm._chrome_manifest("/x/host", store_id)["allowed_origins"]
+            self.assertEqual(len(origins), 1)
+            self.assertRegex(origins[0], r"^chrome-extension://[a-p]{32}/$")
+            self.assertNotIn("*", origins[0])
+
+    def test_firefox_keeps_its_own_id_and_no_key(self):
+        manifest = self._manifest("extension-firefox/manifest.json")
+        self.assertNotIn("key", manifest)
+        self.assertEqual(manifest["browser_specific_settings"]["gecko"]["id"],
+                         inm._firefox_manifest("/x")["allowed_extensions"][0])
 
 
 class TestHostScriptPath(unittest.TestCase):
@@ -105,7 +139,8 @@ class TestInstallUninstall(unittest.TestCase):
             if browser == "firefox":
                 self.assertIn("allowed_extensions", manifest)
             else:
-                self.assertEqual(manifest["allowed_origins"], ["chrome-extension://*/"])
+                self.assertEqual(manifest["allowed_origins"],
+                                 [f"chrome-extension://{inm.CHROME_EXTENSION_ID}/"])
         self.assertEqual(len(self.log), 3)
 
     def test_install_with_a_chrome_id(self):
